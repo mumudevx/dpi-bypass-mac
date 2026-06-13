@@ -16,7 +16,7 @@ name = "cloudflare-udp"
 
 [strategy]
 transformers = []
-emitter      = "split-at-sni"
+emitter      = "tls-record-frag"
 frag_window  = 1
 
 [filter]

@@ -23,11 +23,11 @@ func (fakeTTL) Name() string { return "fake-ttl" }
 func (f fakeTTL) Emit(ctx context.Context, conn Conn, data []byte, meta *Meta) error {
 	inj := conn.RawInjector()
 	if inj == nil {
-		return splitAtSNI{}.Emit(ctx, conn, data, meta)
+		return tlsRecordFrag{}.Emit(ctx, conn, data, meta)
 	}
 	src, dst := inj.Endpoints()
 	if !dst.Addr().Is4() || !src.Addr().Is4() {
-		return splitAtSNI{}.Emit(ctx, conn, data, meta)
+		return tlsRecordFrag{}.Emit(ctx, conn, data, meta)
 	}
 	ttl := f.ttl
 	if ttl <= 0 {
@@ -57,11 +57,11 @@ func (fakeSeq) Name() string { return "fake-seq" }
 func (f fakeSeq) Emit(ctx context.Context, conn Conn, data []byte, meta *Meta) error {
 	inj := conn.RawInjector()
 	if inj == nil {
-		return splitAtSNI{}.Emit(ctx, conn, data, meta)
+		return tlsRecordFrag{}.Emit(ctx, conn, data, meta)
 	}
 	src, dst := inj.Endpoints()
 	if !dst.Addr().Is4() || !src.Addr().Is4() {
-		return splitAtSNI{}.Emit(ctx, conn, data, meta)
+		return tlsRecordFrag{}.Emit(ctx, conn, data, meta)
 	}
 	seg := buildIPv4TCP(segParams{
 		src:     src,

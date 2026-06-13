@@ -91,9 +91,14 @@ panic). If the process is killed with `kill -9`, run `dpb doctor` to restore.
 
 | Profile  | DNS                                   | Strategy                         |
 |----------|---------------------------------------|----------------------------------|
-| `global` | Cloudflare DoH (+UDP)                 | `split-at-sni`, window 1         |
-| `turkey` | Cloudflare DoH → Yandex UDP → Google  | `host-case` → `split-at-sni`, window 2 |
-| `turkey-superonline` | Cloudflare DoH → Yandex UDP | `fake-ttl` (needs `--mode tun`); falls back to SNI split in proxy mode |
+| `global` | Cloudflare DoH (+UDP)                 | `tls-record-frag`                |
+| `turkey` | Cloudflare DoH → Yandex UDP → Google  | `host-case` → `tls-record-frag`  |
+| `turkey-superonline` | Cloudflare DoH → Yandex UDP | `fake-ttl` (needs `--mode tun`); falls back to record fragmentation in proxy mode |
+
+> **Why `tls-record-frag` is the default:** verified against a live Turkish ISP,
+> plain TCP-segment splitting (`split-at-sni`) is defeated — the DPI reassembles
+> TCP. Fragmenting the ClientHello across **multiple TLS records** is not
+> reassembled and gets through (DNS poisoning is handled separately by DoH).
 
 Create your own by copying a built-in into `~/.config/dpb/config.toml`:
 

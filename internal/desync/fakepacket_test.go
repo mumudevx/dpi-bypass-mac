@@ -93,17 +93,27 @@ func TestFakeSeqUsesWrongSequence(t *testing.T) {
 }
 
 func TestFakePacketFallsBackWithoutInjector(t *testing.T) {
-	// No injector (proxy mode): fake-ttl must degrade to an SNI split, not no-op.
+	// No injector (proxy mode): fake-ttl must degrade to TLS record
+	// fragmentation — not a no-op, and without corrupting the handshake.
 	conn := &injConn{injector: nil}
 	e, _ := New(Spec{Emitter: "fake-ttl"})
 	data := buildClientHello("example.com")
 	if err := e.Apply(context.Background(), conn, data, 443); err != nil {
 		t.Fatal(err)
 	}
-	if len(conn.writes) != 2 {
-		t.Fatalf("fallback split produced %d writes, want 2", len(conn.writes))
+	out := bytes.Join(conn.writes, nil)
+	r1Len, ok := recordLength(out)
+	if !ok || out[0] != recordTypeHandshake {
+		t.Fatal("fallback did not produce a TLS record")
 	}
-	if !bytes.Equal(bytes.Join(conn.writes, nil), data) {
-		t.Fatal("fallback corrupted the stream")
+	rest := out[5+r1Len:]
+	if len(rest) < 5 || rest[0] != recordTypeHandshake {
+		t.Fatal("expected a second handshake record from record fragmentation")
+	}
+	origLen, _ := recordLength(data)
+	r2Len, _ := recordLength(rest)
+	reassembled := append(append([]byte{}, out[5:5+r1Len]...), rest[5:5+r2Len]...)
+	if !bytes.Equal(reassembled, data[5:5+origLen]) {
+		t.Fatal("fallback corrupted the handshake payload")
 	}
 }

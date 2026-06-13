@@ -33,7 +33,7 @@ func TestTurkeyProfileShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Strategy.Emitter != "split-at-sni" {
+	if p.Strategy.Emitter != "tls-record-frag" {
 		t.Errorf("emitter = %q", p.Strategy.Emitter)
 	}
 	if len(p.Strategy.Transformers) != 1 || p.Strategy.Transformers[0] != "host-case" {

@@ -27,7 +27,7 @@ name = "google"
 
 [strategy]
 transformers = ["host-case"]
-emitter      = "split-at-sni"
+emitter      = "tls-record-frag"
 frag_window  = 2
 
 [filter]

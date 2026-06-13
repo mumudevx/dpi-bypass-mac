@@ -56,7 +56,10 @@ func New(spec Spec) (*Engine, error) {
 	}
 	emitterName := spec.Emitter
 	if emitterName == "" {
-		emitterName = "split-at-sni"
+		// TLS record fragmentation is the strongest general default: it defeats
+		// DPI that reassembles TCP segments (e.g. Turkish ISPs) where plain
+		// TCP-segment splitting fails. Verified against a real TR connection.
+		emitterName = "tls-record-frag"
 	}
 	em, err := newEmitter(emitterName, spec)
 	if err != nil {
