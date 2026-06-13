@@ -60,6 +60,9 @@ dpb run --profile turkey
 # Global default
 dpb run --profile global
 
+# Transparent mode: capture ALL TCP (even apps that ignore the proxy) — root
+sudo dpb run --mode tun --profile turkey
+
 # Don't touch system settings — point your browser at 127.0.0.1:8080 yourself
 dpb run --profile global --no-set-proxy
 
@@ -90,6 +93,7 @@ panic). If the process is killed with `kill -9`, run `dpb doctor` to restore.
 |----------|---------------------------------------|----------------------------------|
 | `global` | Cloudflare DoH (+UDP)                 | `split-at-sni`, window 1         |
 | `turkey` | Cloudflare DoH → Yandex UDP → Google  | `host-case` → `split-at-sni`, window 2 |
+| `turkey-superonline` | Cloudflare DoH → Yandex UDP | `fake-ttl` (needs `--mode tun`); falls back to SNI split in proxy mode |
 
 Create your own by copying a built-in into `~/.config/dpb/config.toml`:
 
@@ -122,7 +126,8 @@ dpb run --profile turkey --emitter tls-record-frag   # then another
 ```
 
 Available emitters: `split-at-sni`, `split-at-offset`, `multi-split`,
-`tls-record-frag`. Available transformers: `host-case`, `host-dot`.
+`tls-record-frag`, and (TUN-only) `fake-ttl`, `fake-seq`. Available
+transformers: `host-case`, `host-dot`.
 
 ## Verifying it works
 
@@ -140,15 +145,36 @@ sudo tcpdump -i en0 -n 'tcp port 443 and host <server-ip>'
 # look for the ClientHello arriving as 2+ TCP segments
 ```
 
+## Modes
+
+| Mode | Scope | Privileges | Fake-packet desync |
+|------|-------|------------|--------------------|
+| `proxy` (default) | apps that honour the system/manual proxy | none | no (degrades to SNI split) |
+| `tun` | **all** TCP, incl. apps that ignore the proxy | root (`sudo`) | yes |
+
+`tun` mode brings up a `utun` device fed into a userspace TCP/IP stack
+(gVisor), captures all TCP via a split-default route, relays each flow to its
+real destination bound to the physical uplink (`IP_BOUND_IF`, no loop), and
+applies the same desync engine — plus packet-level fake-packet emitters. Routes
+are torn down on exit; closing the utun also drops them, so a hard kill
+self-heals (run `dpb doctor` to be sure).
+
 ## Limitations & roadmap
 
-- **Proxy scope.** Only traffic that honours the system proxy (or your manual
-  proxy setting) is affected. Apps with hardcoded DNS or their own VPN bypass it.
-- **No fake-packet desync yet.** GoodbyeDPI's `-5..-9` fake-packet modes
-  (low-TTL / wrong-seq / wrong-checksum) need raw packet injection, which on
-  macOS requires a TUN interface + userspace netstack. That **transparent TUN
-  mode** (catching *all* TCP, with desync) is the next milestone — the desync
-  engine is already interception-independent, so those strategies will drop in.
+- **Proxy scope.** In proxy mode, only traffic that honours the system proxy is
+  affected. Use `--mode tun` to catch everything.
+- **Fake-packet desync is experimental.** The `fake-ttl` / `fake-seq` emitters
+  craft and inject decoy packets via a raw socket in TUN mode. The packet
+  building and emitter logic are unit-tested, but on-wire efficacy depends on
+  the ISP's DPI and on macOS NIC offload (which may "fix" a deliberately bad
+  checksum); validate on the target network. The exact-sequence fake (mirroring
+  GoodbyeDPI autottl precisely) needs a netstack-owned upstream and is a
+  follow-up.
+- **TUN DNS.** In TUN mode the app does its own DNS, so pair it with an
+  encrypted-DNS setting (or proxy mode) to also defeat DNS poisoning;
+  intercepting UDP 53 inside the tunnel is a planned enhancement.
+- **IPv4 fakes.** Fake-packet crafting is IPv4-only; IPv6 flows fall back to an
+  SNI split.
 
 ## Development
 

@@ -39,7 +39,7 @@ func newRunCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Start the DPI-bypass proxy",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runProxy(cmd, f)
+			return runDpb(cmd, f)
 		},
 	}
 	fl := cmd.Flags()
@@ -58,14 +58,10 @@ func newRunCmd() *cobra.Command {
 	return cmd
 }
 
-func runProxy(cmd *cobra.Command, f *runFlags) error {
+func runDpb(cmd *cobra.Command, f *runFlags) error {
 	log := logx.New(f.verbose)
 
-	if f.mode == "tun" {
-		return fmt.Errorf("tun mode is not yet available in this release; use --mode proxy " +
-			"(transparent TUN + fake-packet desync is the next milestone)")
-	}
-	if f.mode != "proxy" {
+	if f.mode != "proxy" && f.mode != "tun" {
 		return fmt.Errorf("unknown mode %q (use proxy or tun)", f.mode)
 	}
 
@@ -73,10 +69,16 @@ func runProxy(cmd *cobra.Command, f *runFlags) error {
 	if err != nil {
 		return err
 	}
-
 	engine, err := desync.New(prof.ToSpec())
 	if err != nil {
 		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if f.mode == "tun" {
+		return runTun(ctx, f, prof, engine, log)
 	}
 
 	chain, err := buildResolver(prof, log)
@@ -84,18 +86,13 @@ func runProxy(cmd *cobra.Command, f *runFlags) error {
 		return err
 	}
 
-	ports := desyncPorts(prof.Filter.Ports)
-	opts := proxy.Options{
+	srv := proxy.New(proxy.Options{
 		Resolver:    chain,
 		Apply:       proxy.EngineApply(engine),
-		DesyncPorts: ports,
+		DesyncPorts: desyncPorts(prof.Filter.Ports),
 		SkipHost:    skipHostFunc(prof.Filter.SNISkip),
 		Logf:        log.Debugf,
-	}
-	srv := proxy.New(opts)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	})
 
 	// System proxy lifecycle with guaranteed restore.
 	var pm *sysnet.ProxyManager
