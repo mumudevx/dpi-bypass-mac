@@ -1,0 +1,23 @@
+name = "global"
+description = "Default profile: SNI fragmentation + Cloudflare DoH. Works in most networks."
+
+[dns]
+cache_ttl = "5m"
+
+[[dns.resolvers]]
+type = "doh"
+url  = "https://cloudflare-dns.com/dns-query"
+name = "cloudflare"
+
+[[dns.resolvers]]
+type = "udp"
+url  = "1.1.1.1:53"
+name = "cloudflare-udp"
+
+[strategy]
+transformers = []
+emitter      = "split-at-sni"
+frag_window  = 1
+
+[filter]
+ports = [443, 80]

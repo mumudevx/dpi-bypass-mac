@@ -1,0 +1,34 @@
+name = "turkey"
+description = "Turkey: encrypted DNS (Cloudflare DoH + Yandex fallback) + Host-case + SNI split."
+
+# Turkish ISPs (Turk Telekom, Turkcell Superonline, Vodafone) poison DNS and
+# inspect the TLS SNI. Encrypted DoH defeats the DNS poisoning; splitting the
+# ClientHello inside the SNI defeats the passive SNI inspection. Yandex
+# (77.88.8.8) is kept as a fallback because it does not honour TR court blocks,
+# mirroring the SpoofDPI-Turkiye / GoodbyeDPI-Turkey forks.
+
+[dns]
+cache_ttl = "5m"
+
+[[dns.resolvers]]
+type = "doh"
+url  = "https://cloudflare-dns.com/dns-query"
+name = "cloudflare"
+
+[[dns.resolvers]]
+type = "udp"
+url  = "77.88.8.8:53"
+name = "yandex-udp"
+
+[[dns.resolvers]]
+type = "doh"
+url  = "https://dns.google/dns-query"
+name = "google"
+
+[strategy]
+transformers = ["host-case"]
+emitter      = "split-at-sni"
+frag_window  = 2
+
+[filter]
+ports = [443, 80]
