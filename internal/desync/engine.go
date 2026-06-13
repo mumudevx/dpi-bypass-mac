@@ -34,6 +34,7 @@ type Spec struct {
 	SplitSizes   []int    // for multi-split
 	FragWindow   int      // SpoofDPI-style: bytes before the first split point
 	FakeTTL      int      // for fake-packet emitters (TUN only)
+	FakeSNI      string   // decoy SNI for fake-packet emitters
 }
 
 // Engine applies a transformer chain followed by a single emitter.
@@ -116,6 +117,10 @@ func newEmitter(name string, spec Spec) (Emitter, error) {
 		return multiSplit{sizes: spec.SplitSizes, window: spec.FragWindow}, nil
 	case "tls-record-frag":
 		return tlsRecordFrag{window: spec.FragWindow}, nil
+	case "fake-ttl":
+		return fakeTTL{ttl: spec.FakeTTL, decoSNI: spec.FakeSNI}, nil
+	case "fake-seq":
+		return fakeSeq{decoSNI: spec.FakeSNI}, nil
 	default:
 		return nil, fmt.Errorf("unknown emitter %q", name)
 	}
@@ -123,7 +128,10 @@ func newEmitter(name string, spec Spec) (Emitter, error) {
 
 // KnownEmitters / KnownTransformers power `dpb profiles` validation and help.
 func KnownEmitters() []string {
-	return []string{"split-at-offset", "split-at-sni", "multi-split", "tls-record-frag"}
+	return []string{
+		"split-at-offset", "split-at-sni", "multi-split", "tls-record-frag",
+		"fake-ttl", "fake-seq",
+	}
 }
 
 func KnownTransformers() []string {

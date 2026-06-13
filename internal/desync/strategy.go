@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/netip"
 )
 
 // ErrUnsupported is returned by Conn methods a given interception layer cannot
@@ -40,11 +41,16 @@ type Conn interface {
 }
 
 // RawInjector emits a crafted TCP segment directly onto the wire, bypassing the
-// netstack's own sequencing. Used by packet-level fake desync (TUN only).
+// kernel socket's own sequencing. Used by packet-level fake desync (TUN only).
 type RawInjector interface {
-	// InjectSegment writes an already-framed TCP segment (with chosen seq,
+	// InjectSegment writes an already-framed IPv4+TCP segment (with chosen seq,
 	// checksum and IP TTL) toward the server.
 	InjectSegment(seg []byte) error
+	// Endpoints returns the real connection's local and remote addresses, used
+	// to craft a fake segment for the same flow.
+	Endpoints() (src, dst netip.AddrPort)
+	// BaseSeq returns a best-effort sequence number to base crafted fakes on.
+	BaseSeq() uint32
 }
 
 // Protocol classifies the first client payload.

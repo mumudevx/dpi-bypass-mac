@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/mumudevx/dpi-bypass-mac/internal/desync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -28,10 +30,16 @@ const nicID = tcpip.NICID(1)
 // uplink (IP_BOUND_IF) so the upstream socket is not routed back into utun.
 type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
+// InjectorFactory builds a RawInjector for a connection's 4-tuple (TUN-only
+// fake-packet desync). It returns a cleanup func; on failure (e.g. no root) it
+// returns a nil injector and the engine degrades to stream-level desync.
+type InjectorFactory func(local, remote netip.AddrPort) (desync.RawInjector, func())
+
 // Options configure the TUN server.
 type Options struct {
 	Device      *Device
-	Apply       func(ctx context.Context, upstream *net.TCPConn, first []byte, dstPort int) error
+	Engine      *desync.Engine
+	NewInjector InjectorFactory
 	Dial        DialFunc
 	DesyncPorts map[int]bool
 	Logf        func(string, ...any)
@@ -120,8 +128,8 @@ func (srv *Server) relay(client *gonet.TCPConn, dstIP net.IP, dstPort int) {
 	n, _ := client.Read(buf)
 	if n > 0 {
 		first := buf[:n]
-		if tcpUp != nil && srv.opt.DesyncPorts[dstPort] && srv.opt.Apply != nil {
-			if err := srv.opt.Apply(context.Background(), tcpUp, first, dstPort); err != nil {
+		if tcpUp != nil && srv.opt.Engine != nil && srv.opt.DesyncPorts[dstPort] {
+			if err := srv.applyDesync(tcpUp, first, dstPort); err != nil {
 				srv.opt.Logf("tun apply %s:%d: %v", dstIP, dstPort, err)
 				return
 			}
@@ -130,6 +138,29 @@ func (srv *Server) relay(client *gonet.TCPConn, dstIP net.IP, dstPort int) {
 		}
 	}
 	pipe(client, upConn)
+}
+
+// applyDesync wraps the upstream socket (with a per-connection RawInjector when
+// available) and runs the desync engine on the first payload.
+func (srv *Server) applyDesync(up *net.TCPConn, first []byte, dstPort int) error {
+	var inj desync.RawInjector
+	cleanup := func() {}
+	if srv.opt.NewInjector != nil {
+		local := toAddrPort(up.LocalAddr())
+		remote := toAddrPort(up.RemoteAddr())
+		if local.IsValid() && remote.IsValid() {
+			inj, cleanup = srv.opt.NewInjector(local, remote)
+		}
+	}
+	defer cleanup()
+	return srv.opt.Engine.Apply(context.Background(), tunConn{up, inj}, first, dstPort)
+}
+
+func toAddrPort(a net.Addr) netip.AddrPort {
+	if t, ok := a.(*net.TCPAddr); ok {
+		return t.AddrPort()
+	}
+	return netip.AddrPort{}
 }
 
 // pipe relays bytes in both directions until either side closes.

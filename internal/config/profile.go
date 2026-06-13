@@ -53,6 +53,7 @@ type StrategyChain struct {
 	SplitSizes   []int    `toml:"split_sizes"`
 	FragWindow   int      `toml:"frag_window"`
 	FakeTTL      int      `toml:"fake_ttl"`
+	FakeSNI      string   `toml:"fake_sni"`
 }
 
 // Filter scopes which connections the desync engine is applied to.
@@ -80,6 +81,7 @@ func (p Profile) ToSpec() desync.Spec {
 		SplitSizes:   p.Strategy.SplitSizes,
 		FragWindow:   p.Strategy.FragWindow,
 		FakeTTL:      p.Strategy.FakeTTL,
+		FakeSNI:      p.Strategy.FakeSNI,
 	}
 }
 

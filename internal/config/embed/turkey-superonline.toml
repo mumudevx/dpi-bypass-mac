@@ -1,0 +1,31 @@
+name = "turkey-superonline"
+description = "Turkcell Superonline: fake-packet (low-TTL) desync. Requires --mode tun (root)."
+
+# Superonline's DPI resists pure fragmentation more than other TR ISPs, so the
+# GoodbyeDPI-Turkey forks ship dedicated fake-packet presets for it. This
+# profile injects a low-TTL decoy ClientHello before the real one. It is only
+# effective in TUN mode (packet injection); in proxy mode it falls back to an
+# SNI split.
+
+[dns]
+cache_ttl = "5m"
+
+[[dns.resolvers]]
+type = "doh"
+url  = "https://cloudflare-dns.com/dns-query"
+name = "cloudflare"
+
+[[dns.resolvers]]
+type = "udp"
+url  = "77.88.8.8:53"
+name = "yandex-udp"
+
+[strategy]
+transformers = []
+emitter      = "fake-ttl"
+fake_ttl     = 6
+fake_sni     = "www.google.com"
+frag_window  = 2
+
+[filter]
+ports = [443, 80]
