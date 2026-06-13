@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Reference LaunchAgent template. `dpb service install` generates this file at
+  ~/Library/LaunchAgents/dev.mumudevx.dpb.plist with the resolved binary path,
+  profile, and port. Edit the placeholders if installing manually.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.mumudevx.dpb</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/dpb</string>
+		<string>run</string>
+		<string>--profile</string>
+		<string>turkey</string>
+		<string>--port</string>
+		<string>8080</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/REPLACE_USER/Library/Logs/dpb.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/REPLACE_USER/Library/Logs/dpb.log</string>
+</dict>
+</plist>

@@ -1,0 +1,82 @@
+version: 2
+
+project_name: dpb
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: dpb
+    main: .
+    binary: dpb
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/mumudevx/dpi-bypass-mac/internal/cli.version={{.Version}}
+      - -X github.com/mumudevx/dpi-bypass-mac/internal/cli.commit={{.Commit}}
+      - -X github.com/mumudevx/dpi-bypass-mac/internal/cli.date={{.Date}}
+    hooks:
+      # Ad-hoc sign so Gatekeeper does not block the unsigned binary outright.
+      post:
+        - cmd: codesign -s - --force --timestamp=none "{{ .Path }}"
+          output: true
+
+universal_binaries:
+  - id: dpb
+    replace: true
+    hooks:
+      post:
+        - cmd: codesign -s - --force --timestamp=none "{{ .Path }}"
+          output: true
+
+archives:
+  - id: dpb
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+brews:
+  - name: dpb
+    repository:
+      owner: mumudevx
+      name: homebrew-tap
+    homepage: "https://github.com/mumudevx/dpi-bypass-mac"
+    description: "macOS DPI bypass CLI (Turkey + global)"
+    license: "MIT"
+    install: |
+      bin.install "dpb"
+    service: |
+      run [opt_bin/"dpb", "run", "--profile", "turkey"]
+      keep_alive true
+      log_path var/"log/dpb.log"
+      error_log_path var/"log/dpb.err.log"
+    caveats: |
+      Proxy mode needs no root. To run the transparent TUN mode (a later
+      release) you will need sudo. Start in the background with:
+        brew services start dpb
+
+release:
+  github:
+    owner: mumudevx
+    name: dpi-bypass-mac
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
