@@ -80,6 +80,44 @@ func TestEnableAndRestore(t *testing.T) {
 	}
 }
 
+// TestEnableIgnoresOwnProxyAsBackup guards the self-poisoning bug: if a prior
+// run left the system proxy pointing at our own host:port (its Restore never
+// ran, or it was hard-killed), a fresh Enable must NOT record that as the
+// "original" state. Otherwise Restore re-enables our own dead listener forever,
+// permanently breaking the internet (survives reboot — it's a system setting).
+func TestEnableIgnoresOwnProxyAsBackup(t *testing.T) {
+	fr := &fakeRunner{responses: map[string]string{
+		// System proxy already points at us — leftover from a prior unclean exit.
+		"-getwebproxy":           "Enabled: Yes\nServer: 127.0.0.1\nPort: 8080\n",
+		"-getsecurewebproxy":     "Enabled: Yes\nServer: 127.0.0.1\nPort: 8080\n",
+		"-getsocksfirewallproxy": "Enabled: No\nServer:\nPort: 0\n",
+	}}
+	state := filepath.Join(t.TempDir(), "backup.json")
+	m := NewProxyManager(ProxyConfig{
+		Runner:    fr,
+		Host:      "127.0.0.1",
+		HTTPPort:  8080,
+		StatePath: state,
+		Services:  []string{"Wi-Fi"},
+	})
+
+	if err := m.Enable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fr.calls = nil // isolate Restore's calls from Enable's
+	m.Restore(context.Background())
+
+	if fr.hasCall("networksetup", "-setwebproxy", "Wi-Fi", "127.0.0.1", "8080") {
+		t.Fatal("Restore re-enabled our own dead proxy (poisoned backup)")
+	}
+	if !fr.hasCall("networksetup", "-setwebproxystate", "Wi-Fi", "off") {
+		t.Fatal("Restore did not turn the web proxy off")
+	}
+	if !fr.hasCall("networksetup", "-setsecurewebproxystate", "Wi-Fi", "off") {
+		t.Fatal("Restore did not turn the secure proxy off")
+	}
+}
+
 func TestParseProxyState(t *testing.T) {
 	st := parseProxyState("Enabled: Yes\nServer: 1.2.3.4\nPort: 9999\nAuthenticated Proxy Enabled: 0\n")
 	if !st.Enabled || st.Server != "1.2.3.4" || st.Port != "9999" {

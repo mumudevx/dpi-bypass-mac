@@ -100,9 +100,9 @@ func (m *ProxyManager) Enable(ctx context.Context) error {
 	for _, svc := range services {
 		b := serviceBackup{
 			Service: svc,
-			Web:     m.getProxy(ctx, "-getwebproxy", svc),
-			Secure:  m.getProxy(ctx, "-getsecurewebproxy", svc),
-			Socks:   m.getProxy(ctx, "-getsocksfirewallproxy", svc),
+			Web:     m.notSelf(m.getProxy(ctx, "-getwebproxy", svc), m.httpPort),
+			Secure:  m.notSelf(m.getProxy(ctx, "-getsecurewebproxy", svc), m.httpPort),
+			Socks:   m.notSelf(m.getProxy(ctx, "-getsocksfirewallproxy", svc), m.socksPort),
 		}
 		m.backups = append(m.backups, b)
 	}
@@ -122,6 +122,19 @@ func (m *ProxyManager) Enable(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// notSelf drops a captured proxy entry that already points at our own listener.
+// A prior dpb run whose Restore never executed (hard kill, crash) leaves the
+// system proxy set to host:port; without this guard Enable would record OUR
+// proxy as the "original" state and Restore would re-enable a dead port forever
+// — a permanent break that even survives a reboot. Treating such an entry as
+// off makes Restore disable the proxy, which is the correct recovery.
+func (m *ProxyManager) notSelf(st proxyState, port int) proxyState {
+	if st.Enabled && st.Server == m.host && st.Port == strconv.Itoa(port) {
+		return proxyState{}
+	}
+	return st
 }
 
 // Restore re-applies the captured proxy state. It is idempotent and safe to call
