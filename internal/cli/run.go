@@ -74,7 +74,10 @@ func runDpb(cmd *cobra.Command, f *runFlags) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// SIGHUP is included so closing the terminal window (which sends SIGHUP, not
+	// SIGINT) still runs the deferred proxy/route teardown instead of hard-killing
+	// the process and leaving the system proxy pointed at our now-dead listener.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
 	if f.mode == "tun" {
