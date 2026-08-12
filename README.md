@@ -21,7 +21,7 @@ combines fragmentation strategies with region profiles in a single static binary
 | Layer | Technique | Defeats |
 |-------|-----------|---------|
 | TLS   | ClientHello fragmentation (split inside the SNI, multi-split, TLS record fragmentation) | passive SNI blocking |
-| DNS   | DNS-over-HTTPS / DoT with a fallback chain and bootstrap IPs | DNS poisoning & hijacking |
+| DNS   | DNS-over-HTTPS / DoT with a fallback chain and bootstrap IPs; in TUN mode UDP 53 is answered from that chain instead of the ISP's resolver | DNS poisoning & hijacking |
 | HTTP  | `Host` header case/dot tricks | plaintext HTTP keyword filters |
 
 The proxy never decrypts your traffic — for HTTPS it tunnels via `CONNECT` and
@@ -60,7 +60,7 @@ dpb run --profile turkey
 # Global default
 dpb run --profile global
 
-# Transparent mode: capture ALL TCP (even apps that ignore the proxy) — root
+# Transparent mode: capture ALL TCP + UDP (even apps that ignore the proxy) — root
 sudo dpb run --mode tun --profile turkey
 
 # Don't touch system settings — point your browser at 127.0.0.1:8080 yourself
@@ -155,14 +155,23 @@ sudo tcpdump -i en0 -n 'tcp port 443 and host <server-ip>'
 | Mode | Scope | Privileges | Fake-packet desync |
 |------|-------|------------|--------------------|
 | `proxy` (default) | apps that honour the system/manual proxy | none | no (degrades to SNI split) |
-| `tun` | **all** TCP, incl. apps that ignore the proxy | root (`sudo`) | yes |
+| `tun` | **all** TCP + UDP, incl. apps that ignore the proxy | root (`sudo`) | yes |
 
 `tun` mode brings up a `utun` device fed into a userspace TCP/IP stack
-(gVisor), captures all TCP via a split-default route, relays each flow to its
-real destination bound to the physical uplink (`IP_BOUND_IF`, no loop), and
-applies the same desync engine — plus packet-level fake-packet emitters. Routes
-are torn down on exit; closing the utun also drops them, so a hard kill
+(gVisor), captures all TCP and UDP via a split-default route, relays each flow
+to its real destination bound to the physical uplink (`IP_BOUND_IF`, no loop),
+and applies the same desync engine — plus packet-level fake-packet emitters.
+Routes are torn down on exit; closing the utun also drops them, so a hard kill
 self-heals (run `dpb doctor` to be sure).
+
+UDP is relayed datagram-for-datagram with a 60-second idle reaper, which is what
+keeps QUIC, WebRTC/voice and game traffic alive for apps that bypass the proxy
+(Discord's updater and voice, for example). Port 53 is the exception: queries are
+answered in-process from the profile's resolver chain instead of being relayed,
+so TUN mode defeats DNS poisoning the same way proxy mode does. Because a
+DHCP-provided resolver sits on-link — where the LAN's subnet route beats the
+split-default — `dpb` also adds a host route per active nameserver (read from
+`scutil --dns`) to pull those queries in.
 
 ## Limitations & roadmap
 
@@ -175,11 +184,13 @@ self-heals (run `dpb doctor` to be sure).
   checksum); validate on the target network. The exact-sequence fake (mirroring
   GoodbyeDPI autottl precisely) needs a netstack-owned upstream and is a
   follow-up.
-- **TUN DNS.** In TUN mode the app does its own DNS, so pair it with an
-  encrypted-DNS setting (or proxy mode) to also defeat DNS poisoning;
-  intercepting UDP 53 inside the tunnel is a planned enhancement.
-- **IPv4 fakes.** Fake-packet crafting is IPv4-only; IPv6 flows fall back to an
-  SNI split.
+- **UDP is relayed, not desynced.** The desync engine reframes a TCP stream, so
+  it does not apply to QUIC. If an ISP blocks a name over QUIC specifically, the
+  practical workaround is still to disable QUIC in the client so it falls back to
+  TCP, where the strategies do apply.
+- **IPv4 only.** Both the capture routes and fake-packet crafting are IPv4;
+  IPv6 flows leave on the physical uplink untouched, and an IPv6-only nameserver
+  is not intercepted. Disable IPv6 on the interface if your ISP poisons it.
 
 ## Development
 

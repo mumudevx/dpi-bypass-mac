@@ -80,13 +80,13 @@ func runDpb(cmd *cobra.Command, f *runFlags) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
-	if f.mode == "tun" {
-		return runTun(ctx, f, prof, engine, log)
-	}
-
 	chain, err := buildResolver(prof, log)
 	if err != nil {
 		return err
+	}
+
+	if f.mode == "tun" {
+		return runTun(ctx, f, prof, engine, chain, log)
 	}
 
 	srv := proxy.New(proxy.Options{

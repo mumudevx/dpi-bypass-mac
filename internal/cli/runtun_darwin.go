@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/mumudevx/dpi-bypass-mac/internal/config"
 	"github.com/mumudevx/dpi-bypass-mac/internal/desync"
+	"github.com/mumudevx/dpi-bypass-mac/internal/dns"
 	"github.com/mumudevx/dpi-bypass-mac/internal/logx"
 	"github.com/mumudevx/dpi-bypass-mac/internal/sysnet"
 	"github.com/mumudevx/dpi-bypass-mac/internal/tun"
@@ -22,9 +24,10 @@ const (
 )
 
 // runTun brings up the transparent TUN datapath: a utun device + gVisor
-// netstack capturing all TCP, with the desync engine (and per-connection raw
-// injector) applied. Requires root.
-func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desync.Engine, log *logx.Logger) error {
+// netstack capturing all TCP and UDP, with the desync engine (and
+// per-connection raw injector) applied to TCP and DNS served from the profile's
+// encrypted resolver chain. Requires root.
+func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desync.Engine, chain *dns.Chain, log *logx.Logger) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("tun mode requires root — re-run with: sudo dpb run --mode tun --profile %s", f.profile)
 	}
@@ -60,12 +63,21 @@ func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desyn
 		_ = dev.Close()
 		return err
 	}
+	// The split-default routes miss an on-link resolver — the LAN's subnet route
+	// is more specific — so a DHCP-provided 192.168.x.1 would keep answering in
+	// the clear. Host routes pull those queries in too, which is the whole point
+	// of shipping DoH.
+	nameservers := sysnet.ActiveNameservers(ctx, runner)
+	if err := rm.CaptureHosts(ctx, nameservers); err != nil {
+		log.Warnf("could not capture system resolvers (%v): %v", nameservers, err)
+	}
 
 	srv, err := tun.NewServer(tun.Options{
 		Device:      dev,
 		Engine:      engine,
 		Dial:        tun.DialFunc(dial),
 		DesyncPorts: desyncPorts(prof.Filter.Ports),
+		DNSExchange: chain.Exchange,
 		NewInjector: func(local, remote netip.AddrPort) (desync.RawInjector, func()) {
 			inj, err := sysnet.NewRawInjector(local, remote, 0)
 			if err != nil {
@@ -81,31 +93,25 @@ func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desyn
 	}
 	defer srv.Close()
 
-	printTunBanner(prof, engine, dev.Name(), iface, f)
+	printTunBanner(prof, engine, chain, dev.Name(), iface, nameservers)
 	<-ctx.Done()
 	fmt.Fprintln(os.Stderr, "\ndpb: stopping, tearing down tun…")
 	return nil
 }
 
-func printTunBanner(prof config.Profile, engine *desync.Engine, ifaceName, uplink string, f *runFlags) {
+func printTunBanner(prof config.Profile, engine *desync.Engine, chain *dns.Chain, ifaceName, uplink string, nameservers []string) {
 	strat := engine.EmitterName()
 	if ts := engine.TransformerNames(); len(ts) > 0 {
-		strat = join(ts, " → ") + " → " + strat
+		strat = strings.Join(ts, " → ") + " → " + strat
+	}
+	captured := "public resolvers only"
+	if len(nameservers) > 0 {
+		captured = strings.Join(nameservers, ", ")
 	}
 	fmt.Fprintf(os.Stderr, "dpb %s  profile=%s  mode=tun\n", version, prof.Name)
 	fmt.Fprintf(os.Stderr, "  Device   %s (uplink %s)\n", ifaceName, uplink)
+	fmt.Fprintf(os.Stderr, "  DNS      %s  (intercepting %s)\n", strings.Join(chain.Labels(), ", "), captured)
 	fmt.Fprintf(os.Stderr, "  Strategy %s  ports=%s\n", strat, portsStr(prof.Filter.Ports))
-	fmt.Fprintf(os.Stderr, "  Capture  all TCP via split-default route (restores on exit)\n")
+	fmt.Fprintf(os.Stderr, "  Capture  all TCP + UDP via split-default route (restores on exit)\n")
 	fmt.Fprintf(os.Stderr, "  Ready. Press Ctrl-C to stop and tear down.\n")
-}
-
-func join(parts []string, sep string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += sep
-		}
-		out += p
-	}
-	return out
 }
