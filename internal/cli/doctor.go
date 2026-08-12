@@ -41,6 +41,18 @@ func newDoctorCmd() *cobra.Command {
 				fmt.Println("✓ no leftover proxy state")
 			}
 
+			// 3. Recover a stale DNS backup. Routes self-heal when the utun
+			// closes, but a redirected resolver survives a hard kill.
+			dnsState := sysnet.DefaultDNSStatePath()
+			if _, err := os.Stat(dnsState); err == nil {
+				fmt.Printf("! found leftover DNS backup (%s) — restoring\n", dnsState)
+				dm := sysnet.NewDNSManager(sysnet.DNSConfig{StatePath: dnsState})
+				dm.Restore(ctx)
+				fmt.Println("✓ restored prior DNS settings")
+			} else {
+				fmt.Println("✓ no leftover DNS state")
+			}
+
 			if !ok {
 				return fmt.Errorf("one or more checks failed")
 			}

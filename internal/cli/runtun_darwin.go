@@ -27,7 +27,7 @@ const (
 // netstack capturing all TCP and UDP, with the desync engine (and
 // per-connection raw injector) applied to TCP and DNS served from the profile's
 // encrypted resolver chain. Requires root.
-func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desync.Engine, chain *dns.Chain, log *logx.Logger) error {
+func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desync.Engine, log *logx.Logger) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("tun mode requires root — re-run with: sudo dpb run --mode tun --profile %s", f.profile)
 	}
@@ -37,7 +37,16 @@ func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desyn
 	if iface == "" {
 		return fmt.Errorf("could not determine the physical uplink interface")
 	}
-	dial, err := sysnet.BoundDialer(iface, 10*time.Second)
+	boundDialer, err := sysnet.BoundNetDialer(iface, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	// The plaintext resolvers dial through the uplink: a fallback query that
+	// left on the default route would be pulled back into the tunnel, land on
+	// serveDNS as ordinary port 53 traffic, and re-enter the chain that issued
+	// it. DoH keeps the default dialer so it still travels through the desync
+	// engine — its own SNI is a censorship target.
+	chain, err := buildResolver(prof, log, boundDialer)
 	if err != nil {
 		return err
 	}
@@ -82,10 +91,28 @@ func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desyn
 		log.Warnf("could not capture system resolvers (%v): %v", nameservers, err)
 	}
 
+	// Point the active service at an address the routes above do cover, so the
+	// queries dpb cannot reach by routing arrive here anyway.
+	dm := sysnet.NewDNSManager(sysnet.DNSConfig{
+		Runner: runner,
+		Logf:   log.Warnf,
+	})
+	if err := dm.Enable(ctx); err != nil {
+		log.Warnf("could not redirect system DNS (%v); queries may stay on the ISP resolver", err)
+		dm = nil
+	}
+	defer func() {
+		if dm != nil {
+			rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			dm.Restore(rctx)
+		}
+	}()
+
 	srv, err := tun.NewServer(tun.Options{
 		Device:      dev,
 		Engine:      engine,
-		Dial:        tun.DialFunc(dial),
+		Dial:        tun.DialFunc(boundDialer.DialContext),
 		DesyncPorts: desyncPorts(prof.Filter.Ports),
 		DNSExchange: chain.Exchange,
 		NewInjector: func(local, remote netip.AddrPort) (desync.RawInjector, func()) {
@@ -103,24 +130,28 @@ func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desyn
 	}
 	defer srv.Close()
 
-	printTunBanner(prof, engine, chain, dev.Name(), iface, nameservers)
+	printTunBanner(prof, engine, chain, dev.Name(), iface, nameservers, dm != nil)
 	<-ctx.Done()
 	fmt.Fprintln(os.Stderr, "\ndpb: stopping, tearing down tun…")
 	return nil
 }
 
-func printTunBanner(prof config.Profile, engine *desync.Engine, chain *dns.Chain, ifaceName, uplink string, nameservers []string) {
+func printTunBanner(prof config.Profile, engine *desync.Engine, chain *dns.Chain, ifaceName, uplink string, nameservers []string, dnsRedirected bool) {
 	strat := engine.EmitterName()
 	if ts := engine.TransformerNames(); len(ts) > 0 {
 		strat = strings.Join(ts, " → ") + " → " + strat
 	}
-	captured := "public resolvers only"
+	resolverLine := "system resolver → " + sysnet.DefaultTunResolver + " (restores on exit)"
+	if !dnsRedirected {
+		resolverLine = "NOT redirected — queries may stay on the ISP resolver"
+	}
 	if len(nameservers) > 0 {
-		captured = strings.Join(nameservers, ", ")
+		resolverLine += ", host routes for " + strings.Join(nameservers, ", ")
 	}
 	fmt.Fprintf(os.Stderr, "dpb %s  profile=%s  mode=tun\n", version, prof.Name)
 	fmt.Fprintf(os.Stderr, "  Device   %s (uplink %s)\n", ifaceName, uplink)
-	fmt.Fprintf(os.Stderr, "  DNS      %s  (intercepting %s)\n", strings.Join(chain.Labels(), ", "), captured)
+	fmt.Fprintf(os.Stderr, "  DNS      %s\n", strings.Join(chain.Labels(), ", "))
+	fmt.Fprintf(os.Stderr, "  Resolver %s\n", resolverLine)
 	fmt.Fprintf(os.Stderr, "  Strategy %s  ports=%s\n", strat, portsStr(prof.Filter.Ports))
 	fmt.Fprintf(os.Stderr, "  Capture  all TCP + UDP via split-default route (restores on exit)\n")
 	fmt.Fprintf(os.Stderr, "  Ready. Press Ctrl-C to stop and tear down.\n")

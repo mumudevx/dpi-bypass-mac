@@ -18,13 +18,15 @@ type udpResolver struct {
 	client *dns.Client
 }
 
-// NewUDP builds a plain UDP DNS resolver. addr is host:port.
-func NewUDP(addr, name string) (Resolver, error) {
+// NewUDP builds a plain UDP DNS resolver. addr is host:port. A non-nil dialer
+// controls how the query leaves the machine; TUN mode passes one bound to the
+// physical uplink so dpb's own query is not pulled back into the tunnel.
+func NewUDP(addr, name string, dialer *net.Dialer) (Resolver, error) {
 	addr = ensurePort(addr, "53")
 	return &udpResolver{
 		addr:   addr,
 		name:   labelOr(name, "udp:"+addr),
-		client: &dns.Client{Net: "udp", Timeout: 4 * time.Second},
+		client: &dns.Client{Net: "udp", Timeout: 4 * time.Second, Dialer: dialer},
 	}, nil
 }
 
@@ -49,7 +51,8 @@ type dotResolver struct {
 }
 
 // NewDoT builds a DNS-over-TLS resolver. addr is host:port (port defaults 853).
-func NewDoT(addr, name string) (Resolver, error) {
+// dialer has the same meaning as in NewUDP.
+func NewDoT(addr, name string, dialer *net.Dialer) (Resolver, error) {
 	hostport := ensurePort(addr, "853")
 	host, _, _ := net.SplitHostPort(hostport)
 	return &dotResolver{
@@ -59,6 +62,7 @@ func NewDoT(addr, name string) (Resolver, error) {
 			Net:       "tcp-tls",
 			Timeout:   5 * time.Second,
 			TLSConfig: &tls.Config{ServerName: host},
+			Dialer:    dialer,
 		},
 	}, nil
 }
@@ -85,14 +89,19 @@ func ensurePort(addr, defPort string) string {
 
 // ResolverFromSpec builds a resolver from a (type, url, name) triple. It returns
 // an error for unknown types.
-func ResolverFromSpec(typ, urlOrAddr, name string) (Resolver, error) {
+//
+// dialer, when non-nil, is used by the plaintext transports (UDP and DoT). DoH
+// deliberately keeps the default dialer: in TUN mode its connection is meant to
+// travel through dpb's own stack, where the desync engine fragments the
+// ClientHello — the DoH endpoint's SNI is itself a censorship target.
+func ResolverFromSpec(typ, urlOrAddr, name string, dialer *net.Dialer) (Resolver, error) {
 	switch typ {
 	case "doh":
 		return NewDoH(urlOrAddr, name)
 	case "dot":
-		return NewDoT(urlOrAddr, name)
+		return NewDoT(urlOrAddr, name, dialer)
 	case "udp", "":
-		return NewUDP(urlOrAddr, name)
+		return NewUDP(urlOrAddr, name, dialer)
 	default:
 		return nil, fmt.Errorf("unknown resolver type %q", typ)
 	}

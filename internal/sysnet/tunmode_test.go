@@ -116,6 +116,25 @@ func TestScopeUplinkReportsRealFailures(t *testing.T) {
 	}
 }
 
+func TestBoundNetDialerIsUsableAsAPlainDialer(t *testing.T) {
+	// dns.Client takes a *net.Dialer, so the uplink binding has to be available
+	// in that shape — otherwise dpb's own fallback query rides the default route
+	// straight back into the tunnel.
+	d, err := BoundNetDialer("lo0", 2*time.Second)
+	if err != nil {
+		t.Fatalf("BoundNetDialer(lo0): %v", err)
+	}
+	if d.Timeout != 2*time.Second {
+		t.Fatalf("timeout = %v, want 2s", d.Timeout)
+	}
+	if d.Control == nil {
+		t.Fatal("dialer does not bind its sockets to the interface")
+	}
+	if _, err := BoundNetDialer("nonexistent-iface-xyz", time.Second); err == nil {
+		t.Fatal("expected an error for a nonexistent interface")
+	}
+}
+
 func TestBoundDialerConstruction(t *testing.T) {
 	if _, err := BoundDialer("lo0", time.Second); err != nil {
 		t.Fatalf("BoundDialer(lo0): %v", err)

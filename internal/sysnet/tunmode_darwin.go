@@ -54,16 +54,24 @@ func DefaultGateway(ctx context.Context, runner CommandRunner) string {
 	return m[1]
 }
 
-// BoundDialer returns a DialFunc whose sockets are bound to the given physical
-// interface via IP_BOUND_IF / IPV6_BOUND_IF. This is what prevents the upstream
+// BoundNetDialer returns a *net.Dialer whose sockets are bound to the given
+// physical interface via IP_BOUND_IF / IPV6_BOUND_IF. This is what prevents a
 // connection from being routed back into the utun (a packet loop).
-func BoundDialer(iface string, timeout time.Duration) (DialFunc, error) {
+//
+// The concrete type matters: miekg's dns.Client takes a *net.Dialer, and dpb's
+// own fallback resolver has to leave on the uplink. Otherwise its query rides
+// the split-default route back into the tunnel, lands on serveDNS as ordinary
+// port 53 traffic, and re-enters the resolver chain that issued it.
+//
+// Note that this constrains route lookup rather than bypassing it — see
+// ScopeUplink for the route the constrained lookup needs to find.
+func BoundNetDialer(iface string, timeout time.Duration) (*net.Dialer, error) {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
 		return nil, fmt.Errorf("bound dialer: %w", err)
 	}
 	idx := ifi.Index
-	d := &net.Dialer{
+	return &net.Dialer{
 		Timeout: timeout,
 		Control: func(network, _ string, c syscall.RawConn) error {
 			var serr error
@@ -78,6 +86,14 @@ func BoundDialer(iface string, timeout time.Duration) (DialFunc, error) {
 			}
 			return serr
 		},
+	}, nil
+}
+
+// BoundDialer is BoundNetDialer in DialFunc form, for the TUN relay.
+func BoundDialer(iface string, timeout time.Duration) (DialFunc, error) {
+	d, err := BoundNetDialer(iface, timeout)
+	if err != nil {
+		return nil, err
 	}
 	return d.DialContext, nil
 }

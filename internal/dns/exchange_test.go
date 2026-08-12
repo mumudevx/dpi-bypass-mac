@@ -241,7 +241,7 @@ func TestUDPResolverExchange(t *testing.T) {
 		_, _ = pc.WriteTo(packed, addr)
 	}()
 
-	r, err := NewUDP(pc.LocalAddr().String(), "local")
+	r, err := NewUDP(pc.LocalAddr().String(), "local", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

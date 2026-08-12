@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -80,13 +81,15 @@ func runDpb(cmd *cobra.Command, f *runFlags) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
-	chain, err := buildResolver(prof, log)
-	if err != nil {
-		return err
+	// TUN mode builds its own chain: its resolvers need a dialer bound to the
+	// uplink, which is only known once the datapath has picked one.
+	if f.mode == "tun" {
+		return runTun(ctx, f, prof, engine, log)
 	}
 
-	if f.mode == "tun" {
-		return runTun(ctx, f, prof, engine, chain, log)
+	chain, err := buildResolver(prof, log, nil)
+	if err != nil {
+		return err
 	}
 
 	srv := proxy.New(proxy.Options{
@@ -148,10 +151,12 @@ func overridesFrom(cmd *cobra.Command, f *runFlags) config.Overrides {
 	return ov
 }
 
-func buildResolver(prof config.Profile, log *logx.Logger) (*dns.Chain, error) {
+// buildResolver assembles the profile's resolver chain. dialer, when non-nil,
+// keeps the plaintext resolvers off the tunnel (see dns.ResolverFromSpec).
+func buildResolver(prof config.Profile, log *logx.Logger, dialer *net.Dialer) (*dns.Chain, error) {
 	var resolvers []dns.Resolver
 	for _, r := range prof.DNS.Resolvers {
-		res, err := dns.ResolverFromSpec(r.Type, r.URL, r.Name)
+		res, err := dns.ResolverFromSpec(r.Type, r.URL, r.Name, dialer)
 		if err != nil {
 			log.Warnf("dns: skipping resolver %s: %v", r.Name, err)
 			continue

@@ -164,19 +164,24 @@ func (m *ProxyManager) restoreOne(ctx context.Context, svc, setCmd, stateCmd str
 }
 
 // targetServices returns the configured services or auto-detects the service
-// carrying the default route, falling back to all enabled services.
-func (m *ProxyManager) targetServices(ctx context.Context) ([]string, error) {
-	if len(m.services) > 0 {
-		return m.services, nil
+// carrying the default route, falling back to all enabled services. Shared with
+// DNSManager so both touch the same service.
+func targetServices(ctx context.Context, runner CommandRunner, override []string) ([]string, error) {
+	if len(override) > 0 {
+		return override, nil
 	}
-	if svc := m.defaultRouteService(ctx); svc != "" {
+	if svc := defaultRouteService(ctx, runner); svc != "" {
 		return []string{svc}, nil
 	}
-	return m.enabledServices(ctx)
+	return enabledServices(ctx, runner)
 }
 
-func (m *ProxyManager) enabledServices(ctx context.Context) ([]string, error) {
-	out, err := m.runner.Run(ctx, "networksetup", "-listallnetworkservices")
+func (m *ProxyManager) targetServices(ctx context.Context) ([]string, error) {
+	return targetServices(ctx, m.runner, m.services)
+}
+
+func enabledServices(ctx context.Context, runner CommandRunner) ([]string, error) {
+	out, err := runner.Run(ctx, "networksetup", "-listallnetworkservices")
 	if err != nil {
 		return nil, fmt.Errorf("list network services: %w", err)
 	}
@@ -200,9 +205,13 @@ var (
 	deviceRe       = regexp.MustCompile(`Device:\s*(\w+)\)`)
 )
 
-// defaultRouteService maps the default-route interface to its service name.
 func (m *ProxyManager) defaultRouteService(ctx context.Context) string {
-	routeOut, err := m.runner.Run(ctx, "route", "-n", "get", "default")
+	return defaultRouteService(ctx, m.runner)
+}
+
+// defaultRouteService maps the default-route interface to its service name.
+func defaultRouteService(ctx context.Context, runner CommandRunner) string {
+	routeOut, err := runner.Run(ctx, "route", "-n", "get", "default")
 	if err != nil {
 		return ""
 	}
@@ -212,7 +221,7 @@ func (m *ProxyManager) defaultRouteService(ctx context.Context) string {
 	}
 	iface := mm[1]
 
-	orderOut, err := m.runner.Run(ctx, "networksetup", "-listnetworkserviceorder")
+	orderOut, err := runner.Run(ctx, "networksetup", "-listnetworkserviceorder")
 	if err != nil {
 		return ""
 	}
