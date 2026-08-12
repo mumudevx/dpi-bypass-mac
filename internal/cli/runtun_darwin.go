@@ -59,15 +59,25 @@ func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desyn
 		defer cancel()
 		rm.Teardown(tctx)
 	}()
+	// The scoped route must exist before the split-default routes, or the very
+	// first relayed connection has no way off the machine.
+	gateway := sysnet.DefaultGateway(ctx, runner)
+	if gateway == "" {
+		_ = dev.Close()
+		return fmt.Errorf("could not determine the default gateway for %s", iface)
+	}
+	if err := rm.ScopeUplink(ctx, gateway, iface); err != nil {
+		_ = dev.Close()
+		return err
+	}
+
 	if err := rm.CaptureAll(ctx); err != nil {
 		_ = dev.Close()
 		return err
 	}
-	// The split-default routes miss an on-link resolver — the LAN's subnet route
-	// is more specific — so a DHCP-provided 192.168.x.1 would keep answering in
-	// the clear. Host routes pull those queries in too, which is the whole point
-	// of shipping DoH.
-	nameservers := sysnet.ActiveNameservers(ctx, runner)
+	// Resolvers that are not the default gateway can be pulled in with a host
+	// route; the gateway itself cannot (see CapturableNameservers).
+	nameservers := sysnet.CapturableNameservers(ctx, runner)
 	if err := rm.CaptureHosts(ctx, nameservers); err != nil {
 		log.Warnf("could not capture system resolvers (%v): %v", nameservers, err)
 	}

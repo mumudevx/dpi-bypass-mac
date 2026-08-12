@@ -2,6 +2,7 @@ package sysnet
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -145,4 +146,15 @@ type scriptedRunner struct{ out map[string]string }
 func (s *scriptedRunner) Run(_ context.Context, name string, args ...string) (string, error) {
 	key := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	return s.out[key], nil
+}
+
+// failingRunner records calls and always fails with a canned route(8) message.
+type failingRunner struct {
+	calls [][]string
+	out   string
+}
+
+func (f *failingRunner) Run(_ context.Context, name string, args ...string) (string, error) {
+	f.calls = append(f.calls, append([]string{name}, args...))
+	return f.out, errors.New("exit status 1")
 }

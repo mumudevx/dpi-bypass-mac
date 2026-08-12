@@ -48,6 +48,27 @@ func ActiveNameservers(ctx context.Context, runner CommandRunner) []string {
 	return servers
 }
 
+// CapturableNameservers returns the resolvers that can safely be pulled into
+// the utun with a host route — i.e. every active nameserver except the default
+// gateway.
+//
+// On a home LAN those are the same address, and capturing it does not work:
+// the ARP-cloned host route on the physical uplink wins, so queries keep going
+// to the ISP resolver in the clear. If the /32 ever did win, it would take the
+// default route's next hop with it. That case is handled by pointing the system
+// resolver into the tunnel instead — see ProxyManager's DNS counterpart.
+func CapturableNameservers(ctx context.Context, runner CommandRunner) []string {
+	gateway := DefaultGateway(ctx, runner)
+	var out []string
+	for _, ns := range ActiveNameservers(ctx, runner) {
+		if ns == gateway {
+			continue
+		}
+		out = append(out, ns)
+	}
+	return out
+}
+
 // CaptureHosts routes individual IPv4 addresses through the utun. A /32 is more
 // specific than the LAN's subnet route, so it is what pulls a router-provided
 // resolver (192.168.1.1 and friends) into the interception path — the

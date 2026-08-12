@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,26 @@ func DefaultInterface(ctx context.Context, runner CommandRunner) string {
 		return ""
 	}
 	m := defaultIfaceRe.FindStringSubmatch(out)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// defaultGatewayRe matches the `gateway:` line of `route -n get default`.
+var defaultGatewayRe = regexp.MustCompile(`(?m)^\s*gateway:\s*(\S+)`)
+
+// DefaultGateway returns the next hop of the default route (e.g. 192.168.0.1),
+// or "" if the route has no gateway (a point-to-point uplink).
+func DefaultGateway(ctx context.Context, runner CommandRunner) string {
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+	out, err := runner.Run(ctx, "route", "-n", "get", "default")
+	if err != nil {
+		return ""
+	}
+	m := defaultGatewayRe.FindStringSubmatch(out)
 	if m == nil {
 		return ""
 	}
@@ -90,6 +111,33 @@ func (r *RouteManager) Configure(ctx context.Context, localAddr, peerAddr string
 	if err != nil {
 		return fmt.Errorf("ifconfig %s: %w", r.iface, err)
 	}
+	return nil
+}
+
+// ScopeUplink installs an interface-scoped default route for the physical
+// uplink, which the upstream sockets need in order to leave the machine.
+//
+// Setting IP_BOUND_IF does not exempt a socket from route lookup; it constrains
+// it. Once the split-default routes are installed, the scoped lookup matches
+// 0.0.0.0/1 -> utun, rejects it because the scope is wrong, and finds nothing
+// scoped to the uplink to fall back to — so every relayed connection fails with
+// ENETUNREACH and the whole tunnel black-holes. Measured: with the split-default
+// routes in place, a bound dial to 1.1.1.1:443 returns ENETUNREACH, and adding
+// only this route turns it into a completed connection.
+//
+// A pre-existing route (a VPN's, or a previous run's) is adopted rather than
+// replaced, and deliberately not journalled: removing a route we did not create
+// would break whoever owns it.
+func (r *RouteManager) ScopeUplink(ctx context.Context, gateway, uplink string) error {
+	out, err := r.runner.Run(ctx, "route", "-q", "add", "-net", "default", gateway, "-ifscope", uplink)
+	if err != nil {
+		if strings.Contains(out, "File exists") {
+			r.logf("sysnet: scoped default route for %s already present, adopting it", uplink)
+			return nil
+		}
+		return fmt.Errorf("route add scoped default via %s: %w (%s)", uplink, err, strings.TrimSpace(out))
+	}
+	r.journal = append(r.journal, []string{"-q", "delete", "-net", "default", gateway, "-ifscope", uplink})
 	return nil
 }
 

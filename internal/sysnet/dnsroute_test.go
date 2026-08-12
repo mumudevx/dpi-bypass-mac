@@ -79,6 +79,30 @@ func TestActiveNameserversEmptyWhenScutilSaysNothing(t *testing.T) {
 	}
 }
 
+// On a home LAN the router is both the resolver and the default gateway. A /32
+// for it does not intercept anything — the ARP-cloned host route on the uplink
+// wins — and if it ever did take effect it would strip the default route of its
+// next hop. Measured on a live run: with the /32 installed, `route -n get
+// 192.168.0.1` still reported en0 and the ISP resolver answered normally.
+func TestCapturableNameserversExcludesTheDefaultGateway(t *testing.T) {
+	cr := &scriptedRunner{out: map[string]string{
+		"scutil --dns":         scutilSample,
+		"route -n get default": "    gateway: 192.168.1.1\n  interface: en0\n",
+	}}
+
+	got := CapturableNameservers(context.Background(), cr)
+	if len(got) != 1 || got[0] != "8.8.8.8" {
+		t.Fatalf("capturable = %v, want [8.8.8.8]", got)
+	}
+}
+
+func TestCapturableNameserversKeepsAllWhenNoGateway(t *testing.T) {
+	cr := &scriptedRunner{out: map[string]string{"scutil --dns": scutilSample}}
+	if got := CapturableNameservers(context.Background(), cr); len(got) != 2 {
+		t.Fatalf("capturable = %v, want both resolvers", got)
+	}
+}
+
 func TestCaptureHostsAddsAndTearsDownHostRoutes(t *testing.T) {
 	fr := &fakeRunner{}
 	rm := NewRouteManager("utun9", fr, nil)
