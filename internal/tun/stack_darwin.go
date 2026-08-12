@@ -43,6 +43,16 @@ type Options struct {
 	Dial        DialFunc
 	DesyncPorts map[int]bool
 	Logf        func(string, ...any)
+
+	// DNSExchange answers a wire-format DNS query over the profile's resolver
+	// chain. When set, UDP port 53 is served locally instead of being relayed, so
+	// TUN mode defeats DNS poisoning the same way proxy mode does. The query slice
+	// is only valid for the duration of the call.
+	DNSExchange func(ctx context.Context, query []byte) ([]byte, error)
+
+	// UDPIdle reaps a UDP session after this long without traffic in either
+	// direction. Zero means defaultUDPIdle.
+	UDPIdle time.Duration
 }
 
 // Server runs a gVisor netstack over a utun device, transparently relaying TCP.
@@ -83,6 +93,8 @@ func NewServer(opt Options) (*Server, error) {
 	srv := &Server{opt: opt, stack: s}
 	fwd := tcp.NewForwarder(s, 0, 2048, srv.handleForward)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
+	udpFwd := udp.NewForwarder(s, srv.handleUDPForward)
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 	return srv, nil
 }
 
