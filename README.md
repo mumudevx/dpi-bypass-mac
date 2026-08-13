@@ -78,7 +78,7 @@ dpb service install --profile turkey
 dpb service status
 dpb service uninstall
 
-# Diagnose & recover after a crash (restores leftover proxy settings)
+# Diagnose & recover after a crash (restores leftover proxy and DNS settings)
 dpb doctor
 ```
 
@@ -168,10 +168,28 @@ UDP is relayed datagram-for-datagram with a 60-second idle reaper, which is what
 keeps QUIC, WebRTC/voice and game traffic alive for apps that bypass the proxy
 (Discord's updater and voice, for example). Port 53 is the exception: queries are
 answered in-process from the profile's resolver chain instead of being relayed,
-so TUN mode defeats DNS poisoning the same way proxy mode does. Because a
-DHCP-provided resolver sits on-link — where the LAN's subnet route beats the
-split-default — `dpb` also adds a host route per active nameserver (read from
-`scutil --dns`) to pull those queries in.
+so TUN mode defeats DNS poisoning the same way proxy mode does.
+
+Two details make that work in practice:
+
+- **An interface-scoped default route** (`route add -net default <gw> -ifscope
+  en0`) is installed before the capture routes. `IP_BOUND_IF` constrains route
+  lookup rather than bypassing it, so once `0.0.0.0/1` points at the utun the
+  relay's own sockets have nothing to fall back to and every upstream connection
+  fails with `ENETUNREACH`. An existing scoped route is adopted, not replaced.
+- **The system resolver is redirected** to `1.1.1.1` for the duration of the
+  run, and restored on exit. A DHCP-provided resolver cannot be captured by
+  routing — it is on-link, where the LAN's subnet route wins, and it is usually
+  the default gateway, whose next hop has to keep working. The redirect target
+  is a real public resolver on purpose: if `dpb` is killed with `-9`, resolution
+  degrades to plaintext DNS rather than failing outright, and `dpb doctor`
+  restores the saved list. Static resolvers that are *not* the gateway are
+  captured with a host route instead, leaving the setting untouched.
+
+`dpb`'s own plaintext fallback queries dial through the uplink so they are not
+pulled back into the tunnel and re-answered by the chain that issued them. DoH
+keeps the default path on purpose — its connection travels through the desync
+engine, and the DoH endpoint's SNI is itself a censorship target.
 
 ## Limitations & roadmap
 
@@ -191,6 +209,11 @@ split-default — `dpb` also adds a host route per active nameserver (read from
 - **IPv4 only.** Both the capture routes and fake-packet crafting are IPv4;
   IPv6 flows leave on the physical uplink untouched, and an IPv6-only nameserver
   is not intercepted. Disable IPv6 on the interface if your ISP poisons it.
+- **A hard kill leaves the scoped default route behind.** Interface-scoped
+  routes on the utun vanish with the device, but the `-ifscope` route for the
+  uplink does not. The next run adopts it, so it is harmless on the same
+  network; delete it by hand (`sudo route delete -net default <gw> -ifscope
+  en0`) if you move to a network with a different gateway.
 
 ## Development
 

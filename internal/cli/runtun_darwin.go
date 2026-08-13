@@ -57,59 +57,46 @@ func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desyn
 	}
 
 	rm := sysnet.NewRouteManager(dev.Name(), runner, log.Warnf)
-	if err := rm.Configure(ctx, tunLocalAddr, tunPeerAddr, dev.MTU()); err != nil {
-		_ = dev.Close()
-		return err
-	}
-	// Guaranteed teardown (and the utun fd close removes interface-scoped routes
-	// even on a hard kill).
+
+	// One teardown for everything, in the order that makes each step actually
+	// land: system state first, then routes while the utun still exists (route
+	// deletes naming a closed interface fail), then the device. Closing the utun
+	// also drops its interface-scoped routes, so a hard kill still self-heals.
+	var (
+		srv *tun.Server
+		dm  *sysnet.DNSManager
+	)
 	defer func() {
 		tctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if dm != nil {
+			dm.Restore(tctx)
+		}
 		rm.Teardown(tctx)
+		if srv != nil {
+			srv.Close()
+		} else {
+			_ = dev.Close()
+		}
 	}()
+
+	if err := rm.Configure(ctx, tunLocalAddr, tunPeerAddr, dev.MTU()); err != nil {
+		return err
+	}
 	// The scoped route must exist before the split-default routes, or the very
 	// first relayed connection has no way off the machine.
 	gateway := sysnet.DefaultGateway(ctx, runner)
 	if gateway == "" {
-		_ = dev.Close()
 		return fmt.Errorf("could not determine the default gateway for %s", iface)
 	}
 	if err := rm.ScopeUplink(ctx, gateway, iface); err != nil {
-		_ = dev.Close()
 		return err
 	}
 
-	if err := rm.CaptureAll(ctx); err != nil {
-		_ = dev.Close()
-		return err
-	}
-	// Resolvers that are not the default gateway can be pulled in with a host
-	// route; the gateway itself cannot (see CapturableNameservers).
-	nameservers := sysnet.CapturableNameservers(ctx, runner)
-	if err := rm.CaptureHosts(ctx, nameservers); err != nil {
-		log.Warnf("could not capture system resolvers (%v): %v", nameservers, err)
-	}
-
-	// Point the active service at an address the routes above do cover, so the
-	// queries dpb cannot reach by routing arrive here anyway.
-	dm := sysnet.NewDNSManager(sysnet.DNSConfig{
-		Runner: runner,
-		Logf:   log.Warnf,
-	})
-	if err := dm.Enable(ctx); err != nil {
-		log.Warnf("could not redirect system DNS (%v); queries may stay on the ISP resolver", err)
-		dm = nil
-	}
-	defer func() {
-		if dm != nil {
-			rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			dm.Restore(rctx)
-		}
-	}()
-
-	srv, err := tun.NewServer(tun.Options{
+	// Bring the datapath up before diverting anything into it, or the packets
+	// arriving between the first capture route and the netstack have nowhere to
+	// go.
+	srv, err = tun.NewServer(tun.Options{
 		Device:      dev,
 		Engine:      engine,
 		Dial:        tun.DialFunc(boundDialer.DialContext),
@@ -125,10 +112,29 @@ func runTun(ctx context.Context, f *runFlags, prof config.Profile, engine *desyn
 		Logf: log.Debugf,
 	})
 	if err != nil {
-		_ = dev.Close()
 		return err
 	}
-	defer srv.Close()
+
+	if err := rm.CaptureAll(ctx); err != nil {
+		return err
+	}
+	// Resolvers that are not the default gateway can be pulled in with a host
+	// route; the gateway itself cannot (see CapturableNameservers).
+	nameservers := sysnet.CapturableNameservers(ctx, runner)
+	if err := rm.CaptureHosts(ctx, nameservers); err != nil {
+		log.Warnf("could not capture system resolvers (%v): %v", nameservers, err)
+	}
+
+	// Point the active service at an address the routes above do cover, so the
+	// queries dpb cannot reach by routing arrive here anyway.
+	dm = sysnet.NewDNSManager(sysnet.DNSConfig{
+		Runner: runner,
+		Logf:   log.Warnf,
+	})
+	if err := dm.Enable(ctx); err != nil {
+		log.Warnf("could not redirect system DNS (%v); queries may stay on the ISP resolver", err)
+		dm = nil
+	}
 
 	printTunBanner(prof, engine, chain, dev.Name(), iface, nameservers, dm != nil)
 	<-ctx.Done()
