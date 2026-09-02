@@ -2,4 +2,5 @@
 /dist/
 *.test
 *.out
+coverage.out
 .DS_Store

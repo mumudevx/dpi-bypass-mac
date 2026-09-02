@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26.4"
+
+jobs:
+  build:
+    # darwin/arm64 is the only supported target, and most of the tree is
+    # GOOS=darwin only, so CI runs on macOS rather than cross-compiling.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # so `git describe` can stamp a version
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          bad=$(gofmt -l cmd internal tools)
+          if [ -n "$bad" ]; then
+            echo "these files are not gofmt'd:"; echo "$bad"; exit 1
+          fi
+
+      - name: go mod tidy is a no-op
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: dependency pins still resolve
+        run: make deps
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test (race)
+        run: go test ./... -race
+
+      # The build gates (no bare goroutine, no hostname dial) run inside the
+      # normal test invocation above; they are named here so a failure is
+      # obvious in the job list.
+      - name: build gates
+        run: go test ./internal/flow/ -run 'TestNo|TestGate' -v
+
+      - name: cover-gate
+        run: make cover-gate
+
+  fuzz:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: fuzz (60s per target)
+        run: make fuzz FUZZTIME=60s

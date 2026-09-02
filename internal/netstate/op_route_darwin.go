@@ -1,0 +1,212 @@
+package netstate
+
+import (
+	"context"
+	"fmt"
+	"net/netip"
+)
+
+func init() { reviveByKind[OpRoute] = reviveRoute }
+
+type routeRevert struct {
+	Dst   string `json:"dst"`
+	Gw    string `json:"gw,omitempty"`
+	Iface string `json:"iface,omitempty"`
+}
+
+// routeOp adds one kernel route with route(8) and verifies it by reading the
+// AF_ROUTE RIB.
+//
+// This is the Op the whole "do not believe your tools" rule was written for.
+// macOS route(8) cannot report failure through its exit status: Apple's
+// route.c declares newroute() void and main() does `newroute(argc, argv);
+// exit(0)`, and rtmsg() only warnx()es. Verified 2026-09-02:
+// `route -n get -inet6 2001:db8::1` prints "route: writing to routing socket:
+// not in table" and exits 0. Result.Failed() catches that on the way out, and
+// the RIB read catches everything Result.Failed() does not.
+type routeOp struct {
+	run   Runner
+	dst   netip.Prefix
+	gw    netip.Addr
+	iface string
+}
+
+// NewRoute returns an Op installing a route to dst.
+//
+//   - gw valid, iface set   → a gateway route scoped to iface (-ifscope)
+//   - gw valid, iface empty → a plain gateway route
+//   - gw invalid, iface set → an interface route (-interface), which is how the
+//     capture routes are installed and why they vanish with the utun
+func NewRoute(r Runner, dst netip.Prefix, gw netip.Addr, iface string) Op {
+	return &routeOp{run: r, dst: dst.Masked(), gw: gw, iface: iface}
+}
+
+func (o *routeOp) Kind() OpKind { return OpRoute }
+
+func (o *routeOp) ID() string {
+	if o.iface != "" {
+		return fmt.Sprintf("route:%s@%s", o.dst, o.iface)
+	}
+	return fmt.Sprintf("route:%s", o.dst)
+}
+
+func (o *routeOp) Describe() string {
+	switch {
+	case o.gw.IsValid() && o.iface != "":
+		return fmt.Sprintf("add route %s via %s scoped to %s", o.dst, o.gw, o.iface)
+	case o.gw.IsValid():
+		return fmt.Sprintf("add route %s via %s", o.dst, o.gw)
+	default:
+		return fmt.Sprintf("add route %s via interface %s", o.dst, o.iface)
+	}
+}
+
+func (o *routeOp) runner(e Env) Runner {
+	if o.run != nil {
+		return o.run
+	}
+	return e.runner()
+}
+
+// args builds the route(8) argv for verb ("add" or "delete"). -n keeps route
+// from doing reverse DNS, which on a censored line can block for seconds.
+func (o *routeOp) args(verb string) []string {
+	args := []string{"-n", verb}
+	if o.dst.Addr().Is4() {
+		args = append(args, "-inet")
+	} else {
+		args = append(args, "-inet6")
+	}
+	if o.dst.Bits() == 0 {
+		// route(8) will not accept 0.0.0.0/0 as a -net argument.
+		args = append(args, "default")
+	} else {
+		args = append(args, "-net", o.dst.String())
+	}
+	switch {
+	case o.gw.IsValid():
+		args = append(args, o.gw.String())
+		if o.iface != "" {
+			args = append(args, "-ifscope", o.iface)
+		}
+	case o.iface != "":
+		args = append(args, "-interface", o.iface)
+	}
+	return args
+}
+
+func (o *routeOp) Apply(ctx context.Context, e Env) error {
+	// The Result is checked, but it is only the first line of defence: Verify
+	// reading the RIB is the one that decides.
+	if err := o.runner(e).Run(ctx, "route", o.args("add")...).Error(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (o *routeOp) Verify(ctx context.Context, e Env) error {
+	rs, err := o.routes(e)
+	if err != nil {
+		return err
+	}
+	if !matchRoute(rs, o.dst, o.gw, o.iface, o.gw.IsValid() && o.iface != "") {
+		return fmt.Errorf("route %s is absent from the kernel routing table", o.Describe())
+	}
+	return nil
+}
+
+func (o *routeOp) routes(e Env) ([]RouteEntry, error) {
+	if e.RIB == nil {
+		return nil, fmt.Errorf("netstate: no RIB reader configured; cannot verify routes")
+	}
+	rs, err := e.RIB.Routes()
+	if err != nil {
+		return nil, err
+	}
+	return rs, nil
+}
+
+// matchRoute looks for an entry the mutation would have created. A scoped route
+// must actually carry the scope flag: an -ifscope add that silently landed as
+// an unscoped route is the exact failure that lets a run report "Ready" while
+// capturing nothing.
+func matchRoute(rs []RouteEntry, dst netip.Prefix, gw netip.Addr, iface string, wantScoped bool) bool {
+	want := dst.Masked()
+	for _, r := range rs {
+		if r.Dst != want {
+			continue
+		}
+		if iface != "" && r.Iface != iface {
+			continue
+		}
+		if gw.IsValid() && !sameGateway(r.Gateway, gw) {
+			continue
+		}
+		if wantScoped && !r.Scoped {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// sameGateway compares next hops ignoring the IPv6 zone, because route(8) is
+// given an unzoned address while the RIB reports the zone the kernel attached.
+func sameGateway(a, b netip.Addr) bool {
+	return a.WithZone("").Unmap() == b.WithZone("").Unmap()
+}
+
+// Revert deletes the route. A failed delete is logged, never returned:
+// "not in table" is both the normal answer for an already-absent route and,
+// per the liar table, a failure. Only VerifyReverted reading the RIB can tell
+// the two apart, so that is what decides.
+func (o *routeOp) Revert(ctx context.Context, e Env) error {
+	if res := o.runner(e).Run(ctx, "route", o.args("delete")...); res.Failed() {
+		e.logf("netstate: route delete reported %q; the RIB read decides", res.Reason())
+	}
+	return nil
+}
+
+func (o *routeOp) VerifyReverted(ctx context.Context, e Env) error {
+	rs, err := o.routes(e)
+	if err != nil {
+		return err
+	}
+	if matchRoute(rs, o.dst, o.gw, o.iface, o.gw.IsValid() && o.iface != "") {
+		return fmt.Errorf("route %s is still in the kernel routing table", o.Describe())
+	}
+	return nil
+}
+
+func (o *routeOp) Record() Record {
+	rev := routeRevert{Dst: o.dst.String(), Iface: o.iface}
+	if o.gw.IsValid() {
+		rev.Gw = o.gw.String()
+	}
+	raw, err := marshalRevert(rev)
+	rec := Record{Kind: OpRoute, ID: o.ID(), Revert: raw}
+	if err != nil {
+		rec.Note = err.Error()
+	}
+	return rec
+}
+
+func reviveRoute(r Record) (Op, error) {
+	var p routeRevert
+	if err := unmarshalRevert(r.Revert, &p); err != nil {
+		return nil, err
+	}
+	dst, err := netip.ParsePrefix(p.Dst)
+	if err != nil {
+		return nil, fmt.Errorf("netstate: route record has unparseable destination %q: %w", p.Dst, err)
+	}
+	op := &routeOp{dst: dst.Masked(), iface: p.Iface}
+	if p.Gw != "" {
+		gw, err := netip.ParseAddr(p.Gw)
+		if err != nil {
+			return nil, fmt.Errorf("netstate: route record has unparseable gateway %q: %w", p.Gw, err)
+		}
+		op.gw = gw
+	}
+	return op, nil
+}
