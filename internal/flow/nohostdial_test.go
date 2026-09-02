@@ -35,15 +35,68 @@ import (
 // mechanical.
 const resolvePkg = "internal/resolve"
 
-// noGoStmtDirs are the packages where a bare `go` statement is forbidden.
+// The bare-goroutine gate is INCLUSIVE BY DEFAULT: every non-test file in this
+// module is in scope, and a package is covered on the day it is created.
+//
+// It used to be scoped by a hand-maintained list of three directories
+// (internal/front, internal/flow, internal/resolve). internal/netwatch was
+// added afterwards — it runs a routing-socket reader and a sleep watcher, and
+// it ships in the binary — and the list was not updated, so a bare `go func(){}()`
+// injected into netwatch left the gate green. A gate whose scope is a list
+// falls behind the tree by construction; the only scope that cannot is "all of
+// it, minus what somebody wrote down a reason for".
+//
 // Go runs only the panicking goroutine's deferred functions, so an unguarded
-// goroutine in a connection path turns one malformed input into a process
-// death that strands the system's proxy settings. flow.Safe is the sanctioned
-// spawn; safe.go therefore holds the only bare `go` in the tree.
-var noGoStmtDirs = []string{
-	"internal/front",
-	"internal/flow",
-	"internal/resolve",
+// goroutine in a connection or watcher path turns one malformed input into a
+// process death that strands the system's proxy settings. flow.Safe is the
+// sanctioned spawn.
+//
+// goStmtExemptFiles is that written-down list. The key is a file path relative
+// to the module root and the value is why a bare `go` is correct THERE.
+// TestGoStmtExemptionsAreLive fails on an entry that no longer matches a file
+// holding a bare `go` (a stale licence) and on one whose reason is too thin to
+// have been thought about, so every entry costs a review and expires on its own.
+//
+// Exempting a file turns the rule off for the whole file, including a goroutine
+// added to it later. Prefer flow.Safe; reach for this only when the reason
+// below is genuinely true of every spawn in the file.
+var goStmtExemptFiles = map[string]string{
+	safeGoFile: "flow.Safe IS the sanctioned spawn: this is the one recover barrier every " +
+		"other goroutine in the tree is required to go through, so the bare `go` here is " +
+		"the implementation of the rule rather than an exception to it.",
+
+	"cmd/dpb/main.go": "watchSignals is the process's top-level signal handler, spawned " +
+		"before any datapath exists and holding no connection. It parses nothing and reads " +
+		"no untrusted input; its whole body is a select over a signal channel. A recover " +
+		"barrier here would be actively wrong: the second-signal path exists to force an " +
+		"immediate exit when teardown is wedged, and swallowing a panic in it would leave " +
+		"the user with a process that answers no signal at all.",
+
+	"internal/janitor/spawn_darwin.go": "the one goroutine is the child reaper inside Stop: " +
+		"`defer close(done); c.cmd.Wait()`. It touches no network input and calls one " +
+		"os/exec method, and janitor is deliberately a leaf package below internal/flow so " +
+		"that the SIGKILL-residue janitor can be spawned from anywhere in the tree without " +
+		"dragging the connection engine in.",
+
+	"internal/observ/control.go": "the control socket's accept loop. The per-connection " +
+		"handler already carries a written-out recover barrier at the spawn site — a panic " +
+		"answering `dpb status` must not take down the proxy the user is browsing through — " +
+		"and the second goroutine is a bare select that closes the listener on cancellation. " +
+		"observ sits below internal/flow in the layering (flow, front and cliapp all import " +
+		"observ), so flow.Safe is not reachable from here without inverting that.",
+
+	"internal/testcensor/dns.go": "the censor simulator's fake DNS server. It is test " +
+		"scaffolding: in the shipped binary it is reached only by `dpb selftest`, which " +
+		"stands the fake up in-process on loopback. A panic in a fake must fail the " +
+		"self-test loudly rather than be recovered into a passing run.",
+
+	"internal/testcensor/origin.go": "the censor simulator's fake origin server, for the " +
+		"same reason as dns.go: it is the thing a test drives, not a path a user's bytes " +
+		"take, and a recovered panic in it would turn a broken fixture into a green test.",
+
+	"internal/testnet/killfuzz.go": "the SIGKILL fuzz harness's `cmd.Wait()` reaper. " +
+		"internal/testnet is imported only by _test.go files — it is in no build of the " +
+		"binary — and the goroutine's entire body is one os/exec call.",
 }
 
 const safeGoFile = "internal/flow/safe.go"
@@ -71,6 +124,14 @@ var reviewedAddrExprs = map[string]map[string]string{
 			"either unwraps Target.pinned() or calls the tool's own resolve chain and " +
 			"converts the result to netip.AddrPort. netip.AddrPort.String() cannot " +
 			"render a name, so Go's resolver is never consulted (MEASUREMENTS.md §5.4).",
+	},
+	"internal/flow/udpflow.go": {
+		"dst.String()": "dst is the netip.AddrPort NetUDPDialer.DialUDP was handed. The " +
+			"datagram path has no Target and no name at all: the destination comes off a " +
+			"captured packet's IP header or out of a SOCKS5 UDP header, and a name in a " +
+			"SOCKS5 header is resolved through the tool's own chain by the front end " +
+			"before it reaches this dialer. netip.AddrPort.String() cannot render a name, " +
+			"so Go's resolver is never consulted (MEASUREMENTS.md §5.4).",
 	},
 	"internal/observ/client.go": {
 		"c.path": "the network argument is the literal \"unix\", so the address is a " +
@@ -198,7 +259,13 @@ func checkHostnameDial(rel string, fset *token.FileSet, f *ast.File) []string {
 	imports := importNames(f)
 
 	var findings []string
+	// called holds every selector that appears in call position. Rule C below
+	// fires on the ones that do NOT, i.e. a dial captured as a function value.
+	called := map[ast.Node]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			called[c.Fun] = true
+		}
 		switch node := n.(type) {
 		case *ast.CallExpr:
 			sel, ok := node.Fun.(*ast.SelectorExpr)
@@ -239,6 +306,29 @@ func checkHostnameDial(rel string, fset *token.FileSet, f *ast.File) []string {
 						"build the request on a client whose dialer came from %s", name, resolvePkg))
 			}
 
+			// Rule D: a stream dial to port 53, anywhere in the module.
+			//
+			// MEASUREMENTS.md §2 measures plaintext DNS over TCP as
+			// connection-reset at every port tested, so a TCP/53 dial fails for
+			// exactly the names this tool exists to reach. internal/resolve has
+			// its own structural gate, but it reads only its own directory: a
+			// plaintext TCP/53 client added to any other package passed
+			// everything. Listening on TCP/53 is a different act and stays
+			// legal — the tunnel's in-process resolver does it — so this rule
+			// keys on dial selectors, not on the port alone.
+			if dialSelectors[name] {
+				if streamNetworkArg(node) {
+					if arg, ok := addressArg(node); ok {
+						if lit, isLit := stringLit(arg); isLit && isDNSPort(lit) {
+							findings = append(findings, at(fset, arg.Pos(), rel,
+								"%s opens a TCP connection to %q; plaintext DNS over TCP is "+
+									"reset at every port on the target network, so this fails for "+
+									"exactly the blocked names (MEASUREMENTS.md 2)", name, lit))
+						}
+					}
+				}
+			}
+
 			// Rule A2: an address argument that is not a literal at all.
 			//
 			// Rule A only ever looked at *ast.BasicLit, so
@@ -266,6 +356,23 @@ func checkHostnameDial(rel string, fset *token.FileSet, f *ast.File) []string {
 		case *ast.SelectorExpr:
 			if isTest {
 				return true
+			}
+			// Rule C: `var sysDial = net.Dial` followed by `sysDial(...)`.
+			// Every other rule here matches on call position, so capturing the
+			// function as a value walked straight past all of them — verified
+			// by injecting exactly that into internal/front/tunfe and watching
+			// the gate stay green. The capture is the defect; where it is later
+			// called is unknowable to an AST walk.
+			if !called[node] {
+				switch pkgOf := imports[pkgIdent(node.X)]; {
+				case pkgOf == "net" && netPkgFuncs[node.Sel.Name],
+					pkgOf == "crypto/tls" && tlsPkgFuncs[node.Sel.Name],
+					pkgOf == "net/http" && httpPkgFuncs[node.Sel.Name]:
+					findings = append(findings, at(fset, node.Pos(), rel,
+						"%s.%s is captured as a value, which reaches Go's resolver wherever it is "+
+							"later called; only %s may resolve names (MEASUREMENTS.md 5.4)",
+						pkgIdent(node.X), node.Sel.Name, resolvePkg))
+				}
 			}
 			switch pkgOf := imports[pkgIdent(node.X)]; {
 			case pkgOf == "net" && netPkgIdents[node.Sel.Name]:
@@ -322,12 +429,14 @@ func TestNoBareGoroutine(t *testing.T) {
 }
 
 func checkBareGoroutine(rel string, fset *token.FileSet, f *ast.File) []string {
-	if !inAnyDir(rel, noGoStmtDirs) {
+	// Test harnesses legitimately run fakes on their own goroutines; the
+	// promise this gate protects is about the shipped paths.
+	if strings.HasSuffix(rel, "_test.go") {
 		return nil
 	}
-	// Test harnesses legitimately run fakes on their own goroutines; the
-	// promise this gate protects is about the shipped connection paths.
-	if strings.HasSuffix(rel, "_test.go") || rel == safeGoFile {
+	// Everything else is in scope. A file is out only if somebody wrote down
+	// why, and TestGoStmtExemptionsAreLive keeps that reason honest.
+	if _, exempt := goStmtExemptFiles[rel]; exempt {
 		return nil
 	}
 	var findings []string
@@ -435,15 +544,6 @@ func importNames(f *ast.File) map[string]string {
 		m[name] = path
 	}
 	return m
-}
-
-func inAnyDir(rel string, dirs []string) bool {
-	for _, d := range dirs {
-		if rel == d || strings.HasPrefix(rel, d+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 // moduleRoot walks up from the test's working directory to the directory
@@ -657,8 +757,42 @@ func TestGatesDetectViolations(t *testing.T) {
 			gate: checkBareGoroutine,
 		},
 		{
-			name: "bare go outside the guarded packages",
-			rel:  "internal/probe/runner.go",
+			// X2. internal/netwatch was created after the gate's directory
+			// list was written, so this exact source passed the whole suite:
+			// the verifier injected it, watched the build stay green, and the
+			// package that runs the routing-socket reader was never covered.
+			name: "bare go in a package the old directory list never named",
+			rel:  "internal/netwatch/watcher.go",
+			src:  "package p\nfunc f() { go func() {}() }\n",
+			want: 1,
+			gate: checkBareGoroutine,
+		},
+		{
+			// Inclusion by default: a package that does not exist yet is
+			// covered the moment its first file is written.
+			name: "bare go in a package nobody has thought about yet",
+			rel:  "internal/somethingnew/thing.go",
+			src:  "package p\nfunc f() { go func() {}() }\n",
+			want: 1,
+			gate: checkBareGoroutine,
+		},
+		{
+			name: "cmd is in scope too",
+			rel:  "cmd/dpb/other.go",
+			src:  "package main\nfunc f() { go func() {}() }\n",
+			want: 1,
+			gate: checkBareGoroutine,
+		},
+		{
+			name: "a file with a written reason is out of scope",
+			rel:  "internal/observ/control.go",
+			src:  "package p\nfunc f() { go func() {}() }\n",
+			want: 0, // exempt: see goStmtExemptFiles
+			gate: checkBareGoroutine,
+		},
+		{
+			name: "a test harness may spawn its own fakes",
+			rel:  "internal/probe/runner_test.go",
 			src:  "package p\nfunc f() { go func() {}() }\n",
 			want: 0,
 			gate: checkBareGoroutine,
@@ -774,6 +908,122 @@ func TestGateFailsOnAKnownBadTree(t *testing.T) {
 	}
 }
 
+// goStmtFiles reports every non-test file in the tree that contains a bare `go`
+// statement, and how many it contains.
+func goStmtFiles(t *testing.T) map[string]int {
+	t.Helper()
+	root := moduleRoot(t)
+	out := map[string]int{}
+	forEachGoFile(t, root, func(rel string, _ *token.FileSet, f *ast.File) {
+		if strings.HasSuffix(rel, "_test.go") {
+			return
+		}
+		n := 0
+		ast.Inspect(f, func(node ast.Node) bool {
+			if _, ok := node.(*ast.GoStmt); ok {
+				n++
+			}
+			return true
+		})
+		if n > 0 {
+			out[rel] = n
+		}
+	})
+	return out
+}
+
+// TestEveryGoroutineIsCoveredOrExplained is the meta-test the directory list
+// could not have: it walks the REAL tree, finds every non-test file that spawns
+// a goroutine, and requires each one to be either flagged by the gate or listed
+// in goStmtExemptFiles with a reason. There is no third state — no package can
+// be silently out of scope because nobody remembered to name it.
+func TestEveryGoroutineIsCoveredOrExplained(t *testing.T) {
+	root := moduleRoot(t)
+
+	flagged := map[string]bool{}
+	forEachGoFile(t, root, func(rel string, fset *token.FileSet, f *ast.File) {
+		if len(checkBareGoroutine(rel, fset, f)) > 0 {
+			flagged[rel] = true
+		}
+	})
+
+	for rel := range goStmtFiles(t) {
+		why, exempt := goStmtExemptFiles[rel]
+		switch {
+		case flagged[rel]:
+			// The gate sees it; the build is red until somebody acts.
+		case exempt && why != "":
+			// Somebody wrote down why, and the entry is checked below.
+		default:
+			t.Errorf("%s spawns a goroutine but is neither flagged by the bare-goroutine "+
+				"gate nor listed in goStmtExemptFiles with a reason; a package that is "+
+				"silently out of scope is how internal/netwatch went uncovered", rel)
+		}
+	}
+}
+
+// TestGoStmtExemptionsAreLive keeps the exemption table from rotting. An entry
+// that matches no file, or matches a file that no longer spawns anything, is a
+// standing licence for a goroutine nobody reviewed — and a reason too short to
+// have been thought about is the same thing with extra steps.
+func TestGoStmtExemptionsAreLive(t *testing.T) {
+	spawning := goStmtFiles(t)
+	for rel, why := range goStmtExemptFiles {
+		if spawning[rel] == 0 {
+			t.Errorf("goStmtExemptFiles[%q] licenses a bare `go` in a file that no longer "+
+				"has one (or no longer exists); delete the entry rather than leaving the "+
+				"rule switched off for that file", rel)
+		}
+		if len(why) < 80 {
+			t.Errorf("goStmtExemptFiles[%q] must say why a bare `go` is correct there and "+
+				"why flow.Safe is not; got %q", rel, why)
+		}
+	}
+}
+
+// TestBareGoroutineGateFailsOnANewPackage exercises the WALK, not only the
+// predicate, against the exact defect X2 reports: a goroutine in a package the
+// old directory list never named.
+//
+// The verifier proved the hole by injecting `go func(){}()` into
+// internal/netwatch and watching `go test ./...` stay green. This is that
+// injection, made mechanical, plus a package that does not exist at all — the
+// case a list can never cover in advance.
+func TestBareGoroutineGateFailsOnANewPackage(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		// The package the list forgot.
+		"internal/netwatch/watcher.go": "package netwatch\nfunc watch() { go func() {}() }\n",
+		// A package invented after this gate was written.
+		"internal/brandnew/pump.go": "package brandnew\nfunc pump() { go func() {}() }\n",
+		// The binary's own main package.
+		"cmd/dpb/extra.go": "package main\nfunc spawn() { go func() {}() }\n",
+	}
+	for rel, src := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	var findings []string
+	forEachGoFile(t, root, func(rel string, fset *token.FileSet, f *ast.File) {
+		findings = append(findings, checkBareGoroutine(rel, fset, f)...)
+	})
+
+	joined := strings.Join(findings, "\n")
+	for rel := range files {
+		if !strings.Contains(joined, rel) {
+			t.Errorf("the gate walked a tree with an unguarded goroutine in %s and did not "+
+				"flag it; a package is only covered if somebody remembered to list it:\n%s",
+				rel, joined)
+		}
+	}
+}
+
 // TestReviewedAddrExprsAreLive keeps the exemption table honest. An entry that
 // no longer matches any call site is a stale licence sitting in the tree, and
 // every entry must say why the expression cannot be a hostname.
@@ -816,4 +1066,23 @@ func TestReviewedAddrExprsAreLive(t *testing.T) {
 			}
 		}
 	}
+}
+
+// streamNetworkArg reports whether the call names a stream network.
+func streamNetworkArg(call *ast.CallExpr) bool {
+	for _, a := range call.Args {
+		if v, ok := stringLit(a); ok {
+			switch v {
+			case "tcp", "tcp4", "tcp6":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isDNSPort reports whether an address literal names port 53.
+func isDNSPort(addr string) bool {
+	_, port, err := net.SplitHostPort(addr)
+	return err == nil && port == "53"
 }

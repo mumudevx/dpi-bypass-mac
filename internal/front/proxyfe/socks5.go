@@ -64,10 +64,24 @@ func (s *Server) serveSOCKS(ctx context.Context, client *bufConn) {
 		socksReply(client, socksRepGeneralFailure)
 		return
 	}
-	if cmd != socksCmdConnect {
-		// BIND is not implemented and never will be; UDP ASSOCIATE is the
-		// unprivileged QUIC path and lands in M17. Both get the RFC's "command
-		// not supported" rather than a hang.
+	switch cmd {
+	case socksCmdConnect:
+		if port == 0 {
+			s.logf("proxyfe: socks5 connect from %s: port 0 is not a destination", client.RemoteAddr())
+			socksReply(client, socksRepGeneralFailure)
+			return
+		}
+	case socksCmdUDPAssociate:
+		// The unprivileged datagram path. The request's DST.ADDR/DST.PORT are
+		// what the client EXPECTS to send from, not a destination; they are
+		// deliberately not trusted, because the association learns the client's
+		// real source from its first datagram and pins it.
+		s.serveUDPAssociate(ctx, client)
+		return
+	default:
+		// BIND is not implemented and never will be: it asks this process to
+		// accept inbound connections on the user's behalf, which no browser
+		// wants and no censorship problem needs.
 		s.logf("proxyfe: socks5 %s from %s: command %d not supported", host, client.RemoteAddr(), cmd)
 		socksReply(client, socksRepCmdNotSupported)
 		return
@@ -179,7 +193,11 @@ func socksRequest(r io.Reader) (cmd byte, host string, port int, err error) {
 	}
 	port = int(binary.BigEndian.Uint16(p[:]))
 	if port == 0 {
-		return cmd, "", 0, fmt.Errorf("port 0 is not a destination")
+		// Not an error here. RFC 1928 §7: a client that does not yet know the
+		// address it will send datagrams from writes zeros in a UDP ASSOCIATE
+		// request, and in practice every client does. It is still not a
+		// destination for CONNECT, which serveSOCKS refuses below.
+		return cmd, host, 0, nil
 	}
 
 	// Normalising here means a name and a literal reach policy in the same

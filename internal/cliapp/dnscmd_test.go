@@ -159,3 +159,26 @@ func TestDNSResolveRejectsAnEmptyName(t *testing.T) {
 		t.Errorf("an empty name exited 0:\n%s%s", r.stdout, r.stderr)
 	}
 }
+
+// TestDNSResolveTraceReportsTheAAAAPolicy: the addresses printed above the
+// trace are what DPB would dial, which is not the same question as what an
+// application would be handed. A run that captures no IPv6 must say so, because
+// answering AAAA for traffic dpb cannot protect is the silent fail-open DOSSIER
+// GT19 makes dangerous on this line — and "silent" is the part this line fixes.
+func TestDNSResolveTraceReportsTheAAAAPolicy(t *testing.T) {
+	r := run(t, "dns", "resolve", "192.0.2.7", "--trace")
+	if r.code != ExitOK {
+		t.Fatalf("exit code = %d, want %d\n%s", r.code, ExitOK, r.stderr)
+	}
+	for _, want := range []string{
+		"ipv6 policy: auto",
+		"AAAA served to applications:",
+		"NOERROR + SOA",
+		"IPv6 carried by this run:    false",
+		"NAT64/DNS64:",
+	} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("--trace did not report %q:\n%s", want, r.stdout)
+		}
+	}
+}

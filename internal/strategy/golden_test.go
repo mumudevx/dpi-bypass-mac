@@ -36,7 +36,7 @@ import (
 )
 
 const goldenCaps = strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapSockTTL |
-	strategy.CapOOB | strategy.CapUDPTTL | strategy.CapRawInject
+	strategy.CapOOB | strategy.CapUDPTTL | strategy.CapRawInject | strategy.CapDatagram
 
 // goldenSpecs is every rung of every shipped ladder plus the ops that no ladder
 // carries, so the table covers the whole emitter set rather than only the TR
@@ -368,7 +368,7 @@ var golden = map[string]string{
 	"quic|oob:pos=1":                        "canon=\"oob:pos=1\" stream:1,oob:1,stream:1199 sha=95fe3452b24d",
 	"quic|oob:pos=1,junk=97":                "canon=\"oob:junk=97,pos=1\" stream:1,oob:1,stream:1199 sha=03f2289538f3",
 	"quic|oob:pos=3":                        "canon=\"oob:pos=3\" stream:3,oob:1,stream:1197 sha=c8fdb66a5f83",
-	"quic|quicfake:count=2,ttl=4":           "canon=\"quicfake\" fakeraw:1200/ttl4,fakeraw:1200/ttl4,stream:1200 sha=093ddf5ee101",
+	"quic|quicfake:count=2,ttl=4":           "canon=\"quicfake\" fakedgram:1200/ttl4,fakedgram:1200/ttl4,stream:1200 sha=ad0b41708560",
 	"quic|split:pos=1":                      "canon=\"split:pos=1\" stream:1,stream:1199 sha=487f9b83b4b2",
 	"quic|split:pos=2":                      "canon=\"split:pos=2\" stream:2,stream:1198 sha=5d5b51b4bb09",
 	"quic|split:pos=3":                      "canon=\"split:pos=3\" stream:3,stream:1197 sha=a7218e52ab03",

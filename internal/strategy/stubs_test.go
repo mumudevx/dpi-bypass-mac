@@ -290,7 +290,7 @@ func registerStubs(r *Registry) {
 
 // allCaps is what a transport with every capability offers, so a test can
 // exercise an op without the capability gate getting in the way first.
-const allCaps = CapStreamWrite | CapNoDelay | CapSockTTL | CapOOB | CapUDPTTL | CapRawInject | CapRawSeq
+const allCaps = CapStreamWrite | CapNoDelay | CapSockTTL | CapOOB | CapUDPTTL | CapRawInject | CapRawSeq | CapDatagram
 
 // tlsFixture builds a TLS record whose body is bodyLen bytes with a synthetic
 // SNI extent at [sniStart, sniEnd). The default geometry is the one

@@ -197,12 +197,65 @@ func TestIsIdent(t *testing.T) {
 
 // internal/ops registers from init through the package-level helper, so that
 // path is exercised here rather than only the method it delegates to.
+//
+// It runs the whole body TWICE in one process. `go test -count=N` re-runs every
+// test inside the SAME process, and Default() is process-wide, so a test that
+// registers into it and leaves the op behind panics its own duplicate check on
+// the second run — which is exactly what `go test ./internal/strategy/ -count=3`
+// did: "panic: strategy: op \"testonlynoop\" registered twice". Repeated runs
+// are how a flaky test is found, so a package that cannot be run twice is a
+// package whose flakes cannot be chased. The two rounds fail without the
+// unregisterOp cleanup below and pass with it.
 func TestPackageLevelRegister(t *testing.T) {
+	for _, round := range []string{"first run", "second run in the same process"} {
+		t.Run(round, checkPackageLevelRegister)
+	}
+}
+
+// TestPackageLevelRegisterRejectsADuplicate pins the check the cleanup above
+// must not be allowed to weaken. Withdrawing an op is a test-only rollback of
+// the test's own side effect; while a name IS registered, taking it again is
+// still a panic, and on the DEFAULT registry rather than only on a fresh one.
+func TestPackageLevelRegisterRejectsADuplicate(t *testing.T) {
+	const name = "testonlydup"
+	op := trivialOp(OpDoc{
+		Name: name, Kind: KindSide,
+		Summary: "registered by the strategy package's own tests",
+	})
+	Register(op)
+	t.Cleanup(func() { unregisterOp(t, name) })
+	mustPanic(t, "registered twice", func() { Register(op) })
+}
+
+// unregisterOp removes an op from the default registry, restoring it to the
+// state the test found it in.
+//
+// It deletes from the map directly rather than calling an exported Unregister:
+// there must be no way for shipped code to withdraw an op, because the duplicate
+// check in Register is only meaningful if a name, once taken, stays taken. This
+// test is in package strategy, so it can reach r.ops without widening the API by
+// one byte.
+func unregisterOp(t *testing.T, name string) {
+	t.Helper()
+	r := Default()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.ops[name]; !ok {
+		t.Fatalf("unregisterOp(%q): the op is not registered; the test that registered "+
+			"it is no longer doing so, and this cleanup is now hiding a hole", name)
+	}
+	delete(r.ops, name)
+}
+
+func checkPackageLevelRegister(t *testing.T) {
 	const name = "testonlynoop"
 	Register(trivialOp(OpDoc{
 		Name: name, Kind: KindSide,
 		Summary: "registered by the strategy package's own tests",
 	}))
+	// Registered into a process-wide singleton, so it must come back out
+	// however this test ends.
+	t.Cleanup(func() { unregisterOp(t, name) })
 	s, err := Parse(name)
 	if err != nil {
 		t.Fatalf("Parse(%q) after Register: %v", name, err)

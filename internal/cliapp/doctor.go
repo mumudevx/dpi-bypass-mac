@@ -633,7 +633,7 @@ const doctorControlName = "cloudflare.com"
 // network, which is why it is behind --full.
 func checkDNS(ctx context.Context, g *globals, cfg *config.Loaded) check {
 	c := check{Name: "dns", State: stateOK}
-	resolvers, err := buildResolvers(cfg)
+	resolvers, err := buildResolvers(cfg, "", g.logf)
 	if err != nil {
 		c.State = stateFail
 		c.Detail = err.Error()

@@ -17,7 +17,7 @@ import (
 // allCaps is a transport that can do everything, so a capability gate never
 // fires before the behaviour under test.
 const allCaps = strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapSockTTL |
-	strategy.CapOOB | strategy.CapUDPTTL | strategy.CapRawInject
+	strategy.CapOOB | strategy.CapUDPTTL | strategy.CapRawInject | strategy.CapDatagram
 
 // The geometry of MEASUREMENTS.md §3.2: a ClientHello whose record body is 1497
 // bytes with the SNI hostname at [112,122). Every cut-position expectation in
@@ -806,7 +806,7 @@ func TestQuicFakeEmitsDecoysBeforeTheRealDatagram(t *testing.T) {
 		t.Fatal("fixture is not a QUIC Initial")
 	}
 	for i, s := range p.Segments[:3] {
-		if s.Kind != strategy.SegFakeRaw || s.TTL != 2 {
+		if s.Kind != strategy.SegFakeDatagram || s.TTL != 2 {
 			t.Fatalf("decoy %d: kind %s ttl %d", i, s.Kind, s.TTL)
 		}
 		q, ok := tlsmsg.ParseQUICInitial(s.Data)
@@ -1495,21 +1495,38 @@ func TestDeclaredCapsCoverEmittedCaps(t *testing.T) {
 	}
 }
 
-// TestQuicFakeRefusesBeforeTheSocketIsOpen is SF14 stated at the transport the
-// op was written for: a connected UDP socket grants streamwrite, nodelay and
-// both TTL bits, and grants rawinject to nobody.
-func TestQuicFakeRefusesBeforeTheSocketIsOpen(t *testing.T) {
+// TestQuicFakeIsEmittableOnUDPAndRefusedOnTCP is SF14 stated at the transport
+// the op was written for, after amendment A7 settled the segment contract.
+//
+// A connected UDP socket grants streamwrite, nodelay, both TTL bits and
+// datagram, which is exactly what the plan derives — so the op is now reachable
+// unprivileged, as DOSSIER §3 (P2) says byedpi's desync_udp is on Darwin.
+// Before the fix its decoys were SegFakeRaw, deriving CapRawInject, which no
+// transport in this build grants: gate 3 refused every quicfake plan and the op
+// was dead code in the registry.
+//
+// A TCP socket must still refuse it BY NAME. A stream has no packet boundaries,
+// so a decoy written on one is not a decoy, it is corruption of the payload.
+func TestQuicFakeIsEmittableOnUDPAndRefusedOnTCP(t *testing.T) {
 	_, meta := quicFixture()
 	s, err := NewRegistry().Get("quicfake:count=2,ttl=4")
 	if err != nil {
 		t.Fatal(err)
 	}
-	udp := strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapSockTTL | strategy.CapUDPTTL
-	err = s.CheckAgainst(udp, meta)
-	if !errors.Is(err, strategy.ErrCapUnavailable) {
-		t.Fatalf("err = %v, want ErrCapUnavailable at gate 3", err)
+	udp := strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapSockTTL |
+		strategy.CapUDPTTL | strategy.CapDatagram
+	if err := s.CheckAgainst(udp, meta); err != nil {
+		t.Fatalf("a connected UDP socket must satisfy quicfake: %v", err)
 	}
-	if !strings.Contains(err.Error(), "rawinject") {
-		t.Errorf("the shortfall must be named: %v", err)
+
+	tcp := strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapSockTTL | strategy.CapOOB
+	err = s.CheckAgainst(tcp, meta)
+	if !errors.Is(err, strategy.ErrCapUnavailable) {
+		t.Fatalf("err = %v, want ErrCapUnavailable at gate 3 on a stream transport", err)
+	}
+	for _, want := range []string{"udpttl", "datagram"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the shortfall must name %s: %v", want, err)
+		}
 	}
 }

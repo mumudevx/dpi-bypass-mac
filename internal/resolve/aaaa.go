@@ -63,6 +63,7 @@ type NAT64 struct {
 type aaaaPolicy struct {
 	mode   AAAAMode
 	v4Path func() bool
+	v6Path func() bool
 	nat64  func(context.Context) NAT64
 
 	mu         sync.Mutex
@@ -85,21 +86,50 @@ func (p *aaaaPolicy) v6PoisonSeen() (bool, string) {
 	return p.v6Poisoned, p.reason
 }
 
-// allow reports whether AAAA answers may be returned, and why not when they may
-// not.
+// v6Protected reports whether some front end is actually carrying IPv6 for
+// this machine right now. A nil predicate means nobody claimed it, which reads
+// as NOT protected: forgetting to wire the gate must fail closed.
+func (p *aaaaPolicy) v6Protected() bool {
+	return p.v6Path != nil && p.v6Path()
+}
+
+// allow reports whether AAAA answers may be returned to DPB ITSELF — the
+// addresses this process is about to dial — and why not when they may not.
 //
-// AAAAAuto suppresses only when all three of the following hold:
+// Our own dials are protected in both families by construction: whatever we
+// dial, we dial through the ladder. So the only reason to withhold an IPv6
+// address from ourselves is positive evidence that IPv6 answers on this network
+// are poisoned.
+func (p *aaaaPolicy) allow(ctx context.Context) (bool, string) {
+	return p.decide(ctx, false)
+}
+
+// allowServed is the same decision for an answer we are about to hand to
+// ANOTHER PROCESS on this machine, which is the fail-closed one.
 //
-//  1. An IPv6 answer on this network has already been caught as a sinkhole.
-//     DOSSIER GT19 registers 2a01:358:4014:a00::/64 to BTK, so a poisoned AAAA
-//     is a real hazard here — but it is a hazard we can *observe* rather than
-//     assume, and assuming it is what turns a laptop on a clean network into a
-//     laptop with half its address families amputated.
+// A local application does what it likes with an AAAA record: it opens its own
+// socket to that address, and whether that socket is protected depends entirely
+// on whether this run is capturing IPv6. When it is not, answering AAAA hands
+// the application an address for traffic we cannot touch, on a line where
+// DOSSIER GT19 records the IPv6 sinkhole 2a01:358:4014:a00::3 as registered to
+// BTK itself. That is the silent fail-open this policy exists to close, and it
+// is why the "is IPv6 protected" predicate defaults to false.
+func (p *aaaaPolicy) allowServed(ctx context.Context) (bool, string) {
+	return p.decide(ctx, true)
+}
+
+// decide is the shared rule. served says the answer is leaving this process.
+//
+// AAAAAuto suppresses only when a reason to suppress is present AND both
+// escapes are absent:
+//
+//  1. A reason: either an IPv6 answer on this network was already caught as a
+//     sinkhole, or (for a served answer) nothing is carrying IPv6 on this run.
 //  2. A verified IPv4 path exists. Suppressing AAAA is only safe if there is
-//     something left to connect with.
+//     something left to connect with; without one it is a total outage.
 //  3. No NAT64/DNS64 was detected. On a 464XLAT carrier the AAAA *is* the
-//     connectivity; suppressing it is a total outage, which the plan's shipped
-//     defaults call out explicitly.
+//     connectivity, and suppressing it is again a total outage — the plan's
+//     shipped defaults call this out explicitly.
 //
 // The plan's one-line comment on AAAAAuto reads "allow only with a verified v4
 // path and no NAT64", which taken literally would suppress AAAA on every
@@ -109,7 +139,7 @@ func (p *aaaaPolicy) v6PoisonSeen() (bool, string) {
 // implementation follows the gating requirement, because that is the reading
 // under which both sentences are true and under which a user on an unmeasured
 // Turkish mobile network still has working internet.
-func (p *aaaaPolicy) allow(ctx context.Context) (bool, string) {
+func (p *aaaaPolicy) decide(ctx context.Context, served bool) (bool, string) {
 	switch p.mode {
 	case AAAAAllow:
 		return true, ""
@@ -117,7 +147,8 @@ func (p *aaaaPolicy) allow(ctx context.Context) (bool, string) {
 		return false, "ipv6 = suppress"
 	}
 	poisoned, why := p.v6PoisonSeen()
-	if !poisoned {
+	unprotected := served && !p.v6Protected()
+	if !poisoned && !unprotected {
 		return true, ""
 	}
 	if p.v4Path == nil || !p.v4Path() {
@@ -127,6 +158,10 @@ func (p *aaaaPolicy) allow(ctx context.Context) (bool, string) {
 		if n := p.nat64(ctx); n.Detected {
 			return true, ""
 		}
+	}
+	if unprotected {
+		return false, "ipv6 = auto and nothing is carrying IPv6 on this run, so an AAAA answer " +
+			"would hand an application an address dpb cannot protect"
 	}
 	return false, "ipv6 = auto and " + why
 }

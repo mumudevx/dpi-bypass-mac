@@ -19,6 +19,7 @@ import (
 
 	"github.com/mumudevx/dpi-bypass-mac/internal/config"
 	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpi-bypass-mac/internal/netwatch"
 	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
 	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
 )
@@ -69,6 +70,16 @@ func tempLayout(t *testing.T) paths.Layout {
 
 func startRun(t *testing.T, mac *fakeMac, layout paths.Layout, args ...string) *runHarness {
 	t.Helper()
+	return startRunTweak(t, mac, layout, nil, args...)
+}
+
+// startRunTweak is startRun with a hook that adjusts the globals before the
+// command tree is built. M15's network watcher needs it: a test must be able
+// to hand `dpb run` a routing-change source and a captive-portal prober it
+// controls, because the real ones read the kernel and dial the internet.
+func startRunTweak(t *testing.T, mac *fakeMac, layout paths.Layout,
+	tweak func(*globals), args ...string) *runHarness {
+	t.Helper()
 	h := &runHarness{
 		mac:    mac,
 		layout: layout,
@@ -97,6 +108,18 @@ func startRun(t *testing.T, mac *fakeMac, layout paths.Layout, args ...string) *
 		// script means the janitor wiring is exercised by the real
 		// janitor.Spawn against a process that holds no system state.
 		exe: func() (string, error) { return h.fakeDPB, nil },
+		// Every run test drives the network watcher, so both of its outside
+		// edges are stubbed by default: an inert routing source (the real one
+		// reads this machine's kernel) and a prober that reaches no verdict
+		// (the real one dials captive.apple.com). A test that wants either
+		// replaces it in tweak.
+		netwatchOpts: func(o *netwatch.Options) {
+			o.Source = inertSource{}
+			o.Portal = inertProber{}
+		},
+	}
+	if tweak != nil {
+		tweak(g)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -700,19 +723,49 @@ func TestRunRejectsAMissingBypassFile(t *testing.T) {
 
 // A listener that dies while running has to reach the command, or `dpb run`
 // sits there reporting success with nothing listening.
+//
+// Both sinks are checked. serveErrs is the test seam; fail is sub.serveErr,
+// the channel the production run loop selects on — and it is the one that has
+// to work, because serveErrs is nil in every shipped binary.
 func TestServeFailureReachesTheCommand(t *testing.T) {
 	t.Parallel()
-	g := &globals{serveErrs: make(chan error, 1)}
-	g.serveFailed(errors.New("listener died"))
-	select {
-	case err := <-g.serveErrs:
-		if err == nil || !strings.Contains(err.Error(), "listener died") {
-			t.Fatalf("err = %v", err)
+	var errOut bytes.Buffer
+	g := &globals{env: Env{Stderr: &errOut}, serveErrs: make(chan error, 1)}
+	fail := make(chan error, 1)
+	g.serveFailed(fail, errors.New("listener died"))
+	for name, ch := range map[string]chan error{"the run loop": fail, "the test seam": g.serveErrs} {
+		select {
+		case err := <-ch:
+			if err == nil || !strings.Contains(err.Error(), "listener died") {
+				t.Fatalf("%s got err = %v", name, err)
+			}
+		default:
+			t.Fatalf("the failure never reached %s", name)
 		}
-	default:
-		t.Fatal("the failure was dropped")
+	}
+	// It is also reported to the user, at a level a default run prints: the
+	// process is about to stop and the reason has to be attributable.
+	if !strings.Contains(errOut.String(), "listener died") {
+		t.Errorf("the failure was not reported to the user:\n%s", errOut.String())
 	}
 	// A second failure must not block: the first one is the one that matters
 	// and the channel is deliberately small.
-	g.serveFailed(errors.New("and again"))
+	g.serveFailed(fail, errors.New("and again"))
+	g.serveFailed(nil, errors.New("and with no run loop at all"))
+}
+
+// inertSource never reports a routing change.
+type inertSource struct{}
+
+func (inertSource) Run(ctx context.Context, _ chan<- struct{}) error {
+	<-ctx.Done()
+	return nil
+}
+
+// inertProber reaches no verdict, which netwatch treats as "keep doing what
+// you were doing" rather than as a portal.
+type inertProber struct{}
+
+func (inertProber) Probe(context.Context) netwatch.Portal {
+	return netwatch.Portal{Err: errors.New("no probe in tests")}
 }

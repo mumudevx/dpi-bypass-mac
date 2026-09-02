@@ -144,6 +144,44 @@ func signalNote(s resolve.Signal) string {
 	}
 }
 
+// writeAAAAPolicy prints what the AAAA policy is doing, which is not visible
+// from the addresses above and is the thing most likely to surprise.
+//
+// The two lines are deliberately separate. dpb's own lookups are protected in
+// both families — whatever this process dials, it dials through the ladder — so
+// the addresses printed above may include IPv6 while the answers SERVED to
+// applications do not. On a v4-only capture, serving a real AAAA would hand an
+// application an address for traffic dpb cannot protect, on a line where
+// DOSSIER GT19 records the IPv6 sinkhole as registered to BTK itself.
+func writeAAAAPolicy(w io.Writer, st resolve.AAAAStatus) {
+	fmt.Fprintf(w, "\nipv6 policy: %s\n", st.Mode)
+	state := "allowed"
+	if !st.Served {
+		state = "suppressed (NOERROR + SOA, never NXDOMAIN)"
+	}
+	fmt.Fprintf(w, "  AAAA served to applications: %s\n", state)
+	if st.ServedWhy != "" {
+		fmt.Fprintf(w, "    %s\n", st.ServedWhy)
+	}
+	own := "allowed"
+	if !st.Own {
+		own = "suppressed"
+	}
+	fmt.Fprintf(w, "  AAAA for dpb's own dials:    %s\n", own)
+	if st.OwnWhy != "" {
+		fmt.Fprintf(w, "    %s\n", st.OwnWhy)
+	}
+	fmt.Fprintf(w, "  IPv6 carried by this run:    %v\n", st.V6Protected)
+	nat := "not detected"
+	if st.NAT64.Detected {
+		nat = fmt.Sprintf("detected %v", st.NAT64.Prefixes)
+	}
+	if st.NAT64.Detail != "" {
+		nat += " (" + st.NAT64.Detail + ")"
+	}
+	fmt.Fprintf(w, "  NAT64/DNS64:                 %s\n", nat)
+}
+
 func newDNSResolveCmd(g *globals) *cobra.Command {
 	var trace bool
 	cmd := &cobra.Command{
@@ -175,6 +213,13 @@ func runDNSResolve(ctx context.Context, g *globals, host string, trace bool) err
 	}
 	if trace {
 		writeDNSHealth(g.env.Stdout, chain.Health())
+		// The AAAA decision genuinely depends on an RFC 7050 probe, so reading
+		// it can cost one query. It gets its own short budget: a diagnostic
+		// that hangs on a dead network is a worse diagnostic than one that says
+		// "the probe failed", which is what the status then reports.
+		sctx, scancel := context.WithTimeout(ctx, 3*time.Second)
+		writeAAAAPolicy(g.env.Stdout, chain.AAAAStatus(sctx))
+		scancel()
 	}
 	if rerr != nil {
 		return fmt.Errorf("dns resolve %s: %w", host, rerr)

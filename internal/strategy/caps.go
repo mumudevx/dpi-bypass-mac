@@ -34,6 +34,12 @@ const (
 	CapUDPTTL
 	CapRawInject
 	CapRawSeq // never granted in v1; see emit.Transport.SeqState
+	// CapDatagram means one write is one packet: the transport preserves
+	// message boundaries, so a segment that is not part of the payload can be
+	// sent as an ordinary write without corrupting anything. Only a connected
+	// datagram socket grants it, which is what keeps the UDP decoy family
+	// (SegFakeDatagram) off a TCP transport.
+	CapDatagram
 )
 
 var capNames = []struct {
@@ -47,6 +53,7 @@ var capNames = []struct {
 	{CapUDPTTL, "udpttl"},
 	{CapRawInject, "rawinject"},
 	{CapRawSeq, "rawseq"},
+	{CapDatagram, "datagram"},
 }
 
 // Has reports whether c provides every bit in want. Note that Has(0) is true:

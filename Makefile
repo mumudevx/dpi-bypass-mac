@@ -29,12 +29,13 @@ COVER_GATED := \
 	internal/front/proxyfe \
 	internal/front/tunfe \
 	internal/netstate \
+	internal/netwatch \
 	internal/policy \
 	internal/resolve \
 	internal/probe
 
 # A regex matching a file inside any gated package.
-COVER_GATED_RE := $(MODULE)/(internal/(cliapp|flow|strategy|ops|emit|tlsmsg|front/proxyfe|front/tunfe|netstate|policy|resolve|probe))/
+COVER_GATED_RE := $(MODULE)/(internal/(cliapp|flow|strategy|ops|emit|tlsmsg|front/proxyfe|front/tunfe|netstate|netwatch|policy|resolve|probe))/
 
 # Statement-coverage floor.
 COVER_MIN := 85

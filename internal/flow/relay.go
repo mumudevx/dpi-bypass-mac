@@ -20,6 +20,12 @@ var ErrRelayPanic = errors.New("flow: relay goroutine panicked; the connection w
 // relayBuf is the per-direction copy buffer.
 const relayBuf = 32 << 10
 
+// cancelRepoison is how often a cancelled relay re-poisons its deadlines. It
+// bounds the lost-wakeup window described in Pipe: short enough that a
+// cancelled relay is gone well inside the 10 s teardown budget, long enough
+// that it is one syscall per direction per tick and nothing more.
+const cancelRepoison = 50 * time.Millisecond
+
 // PipeOpts configures the relay.
 type PipeOpts struct {
 	// Idle closes the relay if neither byte moves for this long. Zero disables
@@ -59,10 +65,24 @@ func Pipe(ctx context.Context, a, b net.Conn, o PipeOpts) error {
 		Safe("flow.pipe.cancel", o.Logf, func() {
 			select {
 			case <-ctx.Done():
-				// Unblock both reads without closing conns the caller owns.
-				unblock(a, b)
 			case <-stop:
+				return
 			}
+			// Unblock both reads without closing conns the caller owns — and
+			// keep unblocking until the directions have reported.
+			//
+			// Once is not enough, and the difference is a hang. pipeDir arms
+			// its idle deadline at the TOP of every loop iteration, so a
+			// poisoning that lands between "read returned" and "deadline
+			// re-armed" is overwritten with now+Idle, and the direction parks
+			// for the whole idle bound with the cancellation already delivered.
+			// Reproduced by running proxyfe's own
+			// TestServeGivesUpOnAWedgedRelayAfterTheDrainGrace (Idle = 1 h)
+			// under -race -count=200: the package times out at 10 minutes with
+			// pipeDir in IO wait and Pipe waiting on it. Re-poisoning on a
+			// ticker closes the window for good; it costs one setsockopt per
+			// tick per cancelled relay, and only after cancellation.
+			repoison(stop, a, b)
 		})
 	}
 
@@ -88,14 +108,22 @@ func Pipe(ctx context.Context, a, b net.Conn, o PipeOpts) error {
 	forced := false
 	// A half-close is for a clean EOF only. A direction that ended in an error
 	// tears the whole relay down.
+	var second error
 	if !o.HalfClose || first != nil {
 		// One direction is finished and half-close was not asked for, so the
 		// other has nothing left to serve. Unblock it rather than waiting out
-		// its idle deadline.
+		// its idle deadline — and keep unblocking, for the same reason the
+		// cancellation path does: a single poisoning that lands while pipeDir
+		// is between reads is overwritten by its own idle re-arm, and the
+		// surviving direction then parks for the whole idle bound.
 		forced = true
-		unblock(a, b)
+		forceStop := make(chan struct{})
+		Safe("flow.pipe.force", o.Logf, func() { repoison(forceStop, a, b) })
+		second = <-done
+		close(forceStop)
+	} else {
+		second = <-done
 	}
-	second := <-done
 	close(stop)
 
 	if cerr := ctx.Err(); cerr != nil {
@@ -164,6 +192,30 @@ func pipeDir(dst, src net.Conn, o PipeOpts, onFirst func()) error {
 			return nil
 		}
 		return fmt.Errorf("flow: relay: read: %w", rerr)
+	}
+}
+
+// repoison unblocks conns now and keeps doing it until stop is closed.
+//
+// The repetition is the point. pipeDir arms its idle deadline at the TOP of
+// every loop iteration, so a single poisoning that lands between "read
+// returned" and "deadline re-armed" is overwritten with now+Idle and the
+// direction parks for the whole idle bound — with the teardown already under
+// way. Reproduced with proxyfe's own
+// TestServeGivesUpOnAWedgedRelayAfterTheDrainGrace (Idle = 1 h) under
+// `-race -count=200`: the package timed out at 10 minutes with pipeDir in IO
+// wait, Pipe waiting on it and the server's drain waiting on Pipe. With the
+// retry the same 200 iterations finish in under six seconds.
+func repoison(stop <-chan struct{}, conns ...net.Conn) {
+	t := time.NewTicker(cancelRepoison)
+	defer t.Stop()
+	for {
+		unblock(conns...)
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+		}
 	}
 }
 

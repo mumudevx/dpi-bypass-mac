@@ -73,7 +73,9 @@ func (s *Server) Answer(ctx context.Context, query []byte) []byte {
 		s.logf("resolve: server: unusable query: %v", err)
 		return SynthRcode(query, dns.RcodeFormatError)
 	}
-	msg, err := s.chain.Exchange(ctx, query)
+	// ExchangeServed, not Exchange: this answer is leaving the process, so the
+	// AAAA policy is the fail-closed one (resolve.Options.V6Protected).
+	msg, err := s.chain.ExchangeServed(ctx, query)
 	if err != nil {
 		s.logf("resolve: server: %v", err)
 	}

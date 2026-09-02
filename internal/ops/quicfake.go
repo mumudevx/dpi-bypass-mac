@@ -32,31 +32,27 @@ var ErrNeedQUIC = errors.New("ops: op requires a QUIC Initial datagram")
 // cannot be reproduced byte for byte is not a measurement.
 //
 // The declared capabilities are the ones this op's PLAN actually needs, not the
-// ones its mechanism is named after. The decoys are SegFakeRaw segments, and
-// strategy.Plan.Caps derives CapRawInject from that kind; declaring only
-// CapUDPTTL let Strategy.CheckAgainst pass and left emit.Sender to fail at
-// connect time with "missing rawinject" on a socket that was already open.
-// Gate 3 is where a capability shortfall must be named, so the declaration now
-// matches the emission and quicfake is refused before a byte moves.
+// ones its mechanism is named after, because gate 3 is where a capability
+// shortfall must be named and Strategy.CheckAgainst compares the DECLARED set
+// while emit.Sender compares the DERIVED one.
 //
-// CapRawInject is granted by no transport in this build (UDPTransport.InjectRaw
-// is an unconditional error and nothing constructs a RawInjector), so quicfake
-// is unusable until either a raw injector exists or the segment contract is
-// respecified. The respecification is the better answer and is owed to
-// strategy, not to this file: byedpi's desync_udp sends its decoys as ORDINARY
-// WRITES on the connected socket with the hop limit lowered, which needs a
-// segment kind that is a datagram write and is exempt from Plan's
-// StreamBytes==Payload invariant. SegStream cannot express it — a decoy is not
-// part of the payload, so ErrStreamCorrupt fires on every such plan — and
-// weakening that invariant to make room for one unmeasured op is not a trade
-// this package may make on its own.
+// The segment contract amendment A7 asked for is settled: the decoys are
+// strategy.SegFakeDatagram — ORDINARY WRITES on the connected socket with the
+// hop limit lowered, which is what byedpi's desync_udp actually does — and not
+// SegFakeRaw, which derives CapRawInject and is granted by nothing in this
+// build (UDPTransport.InjectRaw is an unconditional error and nothing
+// constructs a RawInjector). A decoy is not part of the payload, so SegStream
+// cannot express it either: Plan's StreamBytes==Payload invariant fires on
+// every such plan. SegFakeDatagram is exempt from that invariant by kind and
+// derives CapDatagram, which only a datagram transport grants — so the op is
+// emittable on a connected UDP socket and refused, by name, on a TCP one.
 func quicFakeOp() strategy.Op {
 	// What the plan will ask for, bit for bit: the decoy kind gives
-	// CapRawInject, the hop limit on each decoy segment gives CapSockTTL, more
+	// CapDatagram, the hop limit on each decoy segment gives CapSockTTL, more
 	// than one segment gives CapNoDelay, and CapUDPTTL keeps the op off a TCP
 	// transport, which is the only place its datagram shape means anything.
-	// UDPTransport grants everything here except CapRawInject.
-	const caps = capsStream | strategy.CapUDPTTL | strategy.CapSockTTL | strategy.CapRawInject
+	// UDPTransport grants all four.
+	const caps = capsStream | strategy.CapUDPTTL | strategy.CapSockTTL | strategy.CapDatagram
 	return newOp(strategy.OpDoc{
 		Name:        "quicfake",
 		Kind:        strategy.KindSide,
@@ -93,7 +89,7 @@ func quicFakeOp() strategy.Op {
 			fakes := make([]strategy.Segment, 0, count)
 			for i := 0; i < count; i++ {
 				fakes = append(fakes, strategy.Segment{
-					Kind: strategy.SegFakeRaw,
+					Kind: strategy.SegFakeDatagram,
 					Data: fakeInitial(b.Payload, q, byte(i)),
 					TTL:  ttl,
 					Note: fmt.Sprintf("decoy QUIC Initial %d/%d, hop limit %d", i+1, count, ttl),

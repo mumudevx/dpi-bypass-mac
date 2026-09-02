@@ -26,9 +26,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
 	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
 	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
 	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
 )
 
 // Defaults for the bounds a caller did not set. Every one is a bound, not a
@@ -75,6 +77,26 @@ type Options struct {
 	Resolve flow.ResolveFunc
 	// PAC, when non-nil, is served at PACPath.
 	PAC *PAC
+	// UDPDial opens the upstream socket for a SOCKS5 UDP ASSOCIATE flow. Nil
+	// means ASSOCIATE is answered with the RFC's "command not supported"
+	// instead of a socket nothing is behind.
+	UDPDial flow.UDPDialer
+	// DNS answers UDP/53 for an association in process. Relaying it would hand
+	// the ISP's resolver exactly the queries DoH exists to hide.
+	DNS DNSAnswerer
+	// QUIC selects what happens to a UDP/443 QUIC Initial addressed to a name
+	// we judge. The zero value is QUICRefuse, the shipped default.
+	QUIC QUICPolicy
+	// QUICStrategy is the plan QUICDesync emits an Initial through; required by
+	// that policy and ignored by the others.
+	QUICStrategy strategy.Strategy
+	// Sender executes a UDP plan. Nil is the shared default sender.
+	Sender *emit.Sender
+	// UDPIdle reaps a datagram session with no traffic in either direction, and
+	// MaxUDPSessions bounds the upstream sockets one association may hold.
+	// Zero means the defaults.
+	UDPIdle        time.Duration
+	MaxUDPSessions int
 	// FirstMsg bounds the first-message read. The zero value is
 	// flow.DefaultFirstMsgOpts().
 	FirstMsg flow.FirstMsgOpts
@@ -99,6 +121,8 @@ type Stats struct {
 	CONNECT   uint64
 	HTTP      uint64
 	SOCKS     uint64
+	UDPAssoc  uint64
+	UDPDrops  uint64
 	PAC       uint64
 	Rejected  uint64
 	Failed    uint64
@@ -111,16 +135,18 @@ type Server struct {
 
 	wg sync.WaitGroup
 
-	accepted  atomic.Uint64
-	active    atomic.Int64
-	connect   atomic.Uint64
-	httpReqs  atomic.Uint64
-	socks     atomic.Uint64
-	pacHits   atomic.Uint64
-	rejected  atomic.Uint64
-	failed    atomic.Uint64
-	escalated atomic.Uint64
-	nextID    atomic.Uint64
+	accepted   atomic.Uint64
+	active     atomic.Int64
+	connect    atomic.Uint64
+	httpReqs   atomic.Uint64
+	socks      atomic.Uint64
+	udpAssoc   atomic.Uint64
+	udpRefused atomic.Uint64
+	pacHits    atomic.Uint64
+	rejected   atomic.Uint64
+	failed     atomic.Uint64
+	escalated  atomic.Uint64
+	nextID     atomic.Uint64
 }
 
 // New validates the wiring and returns a Server.
@@ -166,6 +192,8 @@ func (s *Server) Stats() Stats {
 		CONNECT:   s.connect.Load(),
 		HTTP:      s.httpReqs.Load(),
 		SOCKS:     s.socks.Load(),
+		UDPAssoc:  s.udpAssoc.Load(),
+		UDPDrops:  s.udpRefused.Load(),
 		PAC:       s.pacHits.Load(),
 		Rejected:  s.rejected.Load(),
 		Failed:    s.failed.Load(),

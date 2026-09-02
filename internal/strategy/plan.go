@@ -14,9 +14,27 @@ const (
 	SegStream  SegKind = iota // ordinary write; contributes to the payload
 	SegOOBByte                // MSG_OOB junk byte; NOT part of the payload
 	SegFakeRaw                // raw-injected decoy packet; NOT part of the payload
+	// SegFakeDatagram is a decoy DATAGRAM: an ordinary write on a connected
+	// datagram socket that is not part of the payload.
+	//
+	// It exists because amendment A7 left the UDP desync family unemittable.
+	// quicfake's decoys were typed SegFakeRaw, which derives CapRawInject —
+	// granted by nothing in this build — so the op validated against no
+	// transport at all. byedpi's desync_udp, the mechanism it reproduces, does
+	// not inject anything: it lowers the hop limit and calls send() on the
+	// connected socket N times before sending the real datagram. That is a
+	// plain write whose bytes are not the payload, which is a kind of its own:
+	// SegStream cannot express it (the payload invariant fires) and SegFakeRaw
+	// overstates what it needs (a raw socket, i.e. root).
+	//
+	// It derives CapDatagram, which only a datagram transport grants, so a plan
+	// carrying one is refused on a TCP socket before a byte moves — on a stream
+	// there are no packet boundaries, and a decoy would simply corrupt the
+	// stream.
+	SegFakeDatagram
 )
 
-var segKindNames = [...]string{"stream", "oob", "fakeraw"}
+var segKindNames = [...]string{"stream", "oob", "fakeraw", "fakedgram"}
 
 func (k SegKind) String() string {
 	if int(k) >= len(segKindNames) {
@@ -89,6 +107,8 @@ func (p Plan) Caps() Cap {
 			c |= CapOOB
 		case SegFakeRaw:
 			c |= CapRawInject
+		case SegFakeDatagram:
+			c |= CapDatagram
 		}
 	}
 	return c
@@ -156,6 +176,13 @@ func (p Plan) Validate(b Budget) error {
 		case SegFakeRaw:
 			if len(s.Data) == 0 {
 				return fmt.Errorf("%w: segment %d is an empty raw packet", ErrBadValue, i)
+			}
+		case SegFakeDatagram:
+			// An empty datagram is a legal UDP packet and a useless decoy: a
+			// middlebox tracking a connection ID cannot associate it with the
+			// flow, which is the whole mechanism.
+			if len(s.Data) == 0 {
+				return fmt.Errorf("%w: segment %d is an empty decoy datagram", ErrBadValue, i)
 			}
 		default:
 			return fmt.Errorf("%w: segment %d has kind %s", ErrBadValue, i, s.Kind)

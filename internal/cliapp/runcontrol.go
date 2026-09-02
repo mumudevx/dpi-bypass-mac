@@ -13,7 +13,6 @@ import (
 	"github.com/mumudevx/dpi-bypass-mac/internal/config"
 	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
 	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
 	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
 )
 
@@ -67,7 +66,7 @@ func (l *liveState) systemReport() (applied, notes []string) {
 func (l *liveState) handler() observ.Handler {
 	return observ.Handler{
 		Status:  l.status,
-		Why:     whyHandler(l.sub.engine, func() policy.NetworkID { return l.sub.netID }, l.counters),
+		Why:     whyHandler(l.sub.engine, l.sub.netID.get, l.counters),
 		On:      l.on,
 		Off:     l.off,
 		Reload:  l.doReload,
@@ -96,7 +95,7 @@ func (l *liveState) status(context.Context) (observ.Status, error) {
 		Strategy:      l.cfg.Strategy,
 		Ladder:        append([]string(nil), l.ladder...),
 		Resolvers:     resolverHealth(l.sub.chain.Health()),
-		NetworkID:     l.sub.netID.Key(),
+		NetworkID:     l.sub.netID.get().Key(),
 		Conns:         l.counters.Snapshot(),
 	}
 	for _, ln := range l.listeners {
@@ -106,8 +105,8 @@ func (l *liveState) status(context.Context) (observ.Status, error) {
 	// here rather than remembered: `dpb apply` can write a profile while this
 	// process runs, and reporting the one loaded at start-up would be a lie
 	// with a timestamp on it.
-	st.Tuned = tunedStatus(l.layout, l.sub.netID.Key())
-	st.Cache = cacheStatus(l.layout, l.cfg, l.sub.netID)
+	st.Tuned = tunedStatus(l.layout, l.sub.netID.get().Key())
+	st.Cache = cacheStatus(l.layout, l.cfg, l.sub.netID.get())
 	return st, nil
 }
 

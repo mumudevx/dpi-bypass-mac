@@ -65,6 +65,19 @@ type Options struct {
 	// V4Path reports whether a usable IPv4 path exists; nil means look at the
 	// interface addresses.
 	V4Path func() bool
+	// V6Protected reports whether some front end is carrying IPv6 for this
+	// machine right now — in TUN mode, that ::/1 and 8000::/1 are installed and
+	// have been read back out of the kernel routing table
+	// (tunfe.IPv6Gate.Captured); in proxy mode, that every flow we carry is
+	// judged whatever its address family.
+	//
+	// NIL MEANS NOT PROTECTED, and that is deliberate. Answering AAAA for
+	// traffic we cannot touch is the silent fail-open DOSSIER GT19 makes
+	// dangerous here, so a caller that forgot to wire this gets the safe answer
+	// rather than the convenient one. It gates answers we SERVE to other
+	// processes only; dpb's own lookups are unaffected, because whatever this
+	// process dials it dials through the ladder.
+	V6Protected func() bool
 	// Now is the clock, for tests.
 	Now func() time.Time
 }
@@ -156,7 +169,7 @@ func NewChain(o Options) *Chain {
 	if v4 == nil {
 		v4 = hasGlobalIPv4
 	}
-	c.aaaa = &aaaaPolicy{mode: o.AAAA, v4Path: v4, nat64: c.nat64Cached}
+	c.aaaa = &aaaaPolicy{mode: o.AAAA, v4Path: v4, v6Path: o.V6Protected, nat64: c.nat64Cached}
 	return c
 }
 
@@ -211,6 +224,23 @@ func (c *Chain) setHealth(h Health) {
 // caller writing bytes back to a stub wants the SERVFAIL, the caller deciding
 // whether the network works wants the error.
 func (c *Chain) Exchange(ctx context.Context, query []byte) ([]byte, error) {
+	return c.exchange(ctx, query, false)
+}
+
+// ExchangeServed is Exchange for a query that arrived from ANOTHER PROCESS on
+// this machine — the DNS server's path, and the only one whose answers become
+// sockets we do not own.
+//
+// It differs in exactly one way: the AAAA policy is the fail-closed one. An
+// application handed an AAAA record opens its own connection to that address,
+// so answering AAAA while nothing is capturing IPv6 hands it traffic dpb cannot
+// protect — on a line where the IPv6 sinkhole is registered to BTK itself
+// (DOSSIER GT19). See resolve.Options.V6Protected.
+func (c *Chain) ExchangeServed(ctx context.Context, query []byte) ([]byte, error) {
+	return c.exchange(ctx, query, true)
+}
+
+func (c *Chain) exchange(ctx context.Context, query []byte, served bool) ([]byte, error) {
 	q, err := FirstQuestion(query)
 	if err != nil {
 		return SynthRcode(query, dns.RcodeFormatError), fmt.Errorf("resolve: unusable query: %w", err)
@@ -218,7 +248,7 @@ func (c *Chain) Exchange(ctx context.Context, query []byte) ([]byte, error) {
 	name := normName(q.Name)
 
 	if q.Type == dns.TypeAAAA {
-		if allow, why := c.aaaa.allow(ctx); !allow {
+		if allow, why := c.aaaaDecision(ctx, served); !allow {
 			c.logf("resolve: suppressing AAAA for %s (%s); answering NOERROR with an empty answer, never NXDOMAIN", name, why)
 			return SynthEmpty(query), nil
 		}
@@ -246,6 +276,47 @@ func (c *Chain) Exchange(ctx context.Context, query []byte) ([]byte, error) {
 		c.cachePut(key, answer, m, ttl)
 	}
 	return answer, nil
+}
+
+func (c *Chain) aaaaDecision(ctx context.Context, served bool) (bool, string) {
+	if served {
+		return c.aaaa.allowServed(ctx)
+	}
+	return c.aaaa.allow(ctx)
+}
+
+// AAAAStatus is what the AAAA policy would do right now, for `dpb dns resolve
+// --trace` and for `dpb doctor`.
+type AAAAStatus struct {
+	Mode AAAAMode
+	// Served is whether an AAAA answer would be returned to a local
+	// application; ServedWhy says why not when it would not.
+	Served    bool
+	ServedWhy string
+	// Own is the same for dpb's own lookups, which are protected in both
+	// families by construction and so are only withheld on poison evidence.
+	Own    bool
+	OwnWhy string
+	// V6Protected is the input that separates the two: whether anything is
+	// carrying IPv6 for this machine on this run.
+	V6Protected bool
+	// NAT64 is the other input, and the one that vetoes suppression: on a
+	// 464XLAT carrier the AAAA is the connectivity. Its Detail says what the
+	// probe saw, including "the probe failed", which is worth printing —
+	// a failed probe reads as "no NAT64" and so does not veto.
+	NAT64 NAT64
+}
+
+// AAAAStatus reports the current AAAA decision. It may cost one memoised
+// RFC 7050 probe, because NAT64 detection is genuinely part of the decision.
+func (c *Chain) AAAAStatus(ctx context.Context) AAAAStatus {
+	st := AAAAStatus{Mode: c.aaaa.mode, V6Protected: c.aaaa.v6Protected()}
+	st.Own, st.OwnWhy = c.aaaa.allow(ctx)
+	st.Served, st.ServedWhy = c.aaaa.allowServed(ctx)
+	if c.aaaa.mode == AAAAAuto {
+		st.NAT64 = c.nat64Cached(ctx)
+	}
+	return st
 }
 
 // cacheableFor clamps an upstream TTL into the window we are willing to trust.

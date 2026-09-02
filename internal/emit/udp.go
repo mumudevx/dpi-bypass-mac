@@ -32,6 +32,21 @@ type UDPTransport struct {
 
 var _ Transport = (*UDPTransport)(nil)
 
+// UDPCaps is what a connected kernel UDP socket on this machine grants,
+// computed the way NewUDPTransport computes it.
+//
+// It exists so a front end can refuse a UDP strategy its transport cannot
+// satisfy at CONFIGURATION time, with the shortfall named, instead of
+// discovering it per datagram on an already-open socket. The TTL bits depend on
+// a sysctl read, so this is a measurement of this machine, not a constant.
+func UDPCaps(v6 bool) strategy.Cap {
+	caps := strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapDatagram
+	if ttl, err := defaultHopLimit(v6); err == nil && ttl > 0 {
+		caps |= sockTTLCaps
+	}
+	return caps
+}
+
 // NewUDPTransport wraps a connected UDP socket. The socket MUST be connected
 // (dialled, not listening): an unconnected socket has no remote address, so
 // Write has nowhere to send and the plan would fail per datagram instead of once
@@ -57,7 +72,12 @@ func NewUDPTransport(c *net.UDPConn) (*UDPTransport, error) {
 		// with more than one segment asks for CapNoDelay (strategy.Plan.Caps), and
 		// refusing it here would reject every quicfake plan for a property UDP has
 		// by construction.
-		caps:   strategy.CapStreamWrite | strategy.CapNoDelay,
+		//
+		// CapDatagram is the same kind of truth about message boundaries: one
+		// write is one packet here, so a decoy segment can be sent without
+		// corrupting the payload. It is the capability a SegFakeDatagram plan
+		// asks for, and no stream transport grants it.
+		caps:   strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapDatagram,
 		local:  toAddrPort(c.LocalAddr()),
 		remote: remote,
 	}

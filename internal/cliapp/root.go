@@ -20,7 +20,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
+	"github.com/mumudevx/dpi-bypass-mac/internal/front/tunfe"
 	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpi-bypass-mac/internal/netwatch"
 	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
 	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
 )
@@ -135,6 +137,27 @@ type globals struct {
 	rib    netstate.RIBReader
 	// facts replaces CollectFacts, which reads the machine's real interfaces.
 	facts *netstate.Facts
+	// factsFn replaces CollectFacts with a function, so a test can move the
+	// machine to a different network while a run is in flight. netwatch
+	// re-collects on every routing change, and the namespace swap cannot be
+	// exercised at all if the facts are a constant.
+	factsFn func(context.Context, netstate.Env) *netstate.Facts
+	// netwatchOpts adjusts the network watcher's options before it starts. It
+	// is the single test seam for the laptop-reality layer: the shipped
+	// watcher reads this machine's routing socket and dials the real
+	// connectivity endpoints, and neither belongs in a unit test.
+	netwatchOpts func(*netwatch.Options)
+	// openLink replaces tunfe.OpenDevice, which opens a real utun and is the
+	// one thing in TUN mode that genuinely cannot run without root. A test
+	// hands back one end of a tunfe.NewPipe pair instead, which is the shipped
+	// netstack over an in-memory link rather than a stub of it.
+	openLink func(name string, mtu int, logf func(string, ...any)) (tunfe.Link, error)
+	// tunSeq wraps the netstate.Manager the tunnel's bring-up applies its Ops
+	// through. It is a DECORATOR rather than a replacement so production keeps
+	// one manager and one journal for the whole run, while a test can watch the
+	// exact Op sequence — the ordering is the contract, and on a machine with
+	// no utun the real ifconfig Op cannot verify.
+	tunSeq func(tunfe.Sequencer) tunfe.Sequencer
 	// getenv replaces os.Getenv for the configuration's environment layer.
 	getenv func(string) string
 	// ready is closed once `dpb run` is listening and the banner is printed.
@@ -185,6 +208,9 @@ func (g *globals) ribOf() netstate.RIBReader {
 // gateway simply learns under a less specific network identity. Refusing to
 // start would trade a working proxy for a more precise cache key.
 func (g *globals) factsOf(ctx context.Context, e netstate.Env) *netstate.Facts {
+	if g.factsFn != nil {
+		return g.factsFn(ctx, e)
+	}
 	if g.facts != nil {
 		return g.facts
 	}
@@ -194,6 +220,24 @@ func (g *globals) factsOf(ctx context.Context, e netstate.Env) *netstate.Facts {
 		return nil
 	}
 	return f
+}
+
+// openLinkOf is the utun opener. The shipped one is tunfe.OpenDevice, which is
+// a wrapper around CreateTUN and the only part of TUN mode that needs root.
+func (g *globals) openLinkOf() func(string, int, func(string, ...any)) (tunfe.Link, error) {
+	if g.openLink != nil {
+		return g.openLink
+	}
+	return tunfe.OpenDevice
+}
+
+// tunSeqOf is the sequencer TUN bring-up applies its Ops through: the run's own
+// netstate.Manager, unless a test wrapped it.
+func (g *globals) tunSeqOf(m tunfe.Sequencer) tunfe.Sequencer {
+	if g.tunSeq != nil {
+		return g.tunSeq(m)
+	}
+	return m
 }
 
 func (g *globals) getenvOf() func(string) string {

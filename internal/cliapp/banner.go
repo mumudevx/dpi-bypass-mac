@@ -56,7 +56,19 @@ func (b banner) write(w io.Writer) {
 		fmt.Fprintf(w, "\n  --dry-run: nothing below was applied.\n")
 	}
 	if len(b.Applied) > 0 {
-		fmt.Fprintf(w, "\n  system settings applied and verified:\n")
+		// The header states what the list IS, and under --dry-run that is a
+		// plan, not a result. "applied and verified" over six ops that were
+		// neither is the same defect class as a prober narrating a conclusion
+		// its own numbers contradict: a tool whose value rests on refusing to
+		// claim what it has not verified cannot print a false header in the one
+		// mode whose entire purpose is that nothing happened. The disclaimer
+		// two lines up does not license the header — it is the header that gets
+		// quoted, screenshotted and pasted into a bug report.
+		if b.DryRun {
+			fmt.Fprintf(w, "\n  system settings that WOULD be applied — none of them was:\n")
+		} else {
+			fmt.Fprintf(w, "\n  system settings applied and verified:\n")
+		}
 		for _, a := range b.Applied {
 			fmt.Fprintf(w, "    - %s\n", a)
 		}
@@ -73,6 +85,15 @@ func (b banner) write(w io.Writer) {
 	// Everything above is reverted on the way out, and the journal is how that
 	// promise survives a kill -9. Saying where it is turns "my proxy settings
 	// are stuck" into one command.
+	//
+	// Under --dry-run there is no change to revert and nothing was journalled,
+	// so promising a revert here would be the same falsehood as the header
+	// above, one paragraph later.
+	if b.DryRun {
+		fmt.Fprintf(w, "\n  Nothing was changed and nothing was journalled, so there is nothing to\n"+
+			"  revert. Re-run without --dry-run to apply the sequence above.\n")
+		return
+	}
 	fmt.Fprintf(w, "\n  Ctrl-C reverts every change above. If dpb is killed instead,\n"+
 		"  `dpb doctor --repair` replays %s.\n", b.Journal)
 }

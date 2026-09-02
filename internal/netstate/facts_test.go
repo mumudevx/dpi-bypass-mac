@@ -250,3 +250,32 @@ func TestGlobalAddrsSkipsULAsAndLinkLocals(t *testing.T) {
 		t.Fatalf("V6Global = %v, want only the global address", got.V6Global)
 	}
 }
+
+// TestPickDefaultV6 covers the input TUN mode's IPv6 escape route is built
+// from. pickDefault deliberately prefers IPv4 — its callers use it to name the
+// physical uplink — so the v6 next hop has to be asked for separately, and on a
+// dual-stack machine it is frequently a different interface carrying a
+// link-local gateway with a zone.
+func TestPickDefaultV6(t *testing.T) {
+	t.Parallel()
+	v4 := RouteEntry{Dst: netip.MustParsePrefix("0.0.0.0/0"),
+		Gateway: netip.MustParseAddr("192.168.1.1"), Iface: "en0", Index: 4}
+	v6 := RouteEntry{Dst: netip.MustParsePrefix("::/0"),
+		Gateway: netip.MustParseAddr("fe80::1%en1"), Iface: "en1", Index: 5}
+	scoped := RouteEntry{Dst: netip.MustParsePrefix("::/0"),
+		Gateway: netip.MustParseAddr("fe80::9%utun4"), Iface: "utun4", Index: 9, Scoped: true}
+	// A point-to-point default with no next hop: there is nothing to hand
+	// `route add -inet6 default <gw>`, so it must not be chosen.
+	p2p := RouteEntry{Dst: netip.MustParsePrefix("::/0"), Iface: "utun0", Index: 10}
+
+	got, ok := pickDefaultV6([]RouteEntry{v4, scoped, p2p, v6})
+	if !ok || got.Iface != "en1" || got.Gateway.String() != "fe80::1%en1" {
+		t.Fatalf("pickDefaultV6 = (%v, %v), want the unscoped v6 default via en1", got, ok)
+	}
+	if _, ok := pickDefaultV6([]RouteEntry{v4, scoped, p2p}); ok {
+		t.Fatal("a scoped or gatewayless default was accepted as the v6 uplink")
+	}
+	if _, ok := pickDefaultV6(nil); ok {
+		t.Fatal("an empty table produced a v6 default")
+	}
+}

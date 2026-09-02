@@ -262,6 +262,28 @@ func pickDefault(rs []RouteEntry, iface string) (RouteEntry, bool, error) {
 	return v6, haveV6, nil
 }
 
+// pickDefaultV6 finds the unscoped IPv6 default route.
+//
+// It is separate from pickDefault because that one deliberately prefers IPv4:
+// its callers use it to identify THE uplink, and on a dual-stack macOS box the
+// v4 default is the one that names the physical service. The v6 next hop is a
+// different question with a different answer — frequently a different interface,
+// and often a link-local address carrying a zone.
+func pickDefaultV6(rs []RouteEntry) (RouteEntry, bool) {
+	for _, r := range rs {
+		if r.Dst.Bits() != 0 || r.Scoped || r.Dst.Addr().Is4() {
+			continue
+		}
+		if !r.Gateway.IsValid() {
+			// A default with no next hop is a point-to-point interface route;
+			// it cannot be turned into `route add -inet6 default <gw>`.
+			continue
+		}
+		return r, true
+	}
+	return RouteEntry{}, false
+}
+
 func (k *kernelRIB) Exists(dst netip.Prefix, iface string) (bool, error) {
 	rs, err := k.Routes()
 	if err != nil {

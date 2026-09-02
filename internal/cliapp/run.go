@@ -19,8 +19,10 @@ import (
 	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
 	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
 	"github.com/mumudevx/dpi-bypass-mac/internal/front/proxyfe"
+	"github.com/mumudevx/dpi-bypass-mac/internal/front/tunfe"
 	"github.com/mumudevx/dpi-bypass-mac/internal/janitor"
 	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpi-bypass-mac/internal/netwatch"
 	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
 	"github.com/mumudevx/dpi-bypass-mac/internal/ops"
 	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
@@ -61,6 +63,16 @@ type runFlags struct {
 	dnsUDP []string
 	ipv6   string
 
+	// tun and its four companions are the privileged front end. --tun is a
+	// FLAG rather than a mode string because the tunnel is additive: the proxy
+	// listeners, the PAC and the exported environment all keep running and the
+	// tunnel picks up the programs that ignore every one of them.
+	tun      bool
+	tunName  string
+	mtu      int
+	allowVPN bool
+	setDNS   string
+
 	noLearn bool
 	dryRun  bool
 }
@@ -79,10 +91,17 @@ func newRunCmd(g *globals) *cobra.Command {
 			"way out — including on SIGINT, SIGTERM, SIGHUP and a panic.\n\n" +
 			"No sudo. Connections are sent with no desync first and escalated only when one\n" +
 			"is reset before any server byte arrives, so the Turkish banks and .gov.tr sites\n" +
-			"measured breaking under desync are never desynced at all.",
+			"measured breaking under desync are never desynced at all.\n\n" +
+			"--tun additionally brings up a utun and captures the whole address space, which\n" +
+			"needs root (exit code 4 without it). It is not the default and should not be:\n" +
+			"the emitters measured beating this DPI all work from an unprivileged socket, so\n" +
+			"the tunnel buys coverage of programs that ignore proxy settings and nothing\n" +
+			"else. Every route it installs is journalled and reverted on the way out.",
 		Example: "  dpb run --profile turkey\n" +
 			"  dpb run --proxy-style none            # listen, but change no system setting\n" +
-			"  dpb run --dry-run                     # print every mutation, apply none",
+			"  dpb run --dry-run                     # print every mutation, apply none\n" +
+			"  dpb run --tun --dry-run               # the same, for the tunnel; no sudo needed\n" +
+			"  sudo dpb run --tun --profile turkey   # proxy listeners AND the tunnel",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runRun(cmd.Context(), g, cmd, f)
@@ -109,6 +128,15 @@ func newRunCmd(g *globals) *cobra.Command {
 	fl.StringSliceVar(&f.dnsDoH, "dns-doh", nil, "prepend a DoH resolver URL")
 	fl.StringSliceVar(&f.dnsUDP, "dns-udp", nil, "prepend a plaintext UDP resolver ip:port")
 	fl.StringVar(&f.ipv6, "ipv6", "", "auto | allow | suppress")
+	fl.BoolVar(&f.tun, "tun", false,
+		"also start the TUN front-end: a utun and capture routes for the whole address space (requires root)")
+	fl.StringVar(&f.tunName, "tun-name", "utun",
+		"utun device to open; \"utun\" lets the kernel pick the unit")
+	fl.IntVar(&f.mtu, "mtu", 0, "utun MTU (default 1500)")
+	fl.BoolVar(&f.allowVPN, "allow-vpn", false,
+		"proceed with --tun even when a full-tunnel VPN owns the default route")
+	fl.StringVar(&f.setDNS, "set-dns", "",
+		"off | on — point the system's resolvers at dpb (default: off in proxy mode, on with --tun)")
 	fl.BoolVar(&f.noLearn, "no-learn", false, "do not read or write the per-host verdict cache")
 	fl.BoolVar(&f.dryRun, "dry-run", false,
 		"print every system mutation that WOULD be applied and apply none; the listeners still run")
@@ -170,24 +198,90 @@ type killSwitch struct {
 	mu     sync.RWMutex
 	off    bool
 	reason string
+	// holds are the automatic suspensions netwatch takes and releases: a
+	// captive portal, a vanished uplink, a network change being verified.
+	//
+	// They are a SET and are kept apart from the manual `dpb off` lever
+	// because the two are independent. Releasing the portal hold must not
+	// cancel a `dpb off` the user typed, and `dpb on` must not lift a portal
+	// suspension the user cannot see the reason for — it would put dpb back in
+	// the path of the login page they are trying to load. Each holder releases
+	// exactly the hold it took.
+	holds map[string]string
 }
 
 func (k *killSwitch) suspended() bool {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
-	return k.off
+	return k.off || len(k.holds) > 0
 }
 
 func (k *killSwitch) state() (bool, string) {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
-	return k.off, k.reason
+	var why []string
+	if k.off && k.reason != "" {
+		why = append(why, k.reason)
+	}
+	for _, id := range holdOrder {
+		if text, ok := k.holds[id]; ok {
+			why = append(why, text)
+		}
+	}
+	return k.off || len(k.holds) > 0, strings.Join(why, "; ")
 }
 
 func (k *killSwitch) set(off bool, reason string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.off, k.reason = off, reason
+}
+
+// hold takes one named automatic suspension. Taking a hold that is already
+// held is a no-op, so a repeated event cannot make one release insufficient.
+func (k *killSwitch) hold(id, text string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.holds == nil {
+		k.holds = map[string]string{}
+	}
+	k.holds[id] = text
+}
+
+func (k *killSwitch) release(id string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.holds, id)
+}
+
+// holdOrder renders the holds in a stable order so `dpb status` does not
+// reshuffle its reason line between reads.
+var holdOrder = []string{netwatch.ReasonUplink, netwatch.ReasonPortal, netwatch.ReasonSettling}
+
+// netIDBox is the verdict namespace, held in one place so a network change can
+// swap it underneath the running datapath.
+//
+// It is a box rather than a value captured in a closure because M15 exists:
+// the scope engine and the ladder runner each read it per connection, and a
+// verdict learned on a home Wi-Fi must stop being visible the instant the
+// laptop joins a hotspot. MEASUREMENTS.md is explicit that Turkish DPI differs
+// by ISP, so a stale namespace is not a stale cache — it is a strategy applied
+// on the evidence of a different network.
+type netIDBox struct {
+	mu sync.RWMutex
+	id policy.NetworkID
+}
+
+func (b *netIDBox) get() policy.NetworkID {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.id
+}
+
+func (b *netIDBox) set(id policy.NetworkID) {
+	b.mu.Lock()
+	b.id = id
+	b.mu.Unlock()
 }
 
 func runRun(ctx context.Context, g *globals, cmd *cobra.Command, f runFlags) (err error) {
@@ -207,8 +301,45 @@ func runRun(ctx context.Context, g *globals, cmd *cobra.Command, f runFlags) (er
 		return err
 	}
 
+	// --set-dns is resolved HERE, on the path every run takes, and not only
+	// inside startTun — which runs under --tun and nowhere else. That is where
+	// its only call site was, so `dpb run --set-dns on` in proxy mode was
+	// parsed, accepted, never consulted and never mentioned again: a flag that
+	// is honoured on one code path and silently ignored on the other is the
+	// trap this project keeps removing. The value is passed to startTun rather
+	// than re-derived there, so the two can no longer disagree.
+	//
+	// It is checked before the root gate below because it costs the user less:
+	// a typo answered with "re-run with sudo" is a typo they pay for twice.
+	setDNS, err := resolveSetDNS(f.tun, f.setDNS)
+	if err != nil {
+		return err
+	}
+
+	// --tun is refused before anything is bound, journalled or mutated. Both
+	// refusals are contractual exit codes a script branches on, and both are
+	// cheaper to reach here than after half a bring-up: 4 for "needs root", 5
+	// for "a full-tunnel VPN already owns the routes this mode needs".
+	if f.tun {
+		// The device name first, and for the same reason --set-dns is checked
+		// above: it is a typo, it costs nothing to catch, and answering it with
+		// "re-run with sudo" makes the user pay for it twice. startTun checks
+		// it again — it is the function that builds the ifconfig and route Ops,
+		// and it must never build them naming something that is not a utun —
+		// but the two cannot disagree, because the check is a pure function of
+		// the name.
+		if err := validateTunName(f.tunName); err != nil {
+			return err
+		}
+		if err := requireRootForTun(layout, f.dryRun); err != nil {
+			return err
+		}
+	}
+
 	// Installing the op set is what makes a spec parseable, and the capability
-	// gate below is validation gate 3 from docs/PLAN.md.
+	// gate below is validation gate 3 from docs/PLAN.md. TUN mode needs no
+	// separate gate: it dials the same kernel socket through the same
+	// emit.SockTransport, so its capability set IS proxyCaps.
 	ops.Install()
 	if err := cfg.CheckStrategies(proxyCaps); err != nil {
 		return err
@@ -276,6 +407,15 @@ func runRun(ctx context.Context, g *globals, cmd *cobra.Command, f runFlags) (er
 	}
 	env.Facts = g.factsOf(ctx, env)
 
+	// M15 built ErrFullTunnelVPN and exit code 5 for exactly this path and
+	// could not reach it, because --tun did not exist. The watcher applies the
+	// same rule on every later network change; this is the one at start-up,
+	// because a VPN that was already up when dpb started produces no change for
+	// the watcher to classify.
+	if err := refuseFullTunnelVPN(env.Facts, f.tun, f.allowVPN); err != nil {
+		return err
+	}
+
 	// The sockets are bound BEFORE the datapath is built, because the PAC has
 	// to name the port that is actually bound: --port 0 is a real thing to ask
 	// for, and a PAC naming the configured port would then point at nothing.
@@ -309,17 +449,39 @@ func runRun(ctx context.Context, g *globals, cmd *cobra.Command, f runFlags) (er
 		ks.set(true, `mode = "never"`)
 	}
 
-	sub, err := buildSubsystems(g, layout, cfg, ladderSpecs, env, addrOfBound(bound, "http"), counters, ks)
+	sub, err := buildSubsystems(g, layout, cfg, ladderSpecs, env, addrOfBound(bound, "http"), counters, ks, f.tun)
 	if err != nil {
 		closeBound()
 		return err
 	}
 	st.push("close the verdict store", func(context.Context) error { return sub.store.Close() })
 
-	listeners := startListeners(bound, sub.server, &st, g)
+	listeners := startListeners(bound, sub.server, &st, g, sub.serveErr)
 
-	applied, notes, sys := applySystemState(ctx, g, layout, cfg, sub, listeners, &st, env, journal)
+	// ONE Manager for the whole run, so the proxy settings and the tunnel's
+	// routes share one journal and one reverse order. Two managers over one
+	// journal would each revert only their own half, and `dpb panic` would
+	// unwind the settings while leaving the machine captured.
+	mgr := netstate.NewManager(journal, env)
+
+	applied, notes, sys := applySystemState(ctx, g, layout, cfg, sub, listeners, &st, env, mgr)
 	notes = append(preNotes, notes...)
+
+	if f.tun {
+		half, tunApplied, tunNotes, err := startTun(ctx, g, cfg, f, setDNS, sub, g.tunSeqOf(mgr), env, &st)
+		if err != nil {
+			return err
+		}
+		applied = append(applied, tunApplied...)
+		notes = append(notes, tunNotes...)
+		listeners = append(listeners, listener{Kind: "tun", Addr: half.iface})
+		// classifyVPN reads the routing table on every network change and our
+		// own capture routes are the 0.0.0.0/1 + 128.0.0.0/1 pair a
+		// WireGuard-style VPN installs. Without this, the first route change
+		// after bring-up makes dpb refuse to run alongside itself with exit
+		// code 5.
+		env.SelfIface = half.iface
+	}
 
 	// The control socket goes up LAST and comes down FIRST. Everything it
 	// reports — the ports that are bound, the settings that were actually
@@ -371,6 +533,11 @@ func runRun(ctx context.Context, g *globals, cmd *cobra.Command, f runFlags) (er
 		g.logf("run: reloaded %d name rules and %d address rules", len(rules), len(ipRules))
 		return nil
 	}
+	// The watcher goes up after the system state it is responsible for
+	// re-verifying, and before the banner, so that a network that is already
+	// behind a captive portal is reported in the banner's notes rather than
+	// discovered a page load later.
+	notes = append(notes, startNetwatch(g, f, sub, sys, ks, env, live, &st)...)
 	notes = append(notes, serveControlSocket(g, layout, live, &st)...)
 	live.setNotes(notes)
 
@@ -407,9 +574,10 @@ func runRun(ctx context.Context, g *globals, cmd *cobra.Command, f runFlags) (er
 // startJanitor spawns the kqueue child that undoes this run's system changes if
 // the process is SIGKILLed, and registers its shutdown.
 //
-// It is skipped when this run will not mutate anything: with --proxy-style none
-// or --dry-run the journal stays empty, so the child would wake to an empty
-// file and exit — a stray process in Activity Monitor bought for nothing.
+// It is skipped when this run will not mutate anything: the journal stays
+// empty, so the child would wake to an empty file and exit — a stray process in
+// Activity Monitor bought for nothing. That question is willMutate's, and it is
+// deliberately not "which proxy style is it": see the comment there.
 //
 // A failure to spawn is NOT fatal. It costs the SIGKILL defence, which is one
 // of four overlapping ones (the others are the signal handlers, the panic
@@ -417,7 +585,7 @@ func runRun(ctx context.Context, g *globals, cmd *cobra.Command, f runFlags) (er
 // a missing child would be the wrong trade. It is reported instead.
 func startJanitor(g *globals, cfg *config.Loaded, journal netstate.Journal,
 	st *stack, f runFlags) (notes []string) {
-	if f.dryRun || cfg.ProxyStyle == config.StyleNone {
+	if !willMutate(cfg, f) {
 		return nil
 	}
 	exe, err := g.exeOf()
@@ -565,17 +733,56 @@ type subsystems struct {
 	// the concrete engine — Explain is not on the Scope interface — and
 	// `reload` needs somewhere to put the new rules.
 	engine    *policy.Engine
-	netID     policy.NetworkID
+	netID     *netIDBox
 	resolvers []resolve.Resolver
-	server    *proxyfe.Server
-	pac       *proxyfe.PAC
-	serveErr  chan error
-	bypasses  []string
+	// dial is the same dialer the datapath uses. netwatch's captive-portal
+	// canary borrows it so the canary resolves through resolve.Chain like
+	// everything else (MEASUREMENTS.md §5.4).
+	dial     flow.Dialer
+	server   *proxyfe.Server
+	pac      *proxyfe.PAC
+	serveErr chan error
+	bypasses []string
+
+	// The six fields below exist so TUN mode can be handed the SAME objects
+	// proxy mode uses rather than a second set. That is the whole safety
+	// argument for the privileged front end: one ladder, one verdict cache,
+	// one reverse map, one governor, one resolver — so a user who excluded
+	// their bank keeps that exclusion under sudo, and the two front ends
+	// cannot reach different conclusions about a host.
+	runner  *flow.LadderRunner
+	reverse policy.ReverseMap
+	dns     *resolve.Server
+	sender  *emit.Sender
+	udpDial flow.UDPDialer
+	onConn  func(observ.ConnEvent)
+	// v6gate is the fail-closed link between the tunnel's verified IPv6
+	// capture and the resolver's AAAA policy. It is built here, always, so the
+	// chain reads it whether or not a tunnel ever opens; a closed gate means
+	// AAAA is answered with NOERROR and an SOA rather than with an address
+	// nothing is protecting (DOSSIER GT19).
+	v6gate *tunfe.IPv6Gate
 }
 
 func buildSubsystems(g *globals, layout paths.Layout, cfg *config.Loaded,
 	ladderSpecs []string, env netstate.Env, httpAddr string,
-	counters *observ.Counters, ks *killSwitch) (*subsystems, error) {
+	counters *observ.Counters, ks *killSwitch, tun bool) (*subsystems, error) {
+	// In TUN mode every socket this process opens for itself must be pinned to
+	// the real uplink. The capture routes cover the whole address space, so an
+	// unpinned socket is routed back into our own netstack — and for the
+	// plaintext DNS rungs that is not a detour but unbounded recursion, because
+	// the tunnel answers UDP/53 out of the same chain that asked. IP_BOUND_IF
+	// selects the scope; the interface-scoped default route the bring-up
+	// installs supplies the gateway.
+	uplink := ""
+	if tun {
+		u, err := tunUplink(env.Facts)
+		if err != nil {
+			return nil, err
+		}
+		uplink = u
+	}
+
 	rules, err := cfg.Rules()
 	if err != nil {
 		return nil, usagef("%v", err)
@@ -593,14 +800,20 @@ func buildSubsystems(g *globals, layout paths.Layout, cfg *config.Loaded,
 		return nil, usagef("%v", err)
 	}
 
-	resolvers, err := buildResolvers(cfg)
+	resolvers, err := buildResolvers(cfg, uplink, g.logf)
 	if err != nil {
 		return nil, err
 	}
 	reverse := policy.NewReverseMap(policy.HostCap)
+	v6gate := &tunfe.IPv6Gate{}
 	chain := resolve.NewChain(resolve.Options{
 		Resolvers: resolvers,
 		AAAA:      cfg.AAAAMode(),
+		// Fail-closed: the gate opens only after every IPv6 capture route has
+		// been read back out of the kernel routing table. In proxy mode, and
+		// in a TUN run on a v4-only uplink, it never opens and AAAA stays
+		// suppressed.
+		V6Protected: v6gate.Captured,
 		// A nil Detector would approve everything. The default carries the
 		// measured sinkhole sentinels (MEASUREMENTS.md §2, GT19).
 		Detector: resolve.NewDetector(nil, nil),
@@ -621,13 +834,14 @@ func buildSubsystems(g *globals, layout paths.Layout, cfg *config.Loaded,
 		store = s
 	}
 
-	netID := networkID(env.Facts, resolvers)
+	netID := &netIDBox{}
+	netID.set(networkID(env.Facts, resolvers))
 	engine := policy.NewEngine(policy.EngineOptions{
 		Rules:        matcher,
 		IPs:          ipset,
 		IncludeOnly:  cfg.IncludeOnly(),
 		Store:        store,
-		NetID:        func() policy.NetworkID { return netID },
+		NetID:        netID.get,
 		InspectPorts: cfg.InspectPorts,
 		Ladder:       ladderSpecs,
 		// mode = "never" is `dpb off` written into a file: everything relays
@@ -653,11 +867,13 @@ func buildSubsystems(g *globals, layout paths.Layout, cfg *config.Loaded,
 	budget := strategy.DefaultBudget()
 	budget.MaxSegments = cfg.MaxSegments
 
+	sender := &emit.Sender{Gov: gov, Logf: g.logf}
+	dialer := &flow.NetDialer{Resolve: chain.Resolve, Interface: uplink, Logf: g.logf}
 	runner := &flow.LadderRunner{
-		Dial:   &flow.NetDialer{Resolve: chain.Resolve, Logf: g.logf},
-		Sender: &emit.Sender{Gov: gov, Logf: g.logf},
+		Dial:   dialer,
+		Sender: sender,
 		Store:  store,
-		NetID:  func() policy.NetworkID { return netID },
+		NetID:  netID.get,
 		// One sinkhole table for the whole process, shared with the resolver
 		// chain, so "this answer proves nothing" cannot mean two things.
 		Sinkholes:   resolve.DefaultSinkholes,
@@ -688,27 +904,39 @@ func buildSubsystems(g *globals, layout paths.Layout, cfg *config.Loaded,
 		Suspended: ks.suspended,
 	}
 
+	// SOCKS5 UDP ASSOCIATE and, under --tun, the netstack's datagram relay.
+	// The pin is empty in proxy mode, where dpb installs no capture routes and
+	// the system's own routing decision is the correct one.
+	udpDial := &flow.NetUDPDialer{Interface: uplink, Logf: g.logf}
+	// UDP/53 is answered from the same chain the rest of the process uses, on
+	// both front ends. Relaying it would hand the ISP's resolver exactly the
+	// queries DoH exists to hide (MEASUREMENTS.md §2).
+	dnsSrv := resolve.NewServer(chain, g.logf)
+	// Every finished flow goes to the counters FIRST and to the log second.
+	// The counters are what `dpb status`, `dpb why` and the drift detector
+	// read; a log line nobody parses is not telemetry.
+	onConn := func(ev observ.ConnEvent) {
+		counters.Observe(ev)
+		g.onConn(ev)
+	}
+
 	server, err := proxyfe.New(proxyfe.Options{
 		Scope:   scope,
 		Ladder:  runner,
 		Dial:    runner.Dial,
 		Resolve: chain.Resolve,
 		PAC:     pac,
-		FirstMsg: flow.FirstMsgOpts{
-			FirstByteWait: cfg.FirstByteWait.D(),
-			CompleteWait:  cfg.CompleteWait.D(),
-			MaxAssembly:   cfg.MaxAssembly.D(),
-			Max:           cfg.FirstMsgMax,
-		},
+		UDPDial: udpDial,
+		DNS:     dnsSrv,
+		// The QUIC policy stays at its zero value, QUICRefuse: refusing a QUIC
+		// Initial to a name we judge puts the client on TCP, which is where
+		// every strategy in MEASUREMENTS.md §3 was measured. quicfake is
+		// reachable (proxyfe.QUICDesync) but unmeasured against this DPI, so it
+		// is not wired to a config key here.
+		FirstMsg:  firstMsgOpts(cfg),
 		RelayIdle: cfg.IdleTimeout.D(),
-		// Every finished flow goes to the counters FIRST and to the log
-		// second. The counters are what `dpb status`, `dpb why` and the drift
-		// detector read; a log line nobody parses is not telemetry.
-		OnConn: func(ev observ.ConnEvent) {
-			counters.Observe(ev)
-			g.onConn(ev)
-		},
-		Logf: g.logf,
+		OnConn:    onConn,
+		Logf:      g.logf,
 	})
 	if err != nil {
 		return nil, err
@@ -722,9 +950,28 @@ func buildSubsystems(g *globals, layout paths.Layout, cfg *config.Loaded,
 		resolvers: resolvers,
 		server:    server,
 		pac:       pac,
+		dial:      dialer,
 		serveErr:  make(chan error, 2),
 		bypasses:  pac.Bypass,
+		runner:    runner,
+		reverse:   reverse,
+		dns:       dnsSrv,
+		sender:    sender,
+		udpDial:   udpDial,
+		onConn:    onConn,
+		v6gate:    v6gate,
 	}, nil
+}
+
+// firstMsgOpts is the first-message read budget, shared by both front ends so
+// the tunnel and the proxy wait exactly as long for a ClientHello.
+func firstMsgOpts(cfg *config.Loaded) flow.FirstMsgOpts {
+	return flow.FirstMsgOpts{
+		FirstByteWait: cfg.FirstByteWait.D(),
+		CompleteWait:  cfg.CompleteWait.D(),
+		MaxAssembly:   cfg.MaxAssembly.D(),
+		Max:           cfg.FirstMsgMax,
+	}
 }
 
 // connSummaries converts the counters' view of a host's history into policy's,
@@ -790,11 +1037,26 @@ func forcedSpec(cfg *config.Loaded, ladder []string) string {
 	return ""
 }
 
-func buildResolvers(cfg *config.Loaded) ([]resolve.Resolver, error) {
+// buildResolvers compiles the configured chain.
+//
+// uplink is empty in proxy mode, where the system's routing decision is the
+// right one and both dial arguments stay nil, exactly as before. Under --tun it
+// names the real interface and both are pinned to it: DoH and DoT over a
+// flow.NetDialer with IP_BOUND_IF set, and the plaintext UDP rungs over a
+// *net.Dialer carrying the same Control hook.
+func buildResolvers(cfg *config.Loaded, uplink string, logf func(string, ...any)) ([]resolve.Resolver, error) {
+	var (
+		dial resolve.DialFunc
+		ud   *net.Dialer
+	)
+	if uplink != "" {
+		dial = uplinkDialFunc(uplink, logf)
+		ud = &net.Dialer{Control: flow.BindControl(uplink)}
+	}
 	eps := cfg.Endpoints()
 	out := make([]resolve.Resolver, 0, len(eps))
 	for _, e := range eps {
-		r, err := e.New(nil, nil)
+		r, err := e.New(dial, ud)
 		if err != nil {
 			return nil, usagef("run: resolver %q: %v", e.Label, err)
 		}
@@ -804,6 +1066,25 @@ func buildResolvers(cfg *config.Loaded) ([]resolve.Resolver, error) {
 		return nil, usagef("run: the resolver chain is empty")
 	}
 	return out, nil
+}
+
+// uplinkDialFunc is the stream dialler the DoH and DoT rungs use in TUN mode.
+//
+// Every address a resolver hands it is a bootstrap IP:port literal — doh.go
+// discards the hostname net/http derived from the URL precisely so this is
+// true — so it parses one and refuses anything else rather than handing a name
+// to a dialer. MEASUREMENTS.md §5.4 is why: the first compatibility matrix
+// scored every emitter 0/6 because Go's resolver returned the BTK sinkhole.
+func uplinkDialFunc(iface string, logf func(string, ...any)) resolve.DialFunc {
+	d := &flow.NetDialer{Interface: iface, Logf: logf}
+	return func(ctx context.Context, _ string, addr string) (net.Conn, error) {
+		ap, err := netip.ParseAddrPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("run: the uplink-pinned resolver dialler takes an address "+
+				"and a port, not %q: %w", addr, err)
+		}
+		return d.DialTCP(ctx, flow.Target{Addr: ap})
+	}
 }
 
 // networkID namespaces the verdict cache. A verdict learned on a censored line
@@ -884,16 +1165,24 @@ func addrOfBound(bound []boundListener, kind string) string {
 	return ""
 }
 
-func startListeners(bound []boundListener, srv *proxyfe.Server, st *stack, g *globals) []listener {
+func startListeners(bound []boundListener, srv *proxyfe.Server, st *stack, g *globals,
+	fail chan<- error) []listener {
 	out := make([]listener, 0, len(bound))
 	for _, b := range bound {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		ln, kind := b.ln, b.kind
+		addr := ln.Addr().String()
 		flow.Safe("cliapp/serve-"+kind, g.logf, func() {
 			defer close(done)
+			// Serve returns nil for a cancelled context, so anything that
+			// arrives here is a listener that died while the run believed it
+			// was serving. It is not recoverable and it is not survivable: the
+			// system proxy settings point at this port, so a process that
+			// logged it and carried on is a blackhole printing "Ready".
 			if err := srv.Serve(ctx, ln); err != nil {
-				g.serveFailed(err)
+				g.serveFailed(fail, fmt.Errorf("run: the %s listener on %s stopped: %w",
+					kind, addr, err))
 			}
 		})
 		st.push("stop the "+kind+" listener", func(context.Context) error {
@@ -901,7 +1190,7 @@ func startListeners(bound []boundListener, srv *proxyfe.Server, st *stack, g *gl
 			<-done
 			return nil
 		})
-		out = append(out, listener{Kind: kind, Addr: ln.Addr().String()})
+		out = append(out, listener{Kind: kind, Addr: addr})
 	}
 	return out
 }
@@ -932,11 +1221,17 @@ type systemHalf struct {
 	// setting that is already correct a no-op, so this is the cheap answer to
 	// "something else overwrote the proxy pane".
 	reapply func(context.Context) (applied []string, notes []string)
+	// reverify checks every applied Op against the subsystem that can see it
+	// and puts back only what went missing. It is what a network change runs:
+	// macOS flushes interface routes on a link change, and re-applying
+	// everything instead would let netstate's adoption pre-check mark our own
+	// settings Adopted and turn our own teardown into a no-op.
+	reverify func(context.Context) (netstate.ReverifyReport, error)
 }
 
 func applySystemState(ctx context.Context, g *globals, layout paths.Layout, cfg *config.Loaded,
 	sub *subsystems, listeners []listener, st *stack, env netstate.Env,
-	journal netstate.Journal) (applied []string, notes []string, half *systemHalf) {
+	mgr *netstate.Manager) (applied []string, notes []string, half *systemHalf) {
 	style := cfg.ProxyStyle
 	if style == config.StyleNone {
 		return nil, []string{"--proxy-style none: no system setting was changed"}, nil
@@ -946,7 +1241,6 @@ func applySystemState(ctx context.Context, g *globals, layout paths.Layout, cfg 
 		return nil, []string{"the HTTP listener is disabled, so no system proxy setting was applied"}, nil
 	}
 
-	mgr := netstate.NewManager(journal, env)
 	var revertOnce sync.Once
 	var revertErr error
 	revert := func(c context.Context) error {
@@ -987,7 +1281,7 @@ func applySystemState(ctx context.Context, g *globals, layout paths.Layout, cfg 
 	}
 
 	applied, notes = apply(ctx)
-	return applied, notes, &systemHalf{revert: revert, reapply: apply}
+	return applied, notes, &systemHalf{revert: revert, reapply: apply, reverify: mgr.Reverify}
 }
 
 func addrOf(ls []listener, kind string) string {
@@ -1019,11 +1313,32 @@ func noProxyList(bypasses []string) []string {
 // never eat a comment or reorder a setting somebody cared about.
 func scopeFile(l paths.Layout) string { return filepath.Join(l.ConfigDir, "scope.toml") }
 
-// serveFailed reports a listener that died while running.
-func (g *globals) serveFailed(err error) {
-	if g.serveErrs != nil {
+// serveFailed reports a listener or a datapath that died while running.
+//
+// fail is the production path: it is sub.serveErr, the channel runRun's main
+// loop selects on, so a dead listener brings the process down and the teardown
+// stack takes the system settings back off. g.serveErrs is a TEST seam and is
+// assigned only in _test.go — which is why it cannot be the only path. It was:
+// in a shipped binary the channel was nil, the error was dropped on the floor,
+// and the user was left with a dpb that printed "Ready", kept the proxy pane
+// pointed at itself, and served nothing. A seam that makes the production path
+// silent is worse than no seam.
+//
+// Neither send blocks. Both channels are buffered and a second failure while
+// the first is still being acted on adds nothing: the run is already coming
+// down, and the first error is the one that explains why.
+func (g *globals) serveFailed(fail chan<- error, err error) {
+	// Reported at a level a default run prints, not at debug: dpb is about to
+	// stop, and a process that exits without saying why is one the user cannot
+	// tell apart from a crash.
+	g.logger().Warn("dpb is stopping and reverting every system change it made; "+
+		"start it again, and run `dpb doctor` if it repeats", "%v", err)
+	for _, ch := range []chan<- error{fail, g.serveErrs} {
+		if ch == nil {
+			continue
+		}
 		select {
-		case g.serveErrs <- err:
+		case ch <- err:
 		default:
 		}
 	}
@@ -1058,4 +1373,29 @@ func errSuffix(s string) string {
 		return ""
 	}
 	return ": " + s
+}
+
+// willMutate reports whether this run will journal a system mutation, which is
+// the only question the SIGKILL janitor turns on.
+//
+// It used to be asked as "is the proxy style none", and that was a correct
+// paraphrase for exactly as long as --proxy-style none meant "no system setting
+// was changed". --tun made it false: `sudo dpb run --tun --proxy-style none`
+// opens a utun, installs both capture-route halves, a /32 per system
+// nameserver and an interface-scoped default route, and rewrites the resolver
+// list — all journalled, none of it a proxy setting. Spawning nothing to clean
+// up after `kill -9` there leaves the user with a routing table pointing at a
+// device that no longer exists, and every name on the machine unreachable.
+//
+// --dry-run is the one case that still mutates nothing whatever else is asked
+// for: it applies no Op at all and opens no device.
+func willMutate(cfg *config.Loaded, f runFlags) bool {
+	if f.dryRun {
+		return false
+	}
+	// The tunnel's Ops are journalled whatever the proxy style is.
+	if f.tun {
+		return true
+	}
+	return cfg.ProxyStyle != config.StyleNone
 }

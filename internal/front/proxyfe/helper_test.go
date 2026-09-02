@@ -19,6 +19,7 @@ import (
 	"github.com/mumudevx/dpi-bypass-mac/internal/front/proxyfe"
 	"github.com/mumudevx/dpi-bypass-mac/internal/ops"
 	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
 	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
 )
 
@@ -321,6 +322,13 @@ type wiring struct {
 	suspended   func() bool
 	store       policy.Store
 	includeOnly bool
+	// the datagram path (SOCKS5 UDP ASSOCIATE)
+	udpDial        flow.UDPDialer
+	dns            proxyfe.DNSAnswerer
+	quic           proxyfe.QUICPolicy
+	quicStrategy   strategy.Strategy
+	udpIdle        time.Duration
+	maxUDPSessions int
 }
 
 // serveTest stands the whole front end up on a loopback listener and returns
@@ -372,16 +380,22 @@ func serveTest(t *testing.T, w wiring) *harness {
 	}
 
 	srv, err := proxyfe.New(proxyfe.Options{
-		Scope:      scope,
-		Ladder:     runner,
-		Dial:       dial,
-		Resolve:    w.resolve,
-		PAC:        w.pac,
-		MaxConns:   w.maxConns,
-		ClientIdle: 5 * time.Second,
-		RelayIdle:  5 * time.Second,
-		DrainGrace: 2 * time.Second,
-		Logf:       t.Logf,
+		Scope:          scope,
+		Ladder:         runner,
+		Dial:           dial,
+		Resolve:        w.resolve,
+		PAC:            w.pac,
+		MaxConns:       w.maxConns,
+		UDPDial:        w.udpDial,
+		DNS:            w.dns,
+		QUIC:           w.quic,
+		QUICStrategy:   w.quicStrategy,
+		UDPIdle:        w.udpIdle,
+		MaxUDPSessions: w.maxUDPSessions,
+		ClientIdle:     5 * time.Second,
+		RelayIdle:      5 * time.Second,
+		DrainGrace:     2 * time.Second,
+		Logf:           t.Logf,
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)

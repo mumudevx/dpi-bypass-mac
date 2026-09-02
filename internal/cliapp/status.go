@@ -431,7 +431,7 @@ func (g *globals) controlClient(l paths.Layout) *observ.Client {
 // a `dpb why` that looked under a different key would report an empty cache on
 // a machine whose cache is full.
 func (g *globals) networkIdentity(ctx context.Context, cfg *config.Loaded) (policy.NetworkID, error) {
-	resolvers, err := buildResolvers(cfg)
+	resolvers, err := buildResolvers(cfg, "", g.logf)
 	if err != nil {
 		return policy.NetworkID{}, err
 	}

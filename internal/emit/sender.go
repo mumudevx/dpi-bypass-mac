@@ -131,6 +131,19 @@ func emitSegment(t Transport, seg strategy.Segment) error {
 		return nil
 	case strategy.SegFakeRaw:
 		return t.InjectRaw(seg.Data)
+	case strategy.SegFakeDatagram:
+		// An ordinary write, as byedpi's desync_udp does it. The transport is a
+		// connected datagram socket — CapDatagram says so and the Sender's cap
+		// check has already refused the plan otherwise — so this write is one
+		// packet and the decoy never mixes with the payload.
+		n, err := t.Write(seg.Data)
+		if err != nil {
+			return err
+		}
+		if n != len(seg.Data) {
+			return fmt.Errorf("%w: %d of %d bytes", ErrShortWrite, n, len(seg.Data))
+		}
+		return nil
 	default:
 		return fmt.Errorf("emit: unknown segment kind %s", seg.Kind)
 	}
