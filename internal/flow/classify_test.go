@@ -94,6 +94,7 @@ func TestFailureString(t *testing.T) {
 		flow.FailResetAfterResponse:    "reset-after-response",
 		flow.FailNotReplayable:         "not-replayable",
 		flow.FailBudget:                "budget",
+		flow.FailTornStream:            "torn-stream",
 		flow.Failure(99):               "invalid",
 	} {
 		if got := f.String(); got != want {
@@ -102,8 +103,11 @@ func TestFailureString(t *testing.T) {
 	}
 }
 
-// TestReplayable is the retry-safety predicate. A ClientHello is always
-// replayable; a plaintext request is only if it is idempotent and bodyless.
+// TestReplayable is the retry-safety predicate. A COMPLETE ClientHello is
+// replayable; a prefix of one is not, because walking the ladder on a message
+// we truncated ourselves judges the network from non-evidence and skips every
+// rung carrying ReqComplete. A plaintext request is replayable only if it is
+// idempotent and bodyless.
 func TestReplayable(t *testing.T) {
 	t.Parallel()
 	h := clientHello(t, "discord.com")
@@ -114,7 +118,7 @@ func TestReplayable(t *testing.T) {
 		want    bool
 	}{
 		{"client hello", h, 443, true},
-		{"truncated hello", h[:80], 443, true},
+		{"truncated hello", h[:80], 443, false},
 		{"GET", []byte("GET / HTTP/1.1\r\nHost: a.example\r\n\r\n"), 80, true},
 		{"HEAD", []byte("HEAD / HTTP/1.1\r\nHost: a.example\r\n\r\n"), 80, true},
 		{"POST with a body", []byte("POST /pay HTTP/1.1\r\nHost: a.example\r\nContent-Length: 2\r\n\r\nhi"), 80, false},

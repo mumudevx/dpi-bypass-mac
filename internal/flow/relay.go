@@ -131,7 +131,19 @@ func pipeDir(dst, src net.Conn, o PipeOpts, onFirst func()) error {
 					onFirst()
 				}
 			}
+			if o.Idle > 0 {
+				// The idle policy reads "neither byte moves for this long", and
+				// a peer that has stopped reading moves no byte. Bounding only
+				// the read half left a direction parked in Write against a zero
+				// receive window with no bound at all.
+				if err := dst.SetWriteDeadline(time.Now().Add(o.Idle)); err != nil {
+					return fmt.Errorf("flow: relay: set write idle deadline: %w", err)
+				}
+			}
 			if _, werr := dst.Write(buf[:n]); werr != nil {
+				if o.Idle > 0 && isTimeout(werr) {
+					return fmt.Errorf("%w after %s: the peer stopped reading %d byte(s) in", ErrIdle, o.Idle, n)
+				}
 				return fmt.Errorf("flow: relay: write %d byte(s): %w", n, werr)
 			}
 		}
@@ -155,13 +167,21 @@ func pipeDir(dst, src net.Conn, o PipeOpts, onFirst func()) error {
 	}
 }
 
-// unblock forces every pending read to return immediately. A past deadline is
-// used rather than Close because the connections belong to the caller, which
-// may still want to read what is buffered or report on them.
+// unblock forces every pending read AND write to return immediately. A past
+// deadline is used rather than Close because the connections belong to the
+// caller, which may still want to read what is buffered or report on them; the
+// caller must clear the deadlines before reusing them.
+//
+// The write half is not optional. A direction parked in dst.Write against a
+// zero receive window — the ordinary state when a peer stops reading, produced
+// by a closed lid, a suspended tab or a dropped hotspot — is released by
+// nothing else, so a read-only unblock left both Pipe's teardown and its
+// ctx.Done() escape hatch waiting forever on a wedged goroutine, leaking two
+// connections and two 32 KiB buffers per stalled relay until fd exhaustion.
 func unblock(conns ...net.Conn) {
 	past := time.Now().Add(-time.Second)
 	for _, c := range conns {
-		_ = c.SetReadDeadline(past)
+		_ = c.SetDeadline(past)
 	}
 }
 

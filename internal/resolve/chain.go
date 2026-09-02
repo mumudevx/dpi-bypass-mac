@@ -119,6 +119,9 @@ type Chain struct {
 	natMu   sync.Mutex
 	natSeen time.Time
 	natLast NAT64
+
+	poisonMu   sync.Mutex
+	poisonSeen map[netip.Addr]bool
 }
 
 // NewChain builds a Chain. It never returns nil: a chain with no resolvers is
@@ -269,54 +272,172 @@ func (c *Chain) exchangeDirect(ctx context.Context, query []byte) ([]byte, error
 	}
 	name := normName(q.Name)
 
-	var (
-		errs      []error
-		truncated []byte
-		sawTrunc  bool
-	)
-	for _, r := range c.resolvers {
-		if err := ctx.Err(); err != nil {
-			errs = append(errs, err)
-			break
+	st := &walkState{}
+	if ans := c.walk(ctx, query, name, q, st, walkAll); ans != nil {
+		return ans, nil
+	}
+
+	// A plaintext rung truncated. The RFC answer is "retry over TCP" and
+	// MEASUREMENTS.md §2 measures plaintext TCP DNS as connection-reset at
+	// every port on this ISP, so the only move left is to re-ask an encrypted
+	// rung. Continuing forward cannot reach one: DefaultEndpoints puts all
+	// three encrypted rungs BEFORE both plaintext rungs, so by the time a
+	// plaintext rung truncates every encrypted rung is already behind us.
+	// Restart the walk at the first encrypted rung instead. The second pass is
+	// bounded by whatever is left of the caller's deadline, so it costs
+	// nothing when there is nothing left to spend.
+	if st.truncated != nil && c.hasEncrypted() {
+		c.logf("resolve: %s: a plaintext rung truncated; restarting the walk at the first encrypted rung (TCP/53 is never attempted)", q)
+		if ans := c.walk(ctx, query, name, q, st, walkEncryptedOnly); ans != nil {
+			return ans, nil
 		}
-		// Once a plaintext resolver has truncated, every other plaintext
-		// resolver will truncate identically. The RFC answer is "retry over
-		// TCP"; MEASUREMENTS.md §2 measures TCP/53 as connection-reset at every
-		// port on this ISP, so the only correct move is to re-ask an encrypted
-		// resolver, and to skip the ones that cannot help.
-		if sawTrunc && isPlaintext(r) {
+	}
+
+	if st.truncated != nil {
+		// Every encrypted resolver is gone too. Handing the stub the truncated
+		// answer is still better than silence: it carries the header, the
+		// question and whatever fit. It is never handed back over the TCP
+		// listener, where TC is meaningless — see Server.serveTCPConn.
+		c.logf("resolve: %s: only a truncated answer is available; returning it rather than falling back to TCP", q)
+		return st.truncated, nil
+	}
+	return nil, fmt.Errorf("%w for %s: %w", ErrChainExhausted, q, errors.Join(st.errs...))
+}
+
+// walkState carries what one pass over the chain learned into the next.
+type walkState struct {
+	errs      []error
+	truncated []byte
+	sawTrunc  bool
+}
+
+// walkMode selects which rungs a pass is allowed to try.
+type walkMode int
+
+const (
+	// walkAll is the ordinary pass: every rung in chain order, minus the
+	// plaintext rungs skipped once one of them has truncated.
+	walkAll walkMode = iota
+	// walkEncryptedOnly is the truncation retry: encrypted rungs only, from
+	// the front of the chain.
+	walkEncryptedOnly
+)
+
+// rungBudget bounds one resolver attempt.
+//
+// PerTry on its own is an assumption about the caller. With the shipped
+// defaults — len(DefaultEndpoints()) rungs at defaultPerTry — a serial walk
+// costs up to 20 s while the only caller budget in the tree is 8 s, so the two
+// alternate-port rungs that MEASUREMENTS.md §2 measures as the ONLY plaintext
+// transport working on this line are never reached: the walk dies inside the
+// DoH rungs ahead of them. Dividing what is left of the caller's deadline by
+// the rungs still to try keeps the whole chain inside that deadline whatever
+// the caller chose, and gives a rung its full PerTry whenever the budget is
+// generous enough to afford it.
+//
+// There is deliberately no floor. A rung that gets 50 ms fails fast and hands
+// its successor the rest, which is strictly better than one rung spending the
+// entire budget on the drop-shaped censorship §2 measures.
+func rungBudget(perTry, remaining time.Duration, rungsLeft int) time.Duration {
+	if rungsLeft < 1 {
+		rungsLeft = 1
+	}
+	if remaining <= 0 {
+		return 0
+	}
+	if share := remaining / time.Duration(rungsLeft); share < perTry {
+		return share
+	}
+	return perTry
+}
+
+// hasEncrypted reports whether the chain holds a rung that is not plaintext.
+func (c *Chain) hasEncrypted() bool {
+	for _, r := range c.resolvers {
+		if !isPlaintext(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// eligible reports whether this pass may try r.
+func (st *walkState) eligible(r Resolver, mode walkMode) bool {
+	if mode == walkEncryptedOnly {
+		return !isPlaintext(r)
+	}
+	// Once a plaintext resolver has truncated, every other plaintext resolver
+	// will truncate identically, so there is nothing to learn from trying one.
+	return !(st.sawTrunc && isPlaintext(r))
+}
+
+// walk makes one pass over the chain, returning the first clean answer.
+func (c *Chain) walk(ctx context.Context, query []byte, name string, q Question, st *walkState, mode walkMode) []byte {
+	deadline, hasDeadline := ctx.Deadline()
+
+	for i, r := range c.resolvers {
+		if err := ctx.Err(); err != nil {
+			st.errs = append(st.errs, err)
+			return nil
+		}
+		if !st.eligible(r, mode) {
 			continue
 		}
 
+		perTry := c.perTry
+		if hasDeadline {
+			left := 0
+			for _, rest := range c.resolvers[i:] {
+				if st.eligible(rest, mode) {
+					left++
+				}
+			}
+			// time.Now, not c.now: ctx.Deadline() is wall clock, and a test
+			// clock must not be able to talk a real deadline into a longer
+			// budget than the caller actually granted.
+			perTry = rungBudget(c.perTry, time.Until(deadline), left)
+			if perTry <= 0 {
+				st.errs = append(st.errs, fmt.Errorf("%s: %w", r.Label(), context.DeadlineExceeded))
+				return nil
+			}
+		}
+
 		start := c.now()
-		try, cancel := context.WithTimeout(ctx, c.perTry)
+		try, cancel := context.WithTimeout(ctx, perTry)
 		ans, err := r.Exchange(try, query)
 		cancel()
 		latency := c.now().Sub(start)
 
 		if err != nil {
 			c.setHealth(Health{Label: r.Label(), Latency: latency, Err: err})
-			errs = append(errs, fmt.Errorf("%s: %w", r.Label(), err))
+			st.errs = append(st.errs, fmt.Errorf("%s: %w", r.Label(), err))
 			c.logf("resolve: %s failed %s after %s: %v", r.Label(), q, latency.Round(time.Millisecond), err)
 			continue
 		}
 
 		addrs := AnswerAddrs(ans)
-		c.det.Learn(name, addrs)
 		sig := c.det.Check(name, addrs)
+		if !sig.Poisoned {
+			c.det.Learn(name, addrs)
+			// Re-check after learning. The answer that completes the quorum is
+			// itself poisoned; checking only before Learn is how the first
+			// uniformQuorum-1 block pages were served as clean, cached, and
+			// handed to the reverse map with no way to take them back.
+			sig = c.det.Check(name, addrs)
+		}
 		if sig.Poisoned {
-			c.notePoison(name, addrs, sig)
+			c.notePoison(name, sig)
 			c.setHealth(Health{Label: r.Label(), Latency: latency, Signal: sig,
 				Err: fmt.Errorf("poisoned answer: %s", sig.Detail)})
-			errs = append(errs, fmt.Errorf("%s: poisoned answer: %s", r.Label(), sig.Detail))
+			st.errs = append(st.errs, fmt.Errorf("%s: poisoned answer: %s", r.Label(), sig.Detail))
 			c.logf("resolve: %s returned a poisoned answer for %s (%s); advancing the chain",
 				r.Label(), name, sig.Detail)
 			continue
 		}
 
 		if Truncated(ans) && isPlaintext(r) {
-			sawTrunc = true
-			truncated = ans
+			st.sawTrunc = true
+			st.truncated = ans
 			c.setHealth(Health{Label: r.Label(), Latency: latency, Signal: sig,
 				Err: errors.New("answer truncated; re-asking an encrypted resolver, never TCP")})
 			c.logf("resolve: %s truncated %s; re-asking an encrypted resolver (TCP/53 is never attempted)", r.Label(), q)
@@ -324,31 +445,62 @@ func (c *Chain) exchangeDirect(ctx context.Context, query []byte) ([]byte, error
 		}
 
 		c.setHealth(Health{Label: r.Label(), OK: true, Latency: latency, Signal: sig})
-		return ans, nil
+		return ans
 	}
-
-	if truncated != nil {
-		// Every encrypted resolver is gone too. Handing the stub the truncated
-		// answer is still better than silence: it carries the header, the
-		// question and whatever fit, and our own local server answers the
-		// stub's TCP retry in-process without the query leaving the machine.
-		c.logf("resolve: %s: only a truncated answer is available; returning it rather than falling back to TCP", q)
-		return truncated, nil
-	}
-	return nil, fmt.Errorf("%w for %s: %w", ErrChainExhausted, q, errors.Join(errs...))
+	return nil
 }
 
-// notePoison feeds the AAAA policy the positive evidence it waits for.
-func (c *Chain) notePoison(name string, addrs []netip.Addr, sig Signal) {
-	if !sig.Sinkhole {
+// notePoison records positive evidence of censorship: it invalidates anything
+// already served under the offending address and feeds the AAAA policy.
+func (c *Chain) notePoison(name string, sig Signal) {
+	if !sig.Poisoned || !sig.Addr.IsValid() {
 		return
 	}
-	for _, a := range addrs {
-		if a.Is6() && !a.Is4In6() {
-			c.aaaa.noteV6Poison(fmt.Sprintf("an IPv6 answer for %s was the sinkhole %s", name, a))
-			return
-		}
+	if c.markPoisoned(sig.Addr) {
+		// First sighting only. The uniqueness heuristic needs uniformQuorum
+		// distinct names before it fires, so by the time it does, answers
+		// carrying the same censored address have already been served as clean
+		// and cached; nothing else in the chain can take them back. Gating on
+		// the first sighting keeps a network where every blocked name is
+		// poisoned from flushing the cache once per query.
+		c.Flush()
+		c.logf("resolve: %s was caught poisoning this network (%s); flushed the answer cache", sig.Addr, sig.Detail)
 	}
+	// Only the address that actually matched the sinkhole may condemn IPv6.
+	// Scanning the whole answer for any IPv6 address blames a legitimate AAAA
+	// that merely shared a message with the IPv4 sentinel, and v6Poisoned has
+	// no expiry, so one mis-attribution amputates AAAA for the life of the
+	// Chain under AAAAAuto.
+	if sig.Sinkhole && sig.Addr.Is6() && !sig.Addr.Is4In6() {
+		c.aaaa.noteV6Poison(fmt.Sprintf("an IPv6 answer for %s was the sinkhole %s", name, sig.Addr))
+	}
+}
+
+// markPoisoned records an address as known-censored and reports whether this is
+// the first time it has been seen.
+func (c *Chain) markPoisoned(a netip.Addr) bool {
+	c.poisonMu.Lock()
+	defer c.poisonMu.Unlock()
+	if c.poisonSeen == nil {
+		c.poisonSeen = make(map[netip.Addr]bool)
+	}
+	if c.poisonSeen[a] {
+		return false
+	}
+	c.poisonSeen[a] = true
+	return true
+}
+
+// Flush drops every cached answer.
+//
+// The chain has no other way to withdraw an answer it has already handed out.
+// Anything that learns the network is lying — a newly caught sinkhole, a
+// uniqueness quorum reaching its threshold — has to be able to invalidate what
+// was served before the evidence arrived.
+func (c *Chain) Flush() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cache = make(map[cacheKey]cacheEntry)
 }
 
 func isPlaintext(r Resolver) bool {
@@ -436,13 +588,30 @@ func (c *Chain) evictLocked() {
 	}
 }
 
-// withCallerID returns a copy of a cached answer carrying the caller's ID.
+// withCallerID returns a copy of a cached answer carrying the caller's own
+// header ID and question bytes.
+//
+// The ID is not enough. cacheKey and FirstQuestion both lower-case the name, so
+// a cached answer carries whatever case the first caller used. RFC 1035 §4.1.2
+// has the responder copy the question from the request, and a stub using 0x20
+// case randomisation compares it byte for byte: a reply whose question reads
+// "discord.com." when it asked "DiScOrD.CoM." is treated as a spoof and
+// dropped, which is a silent resolution failure with no error anywhere.
 func (c *Chain) withCallerID(query, cached []byte) []byte {
 	out := make([]byte, len(cached))
 	copy(out, cached)
 	if id, err := MsgID(query); err == nil {
 		_ = SetMsgID(out, id)
 	}
+	qe, qerr := questionEnd(query)
+	ce, cerr := questionEnd(out)
+	// Equal lengths are expected — same name, same labels, only the case can
+	// differ — but a mismatch means the two messages are not shaped alike, and
+	// splicing would corrupt the answer. Keep the ID-only patch in that case.
+	if qerr != nil || cerr != nil || qe != ce || qe > len(out) || qe > len(query) {
+		return out
+	}
+	copy(out[headerLen:qe], query[headerLen:qe])
 	return out
 }
 

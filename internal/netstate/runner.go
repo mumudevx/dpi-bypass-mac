@@ -16,12 +16,20 @@
 //     AF_ROUTE socket; proxy settings are written with networksetup and verified
 //     with `scutil --proxy`; DNS likewise with `scutil --dns`; interfaces with
 //     net.Interfaces(). Parsing a tool's own stderr still trusts the tool.
+//     The single documented exception is `launchctl setenv`/`getenv` — launchd's
+//     store has no second observer; see the Op interface's doc comment.
+//
+// A third rule earned by a Turkish-language Mac: every external tool whose
+// output we parse runs with LC_ALL=C. exec inherits os.Environ(), Terminal.app
+// exports LANG from the region, and `ps -o lstart=` reorders its fields in
+// tr_TR — which made a live dpb look dead. See lock.go.
 package netstate
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -139,6 +147,12 @@ type Runner interface {
 
 type execRunner struct {
 	logf func(string, ...any)
+	// env is appended to the inherited environment. Go's exec keeps the LAST
+	// occurrence of a duplicated key, so an entry here overrides what the user's
+	// shell exported. It exists for LC_ALL=C: exec.Command inherits os.Environ(),
+	// Terminal.app exports LANG from the region, and a tool whose output we parse
+	// must not change shape with the user's language.
+	env []string
 }
 
 // NewExecRunner returns a Runner backed by os/exec. logf may be nil.
@@ -146,9 +160,18 @@ func NewExecRunner(logf func(string, ...any)) Runner {
 	return &execRunner{logf: logf}
 }
 
+// newExecRunnerEnv returns a Runner that runs commands with extra environment
+// entries layered over the inherited one.
+func newExecRunnerEnv(logf func(string, ...any), env []string) Runner {
+	return &execRunner{logf: logf, env: append([]string(nil), env...)}
+}
+
 func (x *execRunner) Run(ctx context.Context, name string, args ...string) Result {
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, name, args...)
+	if len(x.env) > 0 {
+		cmd.Env = append(os.Environ(), x.env...)
+	}
 	out, err := cmd.CombinedOutput()
 
 	res := Result{

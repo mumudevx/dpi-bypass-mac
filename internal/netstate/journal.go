@@ -85,6 +85,24 @@ const (
 
 var errJournalClosed = errors.New("netstate: journal is closed")
 
+// dirSyncer is the seam that makes "we fsynced the parent directory" testable;
+// fsync on a directory is invisible from inside the process by construction.
+var dirSyncer = fsyncDir
+
+// fsyncDir makes a directory entry durable. Creating a file and fsyncing its
+// contents does not persist the name that points at it.
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("netstate: open directory %s: %w", dir, err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("netstate: fsync directory %s: %w", dir, err)
+	}
+	return nil
+}
+
 type fileJournal struct {
 	mu   sync.Mutex
 	path string
@@ -115,6 +133,23 @@ func OpenJournal(path string) (Journal, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("netstate: open journal %s: %w", path, err)
+	}
+	// The file's own fsync does not make its directory entry durable. On a
+	// first-ever run a power loss between Begin and Apply could otherwise leave
+	// the journal unlinked — an under-approximate journal, which is the one
+	// direction this design exists to avoid, with the system proxy left pointing
+	// at a dead port and no record that dpb set it.
+	if err := dirSyncer(filepath.Dir(path)); err != nil {
+		f.Close()
+		return nil, err
+	}
+	// Heal a torn final line before anything appends to it. The journal is opened
+	// O_APPEND, so a fragment left by a SIGKILL mid-write would be concatenated
+	// with the next run's Begin and become an INTERIOR corrupt line — and an
+	// interior corrupt line used to hide every record after it.
+	if err := truncateToLastLine(f); err != nil {
+		f.Close()
+		return nil, err
 	}
 	j := &fileJournal{
 		path:      path,
@@ -279,18 +314,57 @@ func (j *fileJournal) readAllLocked() ([]Record, error) {
 	return foldJournal(b)
 }
 
+// truncateToLastLine drops a trailing partial line, so the file always ends on
+// a record boundary and O_APPEND can never weld a fragment to a real record.
+func truncateToLastLine(f *os.File) error {
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("netstate: stat journal: %w", err)
+	}
+	n := fi.Size()
+	if n == 0 {
+		return nil
+	}
+	last := make([]byte, 1)
+	if _, err := f.ReadAt(last, n-1); err != nil {
+		return fmt.Errorf("netstate: read journal tail: %w", err)
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	b, err := io.ReadAll(io.NewSectionReader(f, 0, n))
+	if err != nil {
+		return fmt.Errorf("netstate: read journal: %w", err)
+	}
+	keep := int64(bytes.LastIndexByte(b, '\n') + 1)
+	if err := f.Truncate(keep); err != nil {
+		return fmt.Errorf("netstate: heal torn journal line: %w", err)
+	}
+	return f.Sync()
+}
+
+// foldJournal reduces the NDJSON stream to the records still outstanding.
+//
+// It folds line by line and SKIPS a line it cannot decode rather than stopping
+// at it. Stopping is correct only while the torn line is last, and the journal
+// is opened O_APPEND: a fragment that is not last hides every record after it,
+// which is an under-approximate journal — applied mutations nothing can revert,
+// invisible to doctor --repair, the janitor and the login agent. Worse, a
+// fragment before every real record made readAllLocked return nothing, and the
+// next Done() then concluded the journal was empty and truncated live records
+// away.
 func foldJournal(b []byte) ([]Record, error) {
 	open := map[uint64]Record{}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	for {
+	for _, line := range bytes.Split(b, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
 		var e entry
-		if err := dec.Decode(&e); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			// A torn final line is the expected shape of a SIGKILL mid-write.
-			// Everything before it is still authoritative, so stop, do not fail.
-			break
+		if err := json.Unmarshal(line, &e); err != nil {
+			// A torn line is the expected shape of a SIGKILL mid-write. It costs us
+			// that one record; every other line is still authoritative.
+			continue
 		}
 		switch e.Phase {
 		case phaseBegin, phaseCommit:

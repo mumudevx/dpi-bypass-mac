@@ -28,17 +28,45 @@ var (
 	ErrAlreadyPadded = errors.New("ops: ClientHello already carries a padding extension")
 )
 
-// tlsPadOp inflates the ClientHello with a padding extension placed before the
-// server_name extension, pushing the hostname deeper into the record.
+// padPointless is why tlspad can never be selected. It is stated once, here,
+// and reaches the user through strategy.ErrOpRejected at PARSE time.
 //
-// Prober diagnostic only, never a ladder rung. PLAN's tune phase 3 sweeps the
-// SNI to 300/600/1200/1500 bytes to learn how much of a flow the middlebox
-// inspects; DOSSIER §3 notes the companion reading, that a minimum working pad
-// approaching the MTU means the DPI is not reassembling and a plain split is
-// the better answer. Neither reading belongs in a shipped ladder — the answer
-// is a fact about the line, not a strategy.
+// dpb is a byte relay. The client's own crypto/tls composed the ClientHello and
+// has already fed those exact bytes into its handshake transcript, so a padding
+// extension inserted in flight changes the message the server hashes and not
+// the one the client hashed: the TLS 1.3 key schedule diverges and the
+// handshake dies with "local error: tls: bad record MAC". Proved with the
+// network removed entirely — a Go tls.Server and tls.Client over 127.0.0.1 with
+// the rewrite in between, structurally perfect output, both ends failing — and
+// live, where tlspad:to=600 is 0/2 against an unblocked control that plain
+// passes 2/2.
+//
+// That makes it worse than useless as PLAN's tune-phase-3 instrument: it reads
+// identically on a censored and an open line, which is exactly the inert-knob
+// class MEASUREMENTS.md §3.5 exists to forbid, and dpb reported the purely
+// local alert to the user as verdict RESET — a client-side bug presented as
+// censorship.
+//
+// It is REGISTERED rather than deleted for the same reason as the unreachable
+// family: a user pasting a strategy string from a forum must be told which
+// mechanism cannot work here and why, and "unknown op" sends them in the
+// opposite direction. The measurement PLAN wanted — how deep does this
+// middlebox inspect — needs the padded hello sent as a low-TTL DECOY with the
+// real, unmodified hello following it, which needs a decoy segment kind this
+// build does not have. padHello below is that decoy's payload, kept and tested
+// so the respecification has something to stand on.
+const padPointless = "rewrites the ClientHello in flight, but the client's own crypto/tls has already " +
+	"committed those bytes to its handshake transcript, so an inserted padding extension desynchronises " +
+	"the TLS 1.3 key schedule and every connection dies with `bad record MAC` no matter what the DPI " +
+	"does — a byte relay cannot pad a hello it did not originate. The inspection-depth measurement this " +
+	"was for needs the padded hello as a low-TTL DECOY followed by the real one, which this build has no " +
+	"segment kind for"
+
+// tlsPadOp inflates the ClientHello with a padding extension placed before the
+// server_name extension, pushing the hostname deeper into the record — and is
+// refused before it compiles. See padPointless.
 func tlsPadOp() strategy.Op {
-	return newOp(strategy.OpDoc{
+	d := strategy.OpDoc{
 		Name:        "tlspad",
 		Kind:        strategy.KindMutate,
 		Caps:        strategy.CapStreamWrite,
@@ -50,27 +78,17 @@ func tlsPadOp() strategy.Op {
 			Probe:   []string{"300", "600", "1200", "1500"},
 			Doc:     "body offset to push the SNI hostname to",
 		}},
-		Summary: "inflate the ClientHello with a padding extension so the SNI sits deeper in the record",
-		Source:  "PLAN tune phase 3; DOSSIER §3 (P2, diagnostic)",
-		Risk:    25,
-	}, func(a strategy.Args) (strategy.Step, error) {
-		to, err := a.IntRange("to", 600, 1, maxRecordBody)
-		if err != nil {
-			return nil, err
-		}
-		return strategy.StepFunc("tlspad", strategy.CapStreamWrite, func(b *strategy.Builder) error {
-			from := b.Meta.SNIStart
-			out, err := padHello(b.Payload, b.Meta, to)
-			if err != nil {
-				return err
-			}
-			b.Payload = out
-			// The record grew, so every body-relative offset a later reframing
-			// op resolves — including sniEnd, which the §3.2 rule is stated in —
-			// has moved.
-			b.Reparse()
-			b.Note("tlspad pushed the SNI from body offset %d to %d", from, to)
-			return nil
+		Summary:  "inflate the ClientHello with a padding extension so the SNI sits deeper in the record",
+		Source:   "PLAN tune phase 3; refuted by direct measurement, see padPointless",
+		Risk:     100,
+		Rejected: padPointless,
+	}
+	return newOp(d, func(strategy.Args) (strategy.Step, error) {
+		// Unreachable: Registry.Get refuses a Rejected op before it compiles.
+		// Kept honest rather than returning nil, so a caller that bypasses Get
+		// still cannot emit a desynchronising rewrite.
+		return strategy.StepFunc(d.Name, d.Caps, func(*strategy.Builder) error {
+			return fmt.Errorf("%w: %s — %s", strategy.ErrOpRejected, d.Name, d.Rejected)
 		}), nil
 	})
 }

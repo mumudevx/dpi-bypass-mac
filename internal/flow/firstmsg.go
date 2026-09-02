@@ -38,8 +38,17 @@ type FirstMsgOpts struct {
 	// protocol.
 	FirstByteWait time.Duration
 	// CompleteWait is how long we keep reading, after the first byte, for the
-	// rest of the declared message.
+	// rest of the declared message. It is a PROGRESS deadline: every read that
+	// adds bytes renews it, because a client that keeps handing over its hello
+	// steadily is healthy however long it takes in total. Treating it as a
+	// total budget truncated a genuine 1506-byte hello written in 200-byte
+	// pieces 120 ms apart, and a truncated first message is refused by every
+	// reframing op, so the connection goes out plain and unbypassed.
 	CompleteWait time.Duration
+	// MaxAssembly bounds the whole assembly from the first byte, so the
+	// progress deadline cannot be renewed forever by a peer that dribbles one
+	// byte just inside CompleteWait.
+	MaxAssembly time.Duration
 	// Max caps the buffer. A message larger than this is handed on truncated
 	// rather than buffered without limit.
 	Max int
@@ -53,10 +62,16 @@ type FirstMsgOpts struct {
 // protocol is detected in a quarter of a second and never buffered. 64 KiB
 // matches httpmsg.MaxHead, so a request head this reader would truncate is one
 // the parser would refuse to walk anyway.
+//
+// 2 s of MaxAssembly is the outer bound on a client that keeps making progress.
+// It is ~90x the 22 ms RST latency of MEASUREMENTS.md §6 and far longer than any
+// local application needs to hand over a hello it has already computed, so it
+// bounds a pathological peer without ever cutting off a descheduled healthy one.
 func DefaultFirstMsgOpts() FirstMsgOpts {
 	return FirstMsgOpts{
 		FirstByteWait: 250 * time.Millisecond,
 		CompleteWait:  250 * time.Millisecond,
+		MaxAssembly:   2 * time.Second,
 		Max:           64 << 10,
 	}
 }
@@ -68,6 +83,9 @@ func (o FirstMsgOpts) withDefaults() FirstMsgOpts {
 	}
 	if o.CompleteWait <= 0 {
 		o.CompleteWait = d.CompleteWait
+	}
+	if o.MaxAssembly <= 0 {
+		o.MaxAssembly = d.MaxAssembly
 	}
 	if o.Max <= 0 {
 		o.Max = d.Max
@@ -130,7 +148,9 @@ func ReadFirstMessage(r io.Reader, port int, o FirstMsgOpts) (payload []byte, ki
 	buf := make([]byte, 0, readChunk)
 	tmp := make([]byte, readChunk)
 	proto := tlsmsg.ProtoUnknown
-	started := false
+	// assemblyEnds is the outer bound, armed by the first byte. Zero means
+	// assembly has not started, so FirstByteWait is still the governing bound.
+	var assemblyEnds time.Time
 
 	for {
 		room := o.Max - len(buf)
@@ -143,13 +163,25 @@ func ReadFirstMessage(r io.Reader, port int, o FirstMsgOpts) (payload []byte, ki
 		n, rerr := r.Read(tmp[:room])
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
-			if !started {
-				started = true
-				if timed {
-					if derr := dl.SetReadDeadline(time.Now().Add(o.CompleteWait)); derr != nil {
-						return buf, kindOf(tlsmsg.Classify(buf, port)), parseWith(buf, port, true),
-							fmt.Errorf("flow: read first message: set completion deadline: %w", derr)
-					}
+			if timed {
+				// Renew the deadline on EVERY read that made progress.
+				// Arming it once made CompleteWait a total assembly budget,
+				// which contradicts this function's contract and cut off a
+				// healthy client that simply took longer than 250 ms of wall
+				// time to hand over its hello — a descheduled process, or an
+				// app that computes between writes. MaxAssembly keeps the
+				// renewal from being unbounded.
+				now := time.Now()
+				if assemblyEnds.IsZero() {
+					assemblyEnds = now.Add(o.MaxAssembly)
+				}
+				deadline := now.Add(o.CompleteWait)
+				if deadline.After(assemblyEnds) {
+					deadline = assemblyEnds
+				}
+				if derr := dl.SetReadDeadline(deadline); derr != nil {
+					return buf, kindOf(tlsmsg.Classify(buf, port)), parseWith(buf, port, true),
+						fmt.Errorf("flow: read first message: set completion deadline: %w", derr)
 				}
 			}
 		}

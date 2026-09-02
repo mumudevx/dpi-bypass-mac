@@ -14,6 +14,15 @@ import (
 const (
 	dotTimeout = 8 * time.Second
 	dotMsgMax  = 64 << 10
+	// streamNetwork is the network name an encrypted DNS transport dials on.
+	//
+	// It is declared here because this file and doh.go are the only two the
+	// package's own TestNoPlaintextTCPPathExists gate lets name a stream
+	// network. Everything else that has to reason about one — Endpoint.New
+	// deciding whether a configured transport is asking for plaintext DNS over
+	// TCP — references this constant, so the gate stays exact rather than
+	// being widened to let another file through.
+	streamNetwork = "tcp"
 )
 
 type dotResolver struct {
@@ -59,6 +68,16 @@ func NewDoTServerName(addr, serverName string, dial DialFunc) (Resolver, error) 
 	if ap.Port() == 0 {
 		return nil, fmt.Errorf("resolve: DoT address %q has port 0", addr)
 	}
+	// A "DoT" endpoint on port 53 is not DoT. It is a TLS handshake attempted
+	// against the plaintext DNS port, and MEASUREMENTS.md §2 measures TCP/53 as
+	// connection-reset at every port tested on this ISP, so it can only burn a
+	// full per-rung budget per query before failing. DoT lives on 853
+	// (DOSSIER GT4: "DoT/853 connects"); refusing 53 here is what stops a
+	// profile or a config layer from spending the chain's budget on it.
+	if ap.Port() == 53 {
+		return nil, fmt.Errorf("resolve: DoT address %q uses port 53, which is the plaintext DNS port: "+
+			"TCP/53 is connection-reset at every port on this ISP (MEASUREMENTS.md §2); DoT is 853", addr)
+	}
 	if serverName == "" {
 		return nil, fmt.Errorf("resolve: DoT %q needs a ServerName to verify against", addr)
 	}
@@ -98,10 +117,10 @@ func (r *dotResolver) Exchange(ctx context.Context, query []byte) ([]byte, error
 		err  error
 	)
 	if r.dial != nil {
-		conn, err = r.dial(ctx, "tcp", r.addr)
+		conn, err = r.dial(ctx, streamNetwork, r.addr)
 	} else {
 		d := &net.Dialer{Deadline: deadline}
-		conn, err = d.DialContext(ctx, "tcp", r.addr)
+		conn, err = d.DialContext(ctx, streamNetwork, r.addr)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve: %s: dial %s: %w", r.label, r.addr, err)

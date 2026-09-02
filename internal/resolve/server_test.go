@@ -252,24 +252,145 @@ func TestServerServeReportsSocketFailure(t *testing.T) {
 	}
 }
 
-// TestServerDispatchThrottlesRatherThanDrops: exceeding the in-flight budget
-// must still answer, because a dropped query looks like a timeout to a stub and
-// a timeout is what makes it retry over TCP.
-func TestServerDispatchThrottlesRatherThanDrops(t *testing.T) {
+// TestServerDropsRatherThanRunningOnTheReadLoop pins the panic barrier and the
+// stall together.
+//
+// dispatch's over-budget branch used to run the exchange inline, on the very
+// goroutine that owns the socket every stub on this machine talks to: measured,
+// 4000 queries from one socket against a 300 ms upstream left an unrelated
+// single query answered after 6.85 s, and at a 2 s upstream it was never
+// answered inside 30 s. That branch was also the only one outside flow.Safe, so
+// a panic reachable from Chain.Exchange killed the process under load alone.
+func TestServerDropsRatherThanRunningOnTheReadLoop(t *testing.T) {
 	s := testServer(t, answering(t, "doh", "doh", genuineAnswer[0]))
-	// Fill the budget so dispatch has to run inline.
 	for range inFlightMax {
 		s.sem <- struct{}{}
 	}
-	ran := make(chan struct{})
-	s.dispatch(context.Background(), "inline", func() { close(ran) })
+	t.Cleanup(func() {
+		for range inFlightMax {
+			<-s.sem
+		}
+	})
+
+	ran := make(chan struct{}, 1)
+	done := make(chan bool, 1)
+	go func() { done <- s.dispatch("over-budget", func() { ran <- struct{}{} }) }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("dispatch must report the query as dropped when the budget is spent")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dispatch blocked the caller; the read loop must never wait on the budget")
+	}
 	select {
 	case <-ran:
-	case <-time.After(time.Second):
-		t.Fatal("the query was dropped instead of throttled")
+		t.Fatal("the exchange ran on the caller's goroutine, which is the ReadFrom goroutine")
+	default:
 	}
+	if got := s.Dropped(); got != 1 {
+		t.Fatalf("Dropped() = %d, want 1", got)
+	}
+
+	// A panic in the dropped path must not escape either: nothing runs, so
+	// there is nothing outside the barrier left to panic.
+	if s.dispatch("over-budget", func() { panic("must never run") }) {
+		t.Fatal("a second over-budget query must also be dropped")
+	}
+	if got := s.Dropped(); got != 2 {
+		t.Fatalf("Dropped() = %d, want 2", got)
+	}
+}
+
+// TestServerReadLoopKeepsReadingWhileTheBudgetIsSpent is the same claim on a
+// real socket: with the in-flight budget full, the read loop must keep draining
+// the socket instead of blocking on one upstream exchange.
+func TestServerReadLoopKeepsReadingWhileTheBudgetIsSpent(t *testing.T) {
+	s := testServer(t, dropping(t, "slow"))
 	for range inFlightMax {
-		<-s.sem
+		s.sem <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for range inFlightMax {
+			<-s.sem
+		}
+	})
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.ServeUDP(ctx, pc) }()
+
+	client, err := net.Dial("udp", pc.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	const sent = 5
+	for range sent {
+		if _, err := client.Write(mustQuery(t, "discord.com", dns.TypeA)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for s.Dropped() < sent && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := s.Dropped(); got < sent {
+		t.Fatalf("the read loop drained %d of %d datagrams; it stalled on the first", got, sent)
+	}
+}
+
+// TestServerNeverServesTruncatedOverTCP: TC is meaningless on a stream, and a
+// stub that opened TCP *because* of a TC=1 UDP answer has nowhere left to
+// escalate to — MEASUREMENTS.md §2 measures plaintext TCP DNS as
+// connection-reset at every port, so there is no second opinion to fetch.
+// Answering TC=1 again is a silent resolution failure; SERVFAIL is one the stub
+// can see.
+func TestServerNeverServesTruncatedOverTCP(t *testing.T) {
+	s := testServer(t, truncating(t, "udp-alt", "udp-alt"))
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.ServeTCP(ctx, l) }()
+
+	conn, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	q := mustQuery(t, "discord.com", dns.TypeA)
+	out := make([]byte, 2+len(q))
+	binary.BigEndian.PutUint16(out[0:2], uint16(len(q)))
+	copy(out[2:], q)
+	if _, err := conn.Write(out); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var hdr [2]byte
+	if _, err := readFull(conn, hdr[:]); err != nil {
+		t.Fatal(err)
+	}
+	resp := make([]byte, binary.BigEndian.Uint16(hdr[:]))
+	if _, err := readFull(conn, resp); err != nil {
+		t.Fatal(err)
+	}
+	if Truncated(resp) {
+		t.Fatal("a TC=1 message must never be served over the TCP listener")
+	}
+	if rc := Rcode(resp); rc != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d, want SERVFAIL", rc)
+	}
+	if !SameQuestion(q, resp) {
+		t.Fatal("the question must still be echoed")
 	}
 }
 

@@ -131,8 +131,14 @@ func TestLadderFragileNeverEscalates(t *testing.T) {
 			if v.Source != policy.SrcLearnedPlain || v.Class != policy.ScopeDirect {
 				t.Errorf("cached verdict = %s/%s, want direct/SrcLearnedPlain", v.Class, v.Source)
 			}
-			if !v.Expires.IsZero() {
-				t.Errorf("Expires = %v, want zero: §5.2 step 4 caches \"plain works\" durably so a bank is desynced at most once, ever", v.Expires)
+			// Durably, but not forever. §5.2 step 4 asks that a bank be
+			// desynced at most once per re-test window; a zero Expires would
+			// make the verdict immortal, and because policy rewrites
+			// SrcLearnedPlain to ScopeDirect the ladder would never be invoked
+			// for this host again to notice it had gone wrong.
+			if v.Expires.IsZero() {
+				t.Error("a learned-plain verdict with no expiry can never be re-tested: " +
+					"policy relays SrcLearnedPlain as ScopeDirect and the ladder is never invoked again")
 			}
 		})
 	}
@@ -197,8 +203,27 @@ func TestLadderExhaustion(t *testing.T) {
 	if out.Conn != nil {
 		t.Fatal("a failed walk must not hand back a connection")
 	}
-	if len(out.Attempts) != flow.DefaultMaxAttempts {
-		t.Fatalf("attempts = %d, want the %d-rung TR ladder", len(out.Attempts), flow.DefaultMaxAttempts)
+	// Pinning this to DefaultMaxAttempts made the assertion a restatement of a
+	// constant: it broke when the ladder legitimately lost a rung, and it would
+	// have stayed green if the walk had silently stopped early on a ladder
+	// longer than the budget. The contract is that a failed walk tries every
+	// rung it is allowed to.
+	rungs, err := strategy.Ladder("tr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := len(rungs)
+	if want > flow.DefaultMaxAttempts {
+		want = flow.DefaultMaxAttempts
+	}
+	if len(out.Attempts) != want {
+		t.Fatalf("attempts = %d, want %d (the TR ladder has %d rungs, budget %d)",
+			len(out.Attempts), want, len(rungs), flow.DefaultMaxAttempts)
+	}
+	for i, a := range out.Attempts {
+		if i > 0 && a.Spec == "" {
+			t.Errorf("attempt %d re-sent the hello plain: an exhausted walk must never leak it", i+1)
+		}
 	}
 	if _, ok := store.Get(policy.NetworkID{}, "discord.com"); ok {
 		t.Error("a walk where nothing worked must not cache a winner")
@@ -501,13 +526,18 @@ func TestSingleflightCollapsesParallelConnections(t *testing.T) {
 	}
 }
 
-// TestLadderTruncatedHelloNeverReachesAReframer is the §3.5 guard, restated as
-// a ladder property. The previous implementation planned a record split against
-// a prefix and silently degraded it into a 1-byte TCP split, which §3.1 measures
-// at 0/5 while it looks like a working strategy in the logs. Here every rung
-// that reads the record layer refuses an incomplete message BEFORE a socket is
-// opened, and the walk moves to a rung that can honestly apply.
-func TestLadderTruncatedHelloNeverReachesAReframer(t *testing.T) {
+// TestLadderTruncatedHelloIsNeverWalked is the §3.5 guard, restated as a ladder
+// property. The previous implementation planned a record split against a prefix
+// and silently degraded it into a 1-byte TCP split, which §3.1 measures at 0/5
+// while it looks like a working strategy in the logs. Every rung that reads the
+// record layer refuses an incomplete message BEFORE a socket is opened.
+//
+// The walk must then STOP rather than fall through to the rungs that have no
+// message requirement: with a truncated hello the tr ladder collapses to
+// [plain, oob:pos=1], and shipping the MSG_OOB junk byte — 0/20 on fragile
+// hosts, §5.1 — is worse than reporting the failure. A hello we failed to read
+// whole is also not evidence about the network: we truncated it ourselves.
+func TestLadderTruncatedHelloIsNeverWalked(t *testing.T) {
 	t.Parallel()
 	h, _ := hello(t, "discord.com")
 	part := h[:len(h)/2]
@@ -516,35 +546,57 @@ func TestLadderTruncatedHelloNeverReachesAReframer(t *testing.T) {
 	if m.Complete {
 		t.Fatal("fixture is not truncated")
 	}
+	if flow.Replayable(part, m) {
+		t.Fatal("a prefix of a ClientHello must not be replayable on a fresh connection")
+	}
 
-	sd := &scriptDialer{conns: []net.Conn{
-		newScriptConn(step{err: resetErr()}),
-		newScriptConn(step{data: []byte("SERVERHELLO")}),
-	}}
+	oob := newScriptConn(step{data: []byte("SERVERHELLO")})
+	sd := &scriptDialer{conns: []net.Conn{newScriptConn(step{err: resetErr()}), oob}}
 	l := &flow.LadderRunner{Dial: sd, RTT: flow.NewRTTTracker()}
 	out, err := l.Run(context.Background(), flow.Target{Name: "discord.com", Addr: testAddr, Port: 443},
 		watchVerdict(), part, m, nil)
-	if err != nil {
-		t.Fatalf("Run: %v (attempts %v)", err, specsOf(out.Attempts))
+	if err == nil {
+		defer out.Conn.Close()
+		t.Fatalf("winning spec = %q on a truncated hello; the walk must stop at plain", out.Spec)
 	}
-	defer out.Conn.Close()
+	if !errors.Is(err, flow.ErrLadderExhausted) {
+		t.Fatalf("err = %v, want ErrLadderExhausted", err)
+	}
+	if sd.count() != 1 {
+		t.Fatalf("dialled %d times, want 1: only plain may be sent for a message we could not read whole",
+			sd.count())
+	}
+	if len(oob.oob) != 0 {
+		t.Fatalf("%d urgent byte(s) reached an upstream on a truncated hello", len(oob.oob))
+	}
+	last := out.Attempts[len(out.Attempts)-1]
+	if last.Class != flow.FailNotReplayable || last.Emitted {
+		t.Fatalf("last attempt = %s emitted=%v, want a recorded, unemitted not-replayable rung",
+			last.Class, last.Emitted)
+	}
+	if out.Escalations() != 0 {
+		t.Fatalf("escalations = %d, want 0: one connection was opened", out.Escalations())
+	}
+}
 
-	if out.Spec != "oob:pos=1" {
-		t.Fatalf("winning spec = %q, want oob:pos=1: every reframing rung must refuse a prefix", out.Spec)
-	}
-	for _, a := range out.Attempts {
-		switch a.Spec {
-		case "tlsfrag:pos=snimid", "chunk:size=12", "chunk:size=4":
-			if !errors.Is(a.Err, strategy.ErrNeedComplete) {
-				t.Errorf("rung %q was refused with %v, want ErrNeedComplete", a.Spec, a.Err)
-			}
-			if a.Class != flow.FailBudget {
-				t.Errorf("rung %q class = %s, want budget", a.Spec, a.Class)
-			}
+// TestLadderReframingRungsRefuseAPrefix keeps the half of the old assertion
+// that is still true and still worth pinning: the refusal is mechanical and
+// happens before a socket is opened, with ErrNeedComplete naming the reason.
+func TestLadderReframingRungsRefuseAPrefix(t *testing.T) {
+	t.Parallel()
+	h, _ := hello(t, "discord.com")
+	part := h[:len(h)/2]
+	m := tlsmsg.Parse(part, 443)
+	m.Truncated = true
+
+	for _, spec := range []string{"tlsfrag:pos=snimid", "chunk:size=12", "chunk:size=4"} {
+		st, err := strategy.Parse(spec)
+		if err != nil {
+			t.Fatalf("parse %q: %v", spec, err)
 		}
-	}
-	if sd.count() != 2 {
-		t.Fatalf("dialled %d times, want 2: a rung that cannot apply must not cost a socket", sd.count())
+		if cerr := st.CheckAgainst(^strategy.Cap(0), m); !errors.Is(cerr, strategy.ErrNeedComplete) {
+			t.Errorf("%q against a prefix = %v, want ErrNeedComplete", spec, cerr)
+		}
 	}
 }
 

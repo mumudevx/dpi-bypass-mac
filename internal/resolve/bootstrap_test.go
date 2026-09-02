@@ -1,7 +1,9 @@
 package resolve
 
 import (
+	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -103,5 +105,30 @@ func TestRelabelKeepsTheUnderlyingResolver(t *testing.T) {
 	}
 	if got.Transport() != base.Transport() {
 		t.Fatalf("relabelling must not change the transport: %q", got.Transport())
+	}
+}
+
+// TestEndpointRefusesAStreamTransport gives ForbidTCP the call site it was
+// written for. It is the lever a configuration layer trips: an endpoint whose
+// transport names a stream network must fail at construction with the
+// measurement attached — MEASUREMENTS.md §2 measures plaintext DNS over TCP as
+// connection-reset at every port tested — rather than becoming a silent gap in
+// the chain.
+func TestEndpointRefusesAStreamTransport(t *testing.T) {
+	for _, transport := range []string{"tcp", "tcp4", "tcp6", "tcp53"} {
+		_, err := Endpoint{Label: "cfg", Transport: transport, Target: "8.8.8.8:53"}.New(nil, nil)
+		if !errors.Is(err, ErrTCPForbidden) {
+			t.Fatalf("Endpoint{Transport: %q}.New() = %v, want ErrTCPForbidden", transport, err)
+		}
+		if !strings.Contains(err.Error(), "MEASUREMENTS.md §2") {
+			t.Fatalf("the refusal must carry the measurement, got %q", err)
+		}
+	}
+	// A transport that is merely unknown is reported as unknown, not as a TCP
+	// attempt: mislabelling it would send a reader looking for a bug that is
+	// not there.
+	_, err := Endpoint{Label: "cfg", Transport: "quic", Target: "8.8.8.8:853"}.New(nil, nil)
+	if err == nil || errors.Is(err, ErrTCPForbidden) {
+		t.Fatalf("Endpoint{Transport: \"quic\"}.New() = %v, want an unknown-transport error", err)
 	}
 }

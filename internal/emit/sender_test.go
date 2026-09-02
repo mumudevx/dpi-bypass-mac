@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -113,6 +114,76 @@ func TestSendReportsAShortWrite(t *testing.T) {
 	err := (&Sender{}).Send(context.Background(), f, streamPlan("plain", "abcdef"))
 	if !errors.Is(err, ErrShortWrite) {
 		t.Fatalf("Send err = %v, want ErrShortWrite: a torn stream must stop the plan", err)
+	}
+}
+
+// oobPlan is the shape the tr ladder's last rung emits: a head write, the
+// urgent byte, then the rest.
+func oobPlan() strategy.Plan {
+	return strategy.Plan{
+		Spec:    "oob:pos=2",
+		Payload: []byte("abcd"),
+		Segments: []strategy.Segment{
+			{Kind: strategy.SegStream, Data: []byte("ab")},
+			{Kind: strategy.SegOOBByte, Data: []byte{'X'}},
+			{Kind: strategy.SegStream, Data: []byte("cd")},
+		},
+	}
+}
+
+// TestSendPreservesTheSyscallErrorOnTheOOBPath is the urgent-byte half of the
+// promise Send's doc comment makes: "the underlying syscall error is preserved
+// through %w so errors.Is on syscall.ECONNRESET / EPIPE still works at the call
+// site". It was only ever exercised on the stream path, so inverting the error
+// check in emitSegment's SegOOBByte arm — which turns a failed urgent write
+// into a bare ErrShortWrite with the errno discarded — passed the whole suite.
+// oob:pos=1 is the last rung of the tr ladder and the most destructive emitter
+// (MEASUREMENTS.md §5.1, 0/20 on fragile hosts), so it is the one rung whose
+// reported cause a user is most likely to read.
+func TestSendPreservesTheSyscallErrorOnTheOOBPath(t *testing.T) {
+	f := newFake()
+	f.failOOBAt = 1
+
+	err := (&Sender{}).Send(context.Background(), f, oobPlan())
+	if err == nil {
+		t.Fatal("Send returned nil for a refused urgent byte")
+	}
+	if !errors.Is(err, errFakeOOB) {
+		t.Fatalf("Send err = %v, want the transport's urgent-write error", err)
+	}
+	if !errors.Is(err, syscall.EPIPE) {
+		t.Fatalf("Send err = %v; errors.Is(err, syscall.EPIPE) must still hold at the call site", err)
+	}
+	if errors.Is(err, ErrShortWrite) {
+		t.Fatalf("a refused urgent byte was reported as a short write: %v", err)
+	}
+	// The plan must stop there: the segment after the urgent byte carries the
+	// rest of the hello, and writing it after the desync failed would put a
+	// half-desynced hello on the wire.
+	if got := string(f.stream()); got != "ab" {
+		t.Fatalf("stream = %q, want %q: the plan must stop at the failed segment", got, "ab")
+	}
+	// And the error must say which segment, in the same shape as the stream path.
+	if !strings.Contains(err.Error(), "oob") {
+		t.Fatalf("error does not name the segment kind: %v", err)
+	}
+}
+
+// TestSendReportsAShortOOBWrite covers the other arm: the write succeeded but
+// took fewer bytes, which is a torn desync rather than a wire error.
+func TestSendReportsAShortOOBWrite(t *testing.T) {
+	f := newFake()
+	f.shortOOB = true
+
+	p := oobPlan()
+	p.Segments[1].Data = []byte{'X', 'Y'}
+
+	err := (&Sender{}).Send(context.Background(), f, p)
+	if !errors.Is(err, ErrShortWrite) {
+		t.Fatalf("Send err = %v, want ErrShortWrite", err)
+	}
+	if errors.Is(err, errFakeOOB) {
+		t.Fatalf("a short urgent write must not claim a wire error: %v", err)
 	}
 }
 

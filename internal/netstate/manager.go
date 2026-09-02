@@ -17,6 +17,19 @@ type Env struct {
 	Facts  *Facts
 	Logf   func(string, ...any)
 	DryRun bool
+
+	// SelfIface names the utun this run owns, once it has one. Our own capture
+	// routes are the same 0.0.0.0/1 + 128.0.0.0/1 pair a WireGuard-style VPN
+	// installs, so classifyVPN has to be told which tunnel is ours.
+	SelfIface string
+
+	// PriorResidue says that a previous dpb run died without cleaning up, so a
+	// loopback proxy/resolver setting we cannot match exactly is more likely to
+	// be our dead listener than the user's own configuration. It is the ONLY
+	// thing that lets an Op discard a captured loopback value it does not
+	// recognise; without it, a user's dnscrypt-proxy or local web proxy is
+	// captured and restored untouched. Set it from PriorResidue().
+	PriorResidue bool
 }
 
 func (e Env) runner() Runner {
@@ -50,6 +63,17 @@ func (noRunner) Run(_ context.Context, name string, args ...string) Result {
 // through. Routes are written by route(8) and verified against the AF_ROUTE RIB;
 // proxy settings are written by networksetup and verified with `scutil --proxy`;
 // DNS likewise with `scutil --dns`; interfaces with net.Interfaces().
+//
+// There is exactly one carved-out exception, and it is deliberate:
+// launchEnvOp writes with `launchctl setenv` and verifies with
+// `launchctl getenv`, matching docs/PLAN.md's mutated-state table row 2.
+// launchd's own store is the only place a user-session environment variable
+// lives — there is no second observer to consult, and inventing one (spawning a
+// child to print its environment) would answer a different question. The real
+// gap here is not the missing second subsystem: setenv only affects processes
+// started after the call, so even a passing Verify says nothing about the
+// already-running Electron apps the variable exists for. That caveat is
+// documented on launchEnvOp rather than papered over.
 //
 // Revert must be idempotent and VerifyReverted must tolerate already-absent
 // state, because the journal is deliberately over-approximate.
@@ -88,6 +112,28 @@ type adoptChecker interface {
 func canAdopt(op Op) bool {
 	if c, ok := op.(adoptChecker); ok {
 		return c.canAdopt()
+	}
+	return true
+}
+
+// mutator is implemented by Ops that can say whether their Apply actually
+// changed anything.
+//
+// rollback consults it before reverting, because Revert is written to undo OUR
+// change and cannot tell our change from somebody else's state that looks the
+// same. route(8) is the case that forced this: the kernel resolves RTM_DELETE
+// by destination + netmask + explicit -ifscope, and the link gateway an
+// `-interface` add supplies is not part of the lookup, so a delete issued after
+// a failed add removes whatever currently owns that destination — a coexisting
+// VPN's half-default, for instance.
+type mutator interface{ mutated() bool }
+
+// mutated defaults to true: an Op that does not implement the interface may
+// have half-applied (proxyOp and dnsOp loop over services), and reverting a
+// half-applied Op is the safe direction.
+func mutated(op Op) bool {
+	if m, ok := op.(mutator); ok {
+		return m.mutated()
 	}
 	return true
 }
@@ -196,6 +242,16 @@ func (m *Manager) push(a applied) {
 // revert is independently confirmed; otherwise it stays pending so Replay (or
 // the janitor, or the next login) finishes the job.
 func (m *Manager) rollback(ctx context.Context, op Op, tok Token, at string) {
+	// An Op whose Apply mutated nothing has nothing to undo, and undoing it
+	// anyway would act on state somebody else owns. Close the entry instead:
+	// there is no residue for Replay to find.
+	if !mutated(op) {
+		m.e.logf("netstate: rollback after %s failure: %s changed nothing, so nothing is reverted", at, op.ID())
+		if err := m.j.Done(ctx, tok); err != nil {
+			m.e.logf("netstate: rollback after %s failure: close journal entry %d: %v", at, tok, err)
+		}
+		return
+	}
 	if err := op.Revert(ctx, m.e); err != nil {
 		m.e.logf("netstate: rollback after %s failure: revert %s: %v; left journalled for replay",
 			at, op.ID(), err)

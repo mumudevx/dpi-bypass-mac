@@ -98,23 +98,125 @@ func TestClassifyVPN(t *testing.T) {
 
 	// iCloud Private Relay installs scoped utun defaults and is not a VPN in the
 	// sense that matters: it does not own the unscoped default.
-	if st := classifyVPN(scopedUtun, true, nil); st.Present || st.FullTunnel {
+	if st := classifyVPN([]RouteEntry{scopedUtun}, scopedUtun, true, nil, ""); st.Present || st.FullTunnel {
 		t.Fatalf("a scoped utun default was classified as a VPN: %+v", st)
 	}
-	if st := classifyVPN(en0, true, nil); st.Present {
+	if st := classifyVPN([]RouteEntry{en0}, en0, true, nil, ""); st.Present {
 		t.Fatalf("plain ethernet classified as a VPN: %+v", st)
 	}
-	if st := classifyVPN(utun, true, nil); !st.Present || !st.FullTunnel || st.Iface != "utun3" {
+	if st := classifyVPN([]RouteEntry{utun}, utun, true, nil, ""); !st.Present || !st.FullTunnel || st.Iface != "utun3" {
 		t.Fatalf("an unscoped utun default must be a full tunnel: %+v", st)
 	}
 	// A connected VPN that is not carrying the default route is present but not
 	// full-tunnel, which is the split-tunnel case we can work alongside.
-	st := classifyVPN(en0, true, []NCService{{Status: "Connected", Name: "Split"}})
+	st := classifyVPN([]RouteEntry{en0}, en0, true, []NCService{{Status: "Connected", Name: "Split"}}, "")
 	if !st.Present || st.FullTunnel || st.ServiceName != "Split" {
 		t.Fatalf("split tunnel classified as %+v", st)
 	}
-	if st := classifyVPN(RouteEntry{}, false, nil); st.Present {
+	if st := classifyVPN(nil, RouteEntry{}, false, nil, ""); st.Present {
 		t.Fatalf("no default route classified as %+v", st)
+	}
+}
+
+// half returns the WireGuard-style pair a full tunnel installs instead of a
+// default route.
+func half(iface string, index int, v6 bool) []RouteEntry {
+	lo, hi := "0.0.0.0/1", "128.0.0.0/1"
+	if v6 {
+		lo, hi = "::/1", "8000::/1"
+	}
+	return []RouteEntry{
+		{Dst: netip.MustParsePrefix(lo), Iface: iface, Index: index},
+		{Dst: netip.MustParsePrefix(hi), Iface: iface, Index: index},
+	}
+}
+
+// TestClassifyVPNHalfDefaults is the gate that stops dpb walking into a route
+// collision with a VPN. wg-quick, Tailscale, Mullvad and the WireGuard CLI never
+// touch 0.0.0.0/0 — they install 0.0.0.0/1 + 128.0.0.0/1 — and they do not
+// appear in `scutil --nc list` either, so the classifier that only read the
+// unscoped default saw {Present:false, FullTunnel:false} while a half-default
+// tunnel carried every packet.
+func TestClassifyVPNHalfDefaults(t *testing.T) {
+	en0 := RouteEntry{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("192.168.0.1"), Iface: "en0", Index: 14}
+
+	t.Run("v4 pair on a utun", func(t *testing.T) {
+		rs := append([]RouteEntry{en0}, half("utun6", 20, false)...)
+		st := classifyVPN(rs, en0, true, nil, "")
+		if !st.Present || !st.FullTunnel || st.Iface != "utun6" {
+			t.Fatalf("classifyVPN = %+v, want a full tunnel on utun6", st)
+		}
+	})
+
+	t.Run("v6 pair on a utun", func(t *testing.T) {
+		rs := append([]RouteEntry{en0}, half("utun6", 20, true)...)
+		st := classifyVPN(rs, en0, true, nil, "")
+		if !st.Present || !st.FullTunnel || st.Iface != "utun6" {
+			t.Fatalf("classifyVPN = %+v, want a full tunnel on utun6", st)
+		}
+	})
+
+	t.Run("one half only is a split tunnel", func(t *testing.T) {
+		rs := []RouteEntry{en0, half("utun6", 20, false)[0]}
+		if st := classifyVPN(rs, en0, true, nil, ""); st.FullTunnel {
+			t.Fatalf("half the address space is not a full tunnel: %+v", st)
+		}
+	})
+
+	t.Run("halves split across interfaces", func(t *testing.T) {
+		rs := []RouteEntry{en0, half("utun6", 20, false)[0], half("utun7", 21, false)[1]}
+		if st := classifyVPN(rs, en0, true, nil, ""); st.FullTunnel {
+			t.Fatalf("two different tunnels each owning one half is not one full tunnel: %+v", st)
+		}
+	})
+
+	t.Run("scoped halves are Private-Relay-shaped", func(t *testing.T) {
+		rs := []RouteEntry{en0}
+		for _, r := range half("utun6", 20, false) {
+			r.Scoped = true
+			rs = append(rs, r)
+		}
+		if st := classifyVPN(rs, en0, true, nil, ""); st.FullTunnel {
+			t.Fatalf("scoped halves must not be a full tunnel: %+v", st)
+		}
+	})
+
+	t.Run("not on a tunnel interface", func(t *testing.T) {
+		rs := append([]RouteEntry{en0}, half("en1", 15, false)...)
+		if st := classifyVPN(rs, en0, true, nil, ""); st.FullTunnel {
+			t.Fatalf("half-defaults on a physical interface are not a VPN: %+v", st)
+		}
+	})
+
+	// Our own capture routes are the identical pair. Seeing them on a
+	// network-change re-collect must not make dpb refuse to run alongside itself.
+	t.Run("our own utun is excluded", func(t *testing.T) {
+		rs := append([]RouteEntry{en0}, half("utun9", 30, false)...)
+		if st := classifyVPN(rs, en0, true, nil, "utun9"); st.FullTunnel {
+			t.Fatalf("dpb classified its own capture routes as a VPN: %+v", st)
+		}
+	})
+}
+
+// TestCollectFactsHalfTunnelVPN drives the same defect through the real entry
+// point, since the gate reads Facts.VPN, not classifyVPN.
+func TestCollectFactsHalfTunnelVPN(t *testing.T) {
+	f := newFakeSystem()
+	f.install(t)
+	f.ifaces["utun6"] = &fakeIface{index: 20, mtu: 1420, up: true, addrs: []string{"10.2.0.2/32"}}
+	f.routes = append(f.routes, half("utun6", 20, false)...)
+	// wg-quick and friends leave scutil --nc empty, so this is the only signal.
+	f.vpn = nil
+
+	got, err := CollectFacts(context.Background(), f.env0())
+	if err != nil {
+		t.Fatalf("CollectFacts: %v", err)
+	}
+	if !got.VPN.Present || !got.VPN.FullTunnel || got.VPN.Iface != "utun6" {
+		t.Fatalf("VPN = %+v, want a full tunnel on utun6", got.VPN)
+	}
+	if got.Uplink != "en0" {
+		t.Fatalf("Uplink = %q, want the physical uplink to still be identified", got.Uplink)
 	}
 }
 

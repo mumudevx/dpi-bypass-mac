@@ -97,10 +97,25 @@ func FuzzParse(f *testing.F) {
 // FuzzSplitRecord asserts the invariant that makes a reframing emitter safe to
 // ship: the record layer may change, the stream may not. If this ever fails, the
 // tool can corrupt a connection it was meant to rescue.
+//
+// The contract on emptiness is stated here because the fuzzer found the one
+// input that decides it: a five-byte record declaring Length=0. SplitRecord is
+// a pure reframer, so it passes that record through unchanged rather than
+// inventing an error for a shape the client itself put on the wire — refusing
+// would only duplicate a check ReframeFirstRecord already makes (it rejects
+// end <= BodyOff) while making the function non-total on an input it currently
+// round-trips byte for byte. The assertion is therefore the precise property
+// rather than "no record is ever empty": an empty output record may exist ONLY
+// when the input body was empty, which also means it can only ever be the sole
+// output record, because a cut into an empty body is ErrCutRange.
 func FuzzSplitRecord(f *testing.F) {
 	for _, s := range seedCorpus(f) {
 		f.Add(s, 1, 0, 0)
 	}
+	// A five-byte record declaring a zero-length body. An unaided fuzz run from
+	// an empty corpus found this in 31 s / 12.8M execs and it reproduces
+	// deterministically, so it is a seed rather than a surprise on `make fuzz`.
+	f.Add([]byte{0x16, 0x03, 0x01, 0x00, 0x00}, 0, 0, 0)
 	f.Fuzz(func(t *testing.T, rec []byte, c1, c2, c3 int) {
 		cuts := make([]int, 0, 3)
 		for _, c := range []int{c1, c2, c3} {
@@ -133,8 +148,8 @@ func FuzzSplitRecord(f *testing.F) {
 			if rh.Type != h.Type || rh.Version != h.Version {
 				t.Fatalf("record %d changed type/version: %+v", n, rh)
 			}
-			if rh.Length == 0 {
-				t.Fatalf("record %d is empty", n)
+			if rh.Length == 0 && len(body) != 0 {
+				t.Fatalf("record %d is empty but the input body carries %d bytes", n, len(body))
 			}
 			if len(rest) < recHdrLen+rh.Length {
 				t.Fatalf("record %d declares %d bytes, %d remain", n, rh.Length, len(rest)-recHdrLen)
@@ -148,6 +163,16 @@ func FuzzSplitRecord(f *testing.F) {
 		}
 		if !bytes.Equal(joined, body) {
 			t.Fatal("split changed the body bytes")
+		}
+		// An empty body is the identity case: one record in, the same record
+		// out. Anything else here would mean the reframer invented a boundary.
+		if len(body) == 0 {
+			if n != 1 {
+				t.Fatalf("an empty body produced %d records", n)
+			}
+			if !bytes.Equal(out, rec) {
+				t.Fatalf("an empty record was not passed through unchanged: %x -> %x", rec, out)
+			}
 		}
 	})
 }

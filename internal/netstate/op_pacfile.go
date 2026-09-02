@@ -113,7 +113,10 @@ func (o *pacFileOp) Apply(_ context.Context, _ Env) error {
 	if err := os.Rename(name, o.path); err != nil {
 		return fmt.Errorf("netstate: install PAC file %s: %w", o.path, err)
 	}
-	return nil
+	// A rename is a directory operation: syncing the file's contents says
+	// nothing about the name now pointing at them. Without this the PAC can be
+	// missing after a power loss while the system proxy still points at it.
+	return dirSyncer(dir)
 }
 
 func (o *pacFileOp) Verify(_ context.Context, _ Env) error {

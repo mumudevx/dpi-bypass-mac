@@ -6,6 +6,7 @@ import (
 	"net"
 	"syscall"
 
+	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
 	"github.com/mumudevx/dpi-bypass-mac/internal/httpmsg"
 	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
 )
@@ -24,6 +25,10 @@ const (
 	FailResetAfterResponse    // NOT censorship-shaped: never retry
 	FailNotReplayable
 	FailBudget
+	// FailTornStream is an internal send failure that left part of a segment on
+	// the wire: the upstream stream is desynchronised, so there is nothing to
+	// retry and nothing about the network to learn. NOT censorship-shaped.
+	FailTornStream
 )
 
 func (f Failure) Retryable() bool {
@@ -32,7 +37,7 @@ func (f Failure) Retryable() bool {
 
 var failureNames = [...]string{
 	"none", "dial", "reset-before-response", "timeout-before-response",
-	"reset-after-response", "not-replayable", "budget",
+	"reset-after-response", "not-replayable", "budget", "torn-stream",
 }
 
 func (f Failure) String() string {
@@ -62,6 +67,11 @@ var ErrNotReplayable = errors.New("flow: the buffered first message may not be r
 // forged FIN, a truncated alert), nothing has been delivered yet, and the cost
 // of being wrong is one extra round trip against a cost of a silently unbypassed
 // connection.
+//
+// That default applies to WIRE errors only. Our own failures — emit's sentinels
+// for a missing capability or a torn stream — are named explicitly below,
+// because a censorship-shaped class is written into the verdict store and an
+// internal fault must never be recorded there as the network.
 func Classify(err error, committed bool) Failure {
 	if err == nil {
 		return FailNone
@@ -75,6 +85,22 @@ func Classify(err error, committed bool) Failure {
 	}
 	if errors.Is(err, ErrNotReplayable) {
 		return FailNotReplayable
+	}
+	// emit's own sentinels are OUR failures, not the network's, and they must
+	// never reach the catch-all below: Retryable() calls that class
+	// censorship-shaped, so a local wiring failure would flow through
+	// recordLoss into Store.Demote and be read back by `dpb why` and the drift
+	// detector as the ISP censoring this host. The transport asked for a
+	// capability it does not have — that is a planning fault, the same class
+	// the ladder already uses when a rung cannot be built.
+	if errors.Is(err, emit.ErrCapUnavailable) {
+		return FailBudget
+	}
+	// A partial segment desynchronises the upstream stream, so the connection
+	// is finished either way; there is simply no evidence in it about the
+	// network.
+	if errors.Is(err, emit.ErrShortWrite) {
+		return FailTornStream
 	}
 	if isTimeout(err) {
 		return FailTimeoutBeforeResponse
@@ -111,11 +137,17 @@ func IsTimeout(err error) bool { return isTimeout(err) }
 // Replayable reports whether a buffered first message may be re-sent on a fresh
 // upstream connection.
 //
-// A TLS ClientHello always may: it is the first thing on the wire and the
-// handshake it opens either completed or did not. A plaintext HTTP request may
-// only if it is idempotent and carries no body — replaying a POST would submit
-// it twice, and the user would never know. Anything else is refused, because we
-// cannot prove the protocol has not already committed the client to something.
+// A COMPLETE TLS ClientHello may: it is the first thing on the wire and the
+// handshake it opens either completed or did not. A prefix of one may not, and
+// that is not a retry-safety question but an evidence one: a hello we failed to
+// read whole is a message we truncated ourselves, so its failure says nothing
+// about the network, and walking the ladder on it skips every rung carrying
+// ReqComplete and lands on the destructive tail — the tr ladder collapses to
+// [plain, oob:pos=1], and oob is 0/20 on fragile hosts (MEASUREMENTS.md §5.1).
+// A plaintext HTTP request may only if it is idempotent and carries no body —
+// replaying a POST would submit it twice, and the user would never know.
+// Anything else is refused, because we cannot prove the protocol has not
+// already committed the client to something.
 func Replayable(payload []byte, m tlsmsg.Meta) bool {
 	if len(payload) == 0 {
 		// Nothing was sent, so a "retry" would send nothing again on a fresh
@@ -124,7 +156,7 @@ func Replayable(payload []byte, m tlsmsg.Meta) bool {
 	}
 	switch m.Proto {
 	case tlsmsg.ProtoTLS:
-		return true
+		return m.Complete
 	case tlsmsg.ProtoHTTP:
 		return httpmsg.Replayable(payload)
 	}

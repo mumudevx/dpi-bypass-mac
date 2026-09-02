@@ -82,16 +82,16 @@ func TestPACOpResolvesAllServicesWhenNoneGiven(t *testing.T) {
 }
 
 // TestNotSelfPACIsRecordedAsOff is the guard against a hard kill leaving the
-// machine pinned to a dead listener: a captured PAC URL that already points at
-// loopback is treated as "there was nothing here", so Revert disables the PAC
-// rather than restoring a pointer at a port nobody is on.
+// machine pinned to a dead listener: a captured PAC URL that is EXACTLY the one
+// we are about to install can only be our own residue, so Revert disables the
+// PAC rather than restoring a pointer at a port nobody is on.
 func TestNotSelfPACIsRecordedAsOff(t *testing.T) {
 	f := newFakeSystem()
 	e := f.env0()
-	f.svc["Wi-Fi"].pacURL = "http://127.0.0.1:8080/dpb.pac"
-	f.svc["Wi-Fi"].pacOn = true
+	const ours = "http://127.0.0.1:9999/dpb.pac"
+	f.svc["Wi-Fi"].pacURL, f.svc["Wi-Fi"].pacOn = ours, true
 
-	op := NewPAC(f, "http://127.0.0.1:9999/dpb.pac", []string{"Wi-Fi"})
+	op := NewPAC(f, ours, []string{"Wi-Fi"})
 	prep(t, op, e)
 	if got := op.(*proxyOp).prev["Wi-Fi"].PACURL; got != "" {
 		t.Fatalf("captured previous PAC URL = %q, want it discarded as our own", got)
@@ -103,36 +103,131 @@ func TestNotSelfPACIsRecordedAsOff(t *testing.T) {
 	}
 }
 
+// TestNotSelfKeepsTheUsersLoopbackServices is MF5. A loopback address is not a
+// signature of dpb: a user running dnscrypt-proxy or AdGuard Home on 127.0.0.1
+// — the standard defence against exactly the DNS interference MEASUREMENTS.md
+// §2 records — and a local web proxy or PAC on 127.0.0.1 are ordinary
+// configurations that
+// a clean exit must give back. Deciding "ours" from isLoopbackHost() alone
+// captured all of them as empty and reverted the machine to the ISP's resolver
+// with `-setdnsservers Wi-Fi Empty`, unrecoverably: the emptied list is what
+// goes in the journal, so Replay could not restore it either.
+func TestNotSelfKeepsTheUsersLoopbackServices(t *testing.T) {
+	f := newFakeSystem()
+	e := f.env0()
+	f.svc["Wi-Fi"].pacURL, f.svc["Wi-Fi"].pacOn = "http://127.0.0.1:3000/user.pac", true
+	f.svc["Wi-Fi"].webHost, f.svc["Wi-Fi"].webPort, f.svc["Wi-Fi"].webOn = "127.0.0.1", 8888, true
+	f.svc["Wi-Fi"].secHost, f.svc["Wi-Fi"].secPort, f.svc["Wi-Fi"].secOn = "127.0.0.1", 8888, true
+	f.svc["Wi-Fi"].dns = []string{"127.0.0.1"}
+	f.env["HTTPS_PROXY"], f.env["HTTP_PROXY"] = "http://127.0.0.1:8888", "http://127.0.0.1:8888"
+	before := f.snapshot()
+
+	ops := []Op{
+		NewPAC(f, "http://127.0.0.1:9090/dpb.pac", []string{"Wi-Fi"}),
+		NewWebProxy(f, "127.0.0.1", 9090, []string{"Wi-Fi"}),
+		NewDNSServers(f, []string{"127.0.0.1", "9.9.9.9"}, []string{"Wi-Fi"}),
+		NewLaunchEnv(f, "http://127.0.0.1:9090", nil),
+	}
+	for _, op := range ops {
+		prep(t, op, e)
+		applyVerify(t, op, e)
+	}
+	for i := len(ops) - 1; i >= 0; i-- {
+		revertVerify(t, ops[i], e)
+	}
+
+	if got := f.snapshot(); got != before {
+		t.Fatalf("a clean exit destroyed the user's own loopback services:\n before %s\n after  %s", before, got)
+	}
+}
+
+// TestNotSelfDiscardsResidueAfterAnUncleanRun: when the journal or lock file
+// says a previous run died, a loopback value we cannot match exactly is more
+// likely to be that run's dead listener than the user's configuration, so
+// Env.PriorResidue widens the test back out.
+func TestNotSelfDiscardsResidueAfterAnUncleanRun(t *testing.T) {
+	f := newFakeSystem()
+	e := f.env0()
+	e.PriorResidue = true
+	// A previous run bound port 8080; this one wants 9090.
+	f.svc["Wi-Fi"].pacURL, f.svc["Wi-Fi"].pacOn = "http://127.0.0.1:8080/dpb.pac", true
+	f.svc["Wi-Fi"].dns = []string{"127.0.0.1", "192.168.0.1"}
+
+	pac := NewPAC(f, "http://127.0.0.1:9090/dpb.pac", []string{"Wi-Fi"})
+	prep(t, pac, e)
+	if got := pac.(*proxyOp).prev["Wi-Fi"].PACURL; got != "" {
+		t.Fatalf("captured PAC URL = %q, want the stale loopback PAC discarded", got)
+	}
+	dns := NewDNSServers(f, []string{"127.0.0.1", "192.168.0.1"}, []string{"Wi-Fi"})
+	prep(t, dns, e)
+	if got := dns.(*dnsOp).prev["Wi-Fi"]; !reflect.DeepEqual(got, []string{"192.168.0.1"}) {
+		t.Fatalf("captured resolvers = %v, want our own entry stripped", got)
+	}
+}
+
 func TestNotSelfHelpers(t *testing.T) {
-	if got := notSelfPAC("http://127.0.0.1:8080/x.pac"); got != "" {
-		t.Fatalf("notSelfPAC(loopback) = %q", got)
+	const ours = "http://127.0.0.1:8080/dpb.pac"
+
+	// Identity, not loopback: only the URL we are about to install is ours.
+	if got := notSelfPAC(ours, ours, false); got != "" {
+		t.Fatalf("notSelfPAC(exactly ours) = %q", got)
 	}
-	if got := notSelfPAC("http://[::1]:8080/x.pac"); got != "" {
-		t.Fatalf("notSelfPAC(v6 loopback) = %q", got)
+	const userPAC = "http://127.0.0.1:3000/user.pac"
+	if got := notSelfPAC(userPAC, ours, false); got != userPAC {
+		t.Fatalf("notSelfPAC(the user's own loopback PAC) = %q, want it kept", got)
 	}
-	if got := notSelfPAC("http://localhost:8080/x.pac"); got != "" {
-		t.Fatalf("notSelfPAC(localhost) = %q", got)
+	// ...until a previous run is known to have died mid-flight.
+	if got := notSelfPAC(userPAC, ours, true); got != "" {
+		t.Fatalf("notSelfPAC(loopback, priorResidue) = %q", got)
+	}
+	if got := notSelfPAC("http://[::1]:8080/x.pac", ours, true); got != "" {
+		t.Fatalf("notSelfPAC(v6 loopback, priorResidue) = %q", got)
+	}
+	if got := notSelfPAC("http://localhost:8080/x.pac", ours, true); got != "" {
+		t.Fatalf("notSelfPAC(localhost, priorResidue) = %q", got)
 	}
 	const corp = "http://corp.example/proxy.pac"
-	if got := notSelfPAC(corp); got != corp {
+	if got := notSelfPAC(corp, ours, true); got != corp {
 		t.Fatalf("notSelfPAC(corp) = %q", got)
 	}
-	if got := notSelfPAC(""); got != "" {
+	if got := notSelfPAC("", ours, true); got != "" {
 		t.Fatalf("notSelfPAC(empty) = %q", got)
 	}
 	// An unparseable value is kept: discarding it would silently drop a setting
 	// we do not understand, which is worse than restoring it verbatim.
-	if got := notSelfPAC("://nonsense"); got != "://nonsense" {
+	if got := notSelfPAC("://nonsense", ours, true); got != "://nonsense" {
 		t.Fatalf("notSelfPAC(garbage) = %q", got)
 	}
-	if got := notSelfServers([]string{"127.0.0.1", "192.168.0.1", " ", "::1"}); !reflect.DeepEqual(got, []string{"192.168.0.1"}) {
-		t.Fatalf("notSelfServers = %v", got)
+
+	// notSelfServers: our resolver is stripped only when it is one we are about
+	// to install AND a previous run died. The user's own 127.0.0.1 survives.
+	mine := []string{"127.0.0.1", "9.9.9.9"}
+	if got := notSelfServers([]string{"127.0.0.1", "192.168.0.1", " ", "::1"}, mine, false); !reflect.DeepEqual(got, []string{"127.0.0.1", "192.168.0.1", "::1"}) {
+		t.Fatalf("notSelfServers(no residue) = %v, want the user's list intact", got)
 	}
-	if got := notSelfHost("127.0.0.1"); got != "" {
-		t.Fatalf("notSelfHost(loopback) = %q", got)
+	if got := notSelfServers([]string{"127.0.0.1", "192.168.0.1", " ", "::1"}, mine, true); !reflect.DeepEqual(got, []string{"192.168.0.1", "::1"}) {
+		t.Fatalf("notSelfServers(residue) = %v", got)
 	}
-	if got := notSelfHost("proxy.corp"); got != "proxy.corp" {
-		t.Fatalf("notSelfHost = %q", got)
+
+	// notSelfHost: host AND port must both match ours.
+	if got := notSelfHost("127.0.0.1", 8080, "127.0.0.1", 8080, false); got != "" {
+		t.Fatalf("notSelfHost(exactly ours) = %q", got)
+	}
+	if got := notSelfHost("127.0.0.1", 8888, "127.0.0.1", 8080, false); got != "127.0.0.1" {
+		t.Fatalf("notSelfHost(the user's loopback proxy on another port) = %q, want it kept", got)
+	}
+	if got := notSelfHost("127.0.0.1", 8888, "127.0.0.1", 8080, true); got != "" {
+		t.Fatalf("notSelfHost(loopback, priorResidue) = %q", got)
+	}
+	if got := notSelfHost("proxy.corp", 3128, "127.0.0.1", 8080, true); got != "proxy.corp" {
+		t.Fatalf("notSelfHost(corp) = %q", got)
+	}
+	if got := notSelfHost("", 0, "127.0.0.1", 8080, false); got != "" {
+		t.Fatalf("notSelfHost(empty) = %q", got)
+	}
+
+	if !sameHost("[::1]", "::1") || !sameHost("LOCALHOST", "localhost") || sameHost("127.0.0.1", "") {
+		t.Fatal("sameHost mis-compared equivalent spellings of the same host")
 	}
 	if isLoopbackHost("") || isLoopbackHost("example.com") {
 		t.Fatal("isLoopbackHost matched a non-loopback host")
@@ -221,7 +316,7 @@ func TestLaunchEnvRoundTrip(t *testing.T) {
 	f := newFakeSystem()
 	e := f.env0()
 	f.env["HTTP_PROXY"] = "http://corp.example:3128"
-	f.env["HTTPS_PROXY"] = "http://127.0.0.1:9999" // our own residue
+	f.env["HTTPS_PROXY"] = pacURL // our own residue: exactly what we export
 	before := f.snapshot()
 
 	op := NewLaunchEnv(f, pacURL, []string{"*.local", "169.254/16"})
@@ -231,7 +326,7 @@ func TestLaunchEnvRoundTrip(t *testing.T) {
 		t.Fatal("a foreign HTTP_PROXY must be captured for restoration")
 	}
 	if le.prevSet["HTTPS_PROXY"] {
-		t.Fatal("a captured HTTPS_PROXY pointing at loopback must be treated as unset")
+		t.Fatal("a captured HTTPS_PROXY holding exactly our value must be treated as unset")
 	}
 	applyVerify(t, op, e)
 	if f.env["NO_PROXY"] != "*.local,169.254/16" {
@@ -341,7 +436,11 @@ func TestDNSOpRoundTrip(t *testing.T) {
 func TestDNSOpNotSelfClearsRatherThanRestoringUs(t *testing.T) {
 	f := newFakeSystem()
 	e := f.env0()
-	f.svc["Wi-Fi"].dns = []string{"127.0.0.1"} // residue of a hard kill
+	// The residue of a hard kill. PriorResidue is what says so: without it a
+	// lone 127.0.0.1 is indistinguishable from the user's own dnscrypt-proxy,
+	// and clearing it would drop the machine back to the ISP's resolver.
+	e.PriorResidue = true
+	f.svc["Wi-Fi"].dns = []string{"127.0.0.1"}
 
 	op := NewDNSServers(f, []string{"127.0.0.1", "9.9.9.9"}, []string{"Wi-Fi"})
 	prep(t, op, e)
@@ -466,10 +565,48 @@ func TestRouteOpRevertToleratesAnAbsentRoute(t *testing.T) {
 	op := NewRoute(f, netip.MustParsePrefix("0.0.0.0/1"), netip.Addr{}, "utun4")
 	// Nothing was ever applied. Revert must still succeed: the journal is
 	// deliberately over-approximate, so replay reverts things that never landed.
+	// It must not issue the delete, either — RTM_DELETE resolves by destination
+	// and scope alone, so a delete for a route that is not in the table is a
+	// delete aimed at whatever turns up there next.
 	revertVerify(t, op, e)
-	if calls := f.callsContaining("route -n delete"); len(calls) != 1 {
-		t.Fatalf("expected the delete to be attempted, calls: %v", f.callsContaining("route"))
+	if calls := f.callsContaining("route -n delete"); len(calls) != 0 {
+		t.Fatalf("a route that is not in the RIB must not be deleted, calls: %v", calls)
 	}
+}
+
+// TestRouteOpRevertDeletesOnlyOurOwnEntry: the RIB says who owns a destination,
+// and only an entry on our own interface may be deleted. A coexisting tunnel's
+// half-default sitting at the same prefix is left alone.
+func TestRouteOpRevertDeletesOnlyOurOwnEntry(t *testing.T) {
+	dst := netip.MustParsePrefix("0.0.0.0/1")
+
+	t.Run("ours", func(t *testing.T) {
+		f := newFakeSystem()
+		f.ifaces["utun4"] = &fakeIface{index: 22, up: true}
+		f.routes = append(f.routes, RouteEntry{Dst: dst, Iface: "utun4", Index: 22})
+		op := NewRoute(f, dst, netip.Addr{}, "utun4")
+		revertVerify(t, op, f.env0())
+		if calls := f.callsContaining("route -n delete"); len(calls) != 1 {
+			t.Fatalf("our own route must be deleted, calls: %v", f.callsContaining("route"))
+		}
+	})
+
+	t.Run("somebody else's", func(t *testing.T) {
+		f := newFakeSystem()
+		f.ifaces["utun4"] = &fakeIface{index: 22, up: true}
+		f.ifaces["utun6"] = &fakeIface{index: 20, up: true}
+		f.routes = append(f.routes, RouteEntry{Dst: dst, Iface: "utun6", Index: 20})
+		op := NewRoute(f, dst, netip.Addr{}, "utun4")
+		if err := op.Revert(context.Background(), f.env0()); err != nil {
+			t.Fatalf("Revert: %v", err)
+		}
+		if calls := f.callsContaining("route -n delete"); len(calls) != 0 {
+			t.Fatalf("a foreign route at our destination must not be deleted, calls: %v", calls)
+		}
+		if ok, _ := f.Exists(dst, "utun6"); !ok {
+			t.Fatal("the other tunnel's route was deleted")
+		}
+	})
 }
 
 func TestRouteOpNeedsARIB(t *testing.T) {
@@ -554,5 +691,205 @@ func TestIfconfigOpRejectsANonAddress(t *testing.T) {
 	op := NewIfconfig(f, "utun4", "not-an-ip", "", 1500)
 	if err := op.Verify(context.Background(), f.env0()); err == nil {
 		t.Fatal("Verify accepted an address that is not an IP")
+	}
+}
+
+// TestProxyVerifyRevertedCoversEveryService is SF17. Apply and Revert loop
+// o.services; Verify/VerifyReverted read `scutil --proxy`, which answers for the
+// primary service only. That covered 1 of N mutations while UndoAll closed the
+// journal entry on that basis.
+func TestProxyVerifyRevertedCoversEveryService(t *testing.T) {
+	svcs := []string{"Wi-Fi", "Thunderbolt Bridge"}
+
+	t.Run("pac", func(t *testing.T) {
+		f := newFakeSystem()
+		e := f.env0()
+		op := NewPAC(f, pacURL, svcs)
+		prep(t, op, e)
+		applyVerify(t, op, e)
+		// Only the primary service is put back — the shape a partial revert
+		// leaves, and the shape scutil cannot see.
+		f.svc["Wi-Fi"].pacOn, f.svc["Wi-Fi"].pacURL = false, ""
+		if err := op.VerifyReverted(context.Background(), e); err == nil {
+			t.Fatal("VerifyReverted passed while a secondary service still carried our PAC")
+		}
+	})
+
+	t.Run("web", func(t *testing.T) {
+		f := newFakeSystem()
+		e := f.env0()
+		op := NewWebProxy(f, "127.0.0.1", 8080, svcs)
+		prep(t, op, e)
+		applyVerify(t, op, e)
+		f.svc["Wi-Fi"].webOn, f.svc["Wi-Fi"].secOn = false, false
+		if err := op.VerifyReverted(context.Background(), e); err == nil {
+			t.Fatal("VerifyReverted passed while a secondary service still carried our web proxy")
+		}
+	})
+
+	t.Run("socks", func(t *testing.T) {
+		f := newFakeSystem()
+		e := f.env0()
+		op := NewSOCKSProxy(f, "127.0.0.1", 1080, svcs)
+		prep(t, op, e)
+		applyVerify(t, op, e)
+		f.svc["Wi-Fi"].sockOn = false
+		if err := op.VerifyReverted(context.Background(), e); err == nil {
+			t.Fatal("VerifyReverted passed while a secondary service still carried our SOCKS proxy")
+		}
+	})
+
+	t.Run("dns", func(t *testing.T) {
+		f := newFakeSystem()
+		e := f.env0()
+		op := NewDNSServers(f, []string{"127.0.0.1", "9.9.9.9"}, svcs)
+		prep(t, op, e)
+		applyVerify(t, op, e)
+		f.svc["Wi-Fi"].dns = nil
+		if err := op.VerifyReverted(context.Background(), e); err == nil {
+			t.Fatal("VerifyReverted passed while a secondary service still carried our resolvers")
+		}
+	})
+}
+
+// TestProxyRevertClearsAbandonedFields is the second half of MF5. macOS keeps a
+// disabled proxy's Server and Port — confirmed live on this machine:
+// `networksetup -getwebproxy Wi-Fi` reports "Enabled: No, Server: 127.0.0.1,
+// Port: 8080" left by an earlier dpb. Emitting only `-setwebproxystate off`
+// abandons the fields pointing at our dead port, and the next time the user
+// ticks the box in System Settings they get a total HTTP/HTTPS outage.
+func TestProxyRevertClearsAbandonedFields(t *testing.T) {
+	f := newFakeSystem()
+	e := f.env0()
+	op := NewWebProxy(f, "127.0.0.1", 8080, []string{"Wi-Fi"})
+	prep(t, op, e)
+	applyVerify(t, op, e)
+	revertVerify(t, op, e)
+
+	s := f.svc["Wi-Fi"]
+	if s.webOn || s.secOn {
+		t.Fatal("Revert left a proxy enabled")
+	}
+	if s.webHost != "" || s.webPort != 0 || s.secHost != "" || s.secPort != 0 {
+		t.Fatalf("Revert abandoned our address behind a disabled toggle: web=%s:%d secure=%s:%d",
+			s.webHost, s.webPort, s.secHost, s.secPort)
+	}
+}
+
+// TestProxyRevertSoftCommandsDoNotFailTheRevert: clearing a stored field is
+// tidying. If networksetup refuses it, the state command is still what the user
+// needs, and the journal entry must not be left pending forever.
+func TestProxyRevertSoftCommandsDoNotFailTheRevert(t *testing.T) {
+	f := newFakeSystem()
+	e := f.env0()
+	op := NewPAC(f, pacURL, []string{"Wi-Fi"})
+	prep(t, op, e)
+	applyVerify(t, op, e)
+	f.failNext("networksetup -setautoproxyurl Wi-Fi ", 1)
+	revertVerify(t, op, e)
+	if f.svc["Wi-Fi"].pacOn {
+		t.Fatal("a failed tidy-up command stopped the PAC being switched off")
+	}
+}
+
+// TestLaunchEnvVerifiesThroughLaunchctlByDesign is SF18. This is the one
+// documented exception to "Verify reads through a different subsystem than
+// Apply wrote through": launchd's store is the only place a user-session
+// variable lives, and docs/PLAN.md's mutated-state table row 2 specifies
+// `launchctl getenv`. The test pins the exception so a future reviewer replaces
+// it deliberately rather than by accident — and so the real gap stays visible:
+// setenv only reaches processes started after the call, so a passing Verify
+// says nothing about the already-running apps the Op exists for.
+func TestLaunchEnvVerifiesThroughLaunchctlByDesign(t *testing.T) {
+	f := newFakeSystem()
+	e := f.env0()
+	op := NewLaunchEnv(f, pacURL, nil)
+	prep(t, op, e)
+	applyVerify(t, op, e)
+
+	var verifiers []string
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "launchctl getenv") {
+			verifiers = append(verifiers, c)
+		}
+	}
+	if len(verifiers) == 0 {
+		t.Fatal("launchEnvOp.Verify no longer reads launchd's own store; if that is deliberate, update the Op contract's carve-out too")
+	}
+	// And the caveat the carve-out exists alongside: a passing Verify is about
+	// launchd's store, not about any running process.
+	if err := op.Verify(context.Background(), e); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+}
+
+// TestPACFileApplyFsyncsItsDirectory is the second half of SF27: a rename is a
+// directory operation, so syncing the file's contents says nothing about the
+// name now pointing at them.
+func TestPACFileApplyFsyncsItsDirectory(t *testing.T) {
+	var synced []string
+	old := dirSyncer
+	t.Cleanup(func() { dirSyncer = old })
+	dirSyncer = func(dir string) error {
+		synced = append(synced, dir)
+		return old(dir)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dpb.pac")
+	op := NewPACFile(path, []byte("function FindProxyForURL(){return \"DIRECT\";}"))
+	prep(t, op, Env{})
+	applyVerify(t, op, Env{})
+	if len(synced) != 1 || synced[0] != dir {
+		t.Fatalf("directories fsynced after the PAC rename = %v, want [%s]", synced, dir)
+	}
+}
+
+// TestVerifyRevertedReportsAFailedPerServiceRead: a getter we cannot run means
+// we cannot confirm the revert, so the record must stay pending for Replay
+// rather than be closed on a guess.
+func TestVerifyRevertedReportsAFailedPerServiceRead(t *testing.T) {
+	cases := []struct {
+		name string
+		op   func(*fakeSystem) Op
+		fail string
+	}{
+		{"pac", func(f *fakeSystem) Op { return NewPAC(f, pacURL, []string{"Wi-Fi"}) }, "networksetup -getautoproxyurl"},
+		{"web", func(f *fakeSystem) Op { return NewWebProxy(f, "127.0.0.1", 8080, []string{"Wi-Fi"}) }, "networksetup -getwebproxy"},
+		{"socks", func(f *fakeSystem) Op { return NewSOCKSProxy(f, "127.0.0.1", 1080, []string{"Wi-Fi"}) }, "networksetup -getsocksfirewallproxy"},
+		{"dns", func(f *fakeSystem) Op {
+			return NewDNSServers(f, []string{"127.0.0.1", "9.9.9.9"}, []string{"Wi-Fi"})
+		}, "networksetup -getdnsservers"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeSystem()
+			e := f.env0()
+			op := c.op(f)
+			prep(t, op, e)
+			applyVerify(t, op, e)
+			if err := op.Revert(context.Background(), e); err != nil {
+				t.Fatalf("Revert: %v", err)
+			}
+			f.failNext(c.fail, 1)
+			if err := op.VerifyReverted(context.Background(), e); err == nil {
+				t.Fatal("VerifyReverted passed despite being unable to read a service back")
+			}
+		})
+	}
+}
+
+// TestRouteOpRevertFallsBackWhenTheRIBIsUnreadable: refusing outright would
+// strand our own capture route, so the delete is issued and VerifyReverted
+// decides.
+func TestRouteOpRevertFallsBackWhenTheRIBIsUnreadable(t *testing.T) {
+	f := newFakeSystem()
+	e := Env{Runner: f, Logf: func(string, ...any) {}} // no RIB
+	op := NewRoute(f, netip.MustParsePrefix("0.0.0.0/1"), netip.Addr{}, "utun4")
+	if err := op.Revert(context.Background(), e); err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	if calls := f.callsContaining("route -n delete"); len(calls) != 1 {
+		t.Fatalf("expected the delete to still be attempted, calls: %v", f.callsContaining("route"))
 	}
 }

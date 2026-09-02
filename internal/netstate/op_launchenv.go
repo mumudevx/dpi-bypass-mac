@@ -26,9 +26,18 @@ type launchEnvRevert struct {
 }
 
 // launchEnvOp sets user-session environment variables through launchctl.
-// Verification reads them back with `launchctl getenv`, which is what the
-// lifecycle table specifies: launchd's own store is the only place these live,
-// so there is no second subsystem to consult.
+//
+// Verification reads them back with `launchctl getenv`. That is the one
+// documented exception to the Op contract's "Verify reads through a different
+// subsystem" rule (see the Op doc comment), and it is what docs/PLAN.md's
+// mutated-state table row 2 specifies: launchd's own store is the only place a
+// user-session variable lives, so there is no second observer to consult.
+//
+// Caveat worth stating plainly rather than hiding behind a green Verify:
+// `launchctl setenv` only affects processes started AFTER the call. A passing
+// Verify says the variable is in launchd's store; it says nothing about the
+// already-running Electron apps whose in-process reqwest addon is the reason
+// this Op exists. Those pick it up on their next launch, or not at all.
 type launchEnvOp struct {
 	run      Runner
 	vars     map[string]string
@@ -99,8 +108,11 @@ func (o *launchEnvOp) prepare(ctx context.Context, e Env) error {
 		// launchctl prints nothing and exits 0 for an unset variable.
 		val := strings.TrimSpace(res.Combined)
 		// notSelf: a leftover value from a SIGKILLed run points at a port nobody
-		// is listening on. Record it as unset so Revert clears it.
-		if val != "" && !isSelfProxyValue(name, val) {
+		// is listening on. Record it as unset so Revert clears it. "Leftover" is
+		// an exact match against the value we are about to export — a user who
+		// exports HTTPS_PROXY=http://127.0.0.1:8080 for their own local proxy
+		// keeps it.
+		if val != "" && !o.isSelfValue(name, val, e.PriorResidue) {
 			o.prev[name] = val
 			o.prevSet[name] = true
 		}
@@ -109,14 +121,20 @@ func (o *launchEnvOp) prepare(ctx context.Context, e Env) error {
 	return nil
 }
 
-// isSelfProxyValue reports whether a captured environment value points at one
-// of our own loopback listeners. NO_PROXY is a host list, never a URL, so it is
-// never "ours".
-func isSelfProxyValue(name, val string) bool {
+// isSelfValue reports whether a captured environment value is ours: exactly the
+// value this Op is about to export, or — when a previous run is known to have
+// died mid-flight — any loopback proxy URL, since that run may have bound a
+// different port. NO_PROXY is a host list rather than a URL, so only the exact
+// match applies to it.
+func (o *launchEnvOp) isSelfValue(name, val string, priorResidue bool) bool {
+	ours := o.vars[name]
+	if strings.TrimSpace(val) == strings.TrimSpace(ours) {
+		return true
+	}
 	if name == envNoProxy {
 		return false
 	}
-	return notSelfPAC(val) == ""
+	return notSelfPAC(val, ours, priorResidue) == ""
 }
 
 func (o *launchEnvOp) Apply(ctx context.Context, e Env) error {

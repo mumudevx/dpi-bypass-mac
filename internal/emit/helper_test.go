@@ -2,9 +2,11 @@ package emit
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
@@ -13,6 +15,12 @@ import (
 // errFakeWrite is what fakeTransport returns when it is told to fail, so a test
 // can assert the sender wrapped it rather than replaced it.
 var errFakeWrite = errors.New("fake transport: write refused")
+
+// errFakeOOB is the urgent-byte equivalent. It wraps a real syscall errno
+// because the promise Sender.Send documents is that errors.Is(err,
+// syscall.EPIPE) still holds at the call site, and oob:pos=1 is the last rung
+// of the tr ladder — the one whose reported cause a user actually reads.
+var errFakeOOB = fmt.Errorf("fake transport: urgent byte refused: %w", syscall.EPIPE)
 
 // fakeTransport records everything the sender does, so a test can assert the
 // exact call sequence without a socket.
@@ -30,7 +38,12 @@ type fakeTransport struct {
 	// failWriteAt is the 1-based stream write that fails; 0 means never.
 	failWriteAt int
 	shortWrite  bool
-	failReset   bool
+	// failOOBAt mirrors failWriteAt for the urgent-byte path, and shortOOB
+	// mirrors shortWrite. Without them the SegOOBByte error branch in
+	// emitSegment is unreachable from a test.
+	failOOBAt int
+	shortOOB  bool
+	failReset bool
 	// onWrite runs before each stream write, so a test can observe socket state
 	// at the exact moment a segment is on the wire.
 	onWrite func(n int)
@@ -63,6 +76,12 @@ func (f *fakeTransport) WriteOOB(b []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.oob = append(f.oob, append([]byte(nil), b...))
+	if f.failOOBAt != 0 && len(f.oob) == f.failOOBAt {
+		return 0, errFakeOOB
+	}
+	if f.shortOOB && len(b) > 1 {
+		return len(b) - 1, nil
+	}
 	return len(b), nil
 }
 

@@ -40,7 +40,7 @@ func TestStrategyListLadder(t *testing.T) {
 	if r.code != ExitOK {
 		t.Fatalf("exit code = %d: %s", r.code, r.stderr)
 	}
-	want := []string{"1. plain", "2. tlsfrag:pos=snimid", "3. chunk:size=12", "4. chunk:size=4", "5. oob:pos=1"}
+	want := []string{"1. plain", "2. tlsfrag:pos=snimid", "3. chunk:size=12", "4. oob:pos=1"}
 	for _, w := range want {
 		if !strings.Contains(r.stdout, w) {
 			t.Errorf("ladder is missing %q:\n%s", w, r.stdout)

@@ -107,7 +107,18 @@ func runProbe(ctx context.Context, g *globals, f probeFlags) error {
 
 	dial := &flow.NetDialer{Logf: g.logf}
 	if f.addr == "" {
-		chain, err := probeChain(g)
+		// Order the rungs by measured liveness before the first query. The
+		// chain walks serially, so an unranked chain pays a timeout for every
+		// dead rung ahead of the live one — on this line that is the difference
+		// between a sub-second answer and spending the whole budget getting to
+		// the alternate-port rung that works (MEASUREMENTS.md §2). Ranking is
+		// an optimisation: if it cannot finish, the configured order stands.
+		rank := func(rs []resolve.Resolver) []resolve.Resolver {
+			rankCtx, cancel := context.WithTimeout(ctx, rankBudget)
+			defer cancel()
+			return resolve.Rank(rankCtx, rs, rankControl, g.logf)
+		}
+		chain, err := probeChain(g, rank)
 		if err != nil {
 			return err
 		}
@@ -184,12 +195,29 @@ func runProbe(ctx context.Context, g *globals, f probeFlags) error {
 		target, res.Pass, len(res.Trials), strat.Label(), res.Verdict)
 }
 
+// rankControl is queried against every resolver to order the chain. §2 measures
+// google.com answering over UDP/53, alternate-port UDP and DoH alike, while
+// blocked names are dropped per-QNAME — so a blocked control would rank every
+// working resolver dead.
+const rankControl = "google.com"
+
+// rankBudget bounds the whole ranking pass. Ranking is an optimisation; if the
+// network is slow enough that it does not finish, the configured order is used.
+const rankBudget = 3 * time.Second
+
 // probeChain builds the shipped resolver chain. It exists for the case where no
 // --addr was given; the pinned path never touches it.
-func probeChain(g *globals) (*resolve.Chain, error) {
+//
+// rank, when non-nil, reorders the resolvers before the chain is built. It is a
+// parameter rather than a fixed step so the chain's composition can be asserted
+// without a live network: ranking is the only part of this that dials.
+func probeChain(g *globals, rank func([]resolve.Resolver) []resolve.Resolver) (*resolve.Chain, error) {
 	rs, err := resolve.DefaultResolvers(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("probe: build resolver chain: %w", err)
+	}
+	if rank != nil {
+		rs = rank(rs)
 	}
 	return resolve.NewChain(resolve.Options{Resolvers: rs, Logf: g.logf}), nil
 }

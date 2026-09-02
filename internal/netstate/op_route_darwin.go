@@ -29,6 +29,13 @@ type routeOp struct {
 	dst   netip.Prefix
 	gw    netip.Addr
 	iface string
+
+	// added records that our own `route add` reported success, i.e. that this
+	// Op is responsible for whatever now sits at dst. It is false for an Op
+	// rebuilt from a journal record, which is correct: Manager.rollback is the
+	// only caller of mutated(), and a revived Op is reverting a change a dead
+	// process made.
+	added bool
 }
 
 // NewRoute returns an Op installing a route to dst.
@@ -98,11 +105,19 @@ func (o *routeOp) args(verb string) []string {
 func (o *routeOp) Apply(ctx context.Context, e Env) error {
 	// The Result is checked, but it is only the first line of defence: Verify
 	// reading the RIB is the one that decides.
+	o.added = false
 	if err := o.runner(e).Run(ctx, "route", o.args("add")...).Error(); err != nil {
 		return err
 	}
+	o.added = true
 	return nil
 }
+
+// mutated tells Manager.rollback whether there is anything to undo. A failed
+// add created nothing — the common shape is the exit-0 "File exists" liar,
+// which means the destination was already owned by somebody else — and issuing
+// the delete anyway would remove their route, not ours.
+func (o *routeOp) mutated() bool { return o.added }
 
 func (o *routeOp) Verify(ctx context.Context, e Env) error {
 	rs, err := o.routes(e)
@@ -142,7 +157,11 @@ func matchRoute(rs []RouteEntry, dst netip.Prefix, gw netip.Addr, iface string, 
 		if gw.IsValid() && !sameGateway(r.Gateway, gw) {
 			continue
 		}
-		if wantScoped && !r.Scoped {
+		// RTF_IFSCOPE is part of the route's identity, not a detail: a scoped
+		// entry does not satisfy an unscoped request (we would report success
+		// having installed nothing) and an unscoped entry does not satisfy a
+		// scoped one (VerifyReverted would match a sibling forever).
+		if r.Scoped != wantScoped {
 			continue
 		}
 		return true
@@ -161,6 +180,24 @@ func sameGateway(a, b netip.Addr) bool {
 // per the liar table, a failure. Only VerifyReverted reading the RIB can tell
 // the two apart, so that is what decides.
 func (o *routeOp) Revert(ctx context.Context, e Env) error {
+	// Look before deleting. The kernel resolves RTM_DELETE by destination +
+	// netmask + explicit -ifscope; the link gateway that `-interface` supplies
+	// is never compared, so `route delete -net 0.0.0.0/1 -interface utunOURS`
+	// removes whatever owns 0.0.0.0/1 on ANY interface. If the RIB says the
+	// entry there is not ours, it belongs to a coexisting tunnel and we leave
+	// it alone. A RIB we cannot read is the one case where we still issue the
+	// delete: VerifyReverted is what decides, and refusing outright would strand
+	// our own capture route.
+	if rs, err := o.routes(e); err == nil {
+		if !matchRoute(rs, o.dst, o.gw, o.iface, o.gw.IsValid() && o.iface != "") {
+			e.logf("netstate: %s is not in the routing table on our own interface; leaving whatever owns %s alone",
+				o.ID(), o.dst)
+			return nil
+		}
+	} else {
+		e.logf("netstate: cannot read the RIB before deleting %s (%v); issuing the delete and letting VerifyReverted decide",
+			o.ID(), err)
+	}
 	if res := o.runner(e).Run(ctx, "route", o.args("delete")...); res.Failed() {
 		e.logf("netstate: route delete reported %q; the RIB read decides", res.Reason())
 	}

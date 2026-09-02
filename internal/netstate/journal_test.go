@@ -3,8 +3,10 @@ package netstate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -230,5 +232,213 @@ func TestJournalPathAccessor(t *testing.T) {
 	j, path := openTestJournal(t)
 	if j.Path() != path {
 		t.Fatalf("Path() = %q, want %q", j.Path(), path)
+	}
+}
+
+// TestJournalInteriorTornLine is SF7. The `break` at the first decode error was
+// correct only while the torn line was last — and the journal is reopened
+// O_APPEND, so the next run's Begin concatenates onto the fragment and turns it
+// into an INTERIOR corrupt line. Everything after it then vanished from
+// Pending(): applied, journalled mutations that doctor --repair, the janitor and
+// the login agent could no longer see, which is an UNDER-approximate journal —
+// the one direction this design exists to avoid.
+func TestJournalInteriorTornLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "journal.ndjson")
+	ctx := context.Background()
+
+	j, _ := OpenJournal(path)
+	if _, err := j.Begin(ctx, Record{Kind: OpRoute, ID: "first"}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	j.Close()
+
+	// A SIGKILL mid-write leaves a fragment with no newline.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"phase":"begin","seq":2,"kind":"route","id":"tor`); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// The next two runs append behind it.
+	for _, id := range []string{"second", "third"} {
+		j2, err := OpenJournal(path)
+		if err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		if _, err := j2.Begin(ctx, Record{Kind: OpRoute, ID: id}); err != nil {
+			t.Fatalf("Begin(%s): %v", id, err)
+		}
+		j2.Close()
+	}
+
+	j3, err := OpenJournal(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer j3.Close()
+	pending, err := j3.Pending(ctx)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	var ids []string
+	for _, r := range pending {
+		ids = append(ids, r.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{"first", "second", "third"}) {
+		t.Fatalf("Pending() sees %v of 3 real records; the rest are unrevertable", ids)
+	}
+}
+
+// TestJournalFragmentBeforeEveryRecord is the worse half of SF7: with a
+// fragment first, readAllLocked returned nothing, and the next Done() reached
+// compactLocked, concluded the journal was empty, and Truncate(0)'d live
+// records away.
+func TestJournalFragmentBeforeEveryRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "journal.ndjson")
+	ctx := context.Background()
+
+	if err := os.WriteFile(path, []byte(`{"phase":"begin","seq":9,"kind":"rou`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	j, err := OpenJournal(path)
+	if err != nil {
+		t.Fatalf("OpenJournal: %v", err)
+	}
+	defer j.Close()
+
+	keep, err := j.Begin(ctx, Record{Kind: OpRoute, ID: "keep"})
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	drop, err := j.Begin(ctx, Record{Kind: OpRoute, ID: "drop"})
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := j.Done(ctx, drop); err != nil {
+		t.Fatalf("Done: %v", err)
+	}
+
+	pending, err := j.Pending(ctx)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != "keep" || pending[0].Seq != uint64(keep) {
+		t.Fatalf("Pending = %+v, want the live record to have survived compaction", pending)
+	}
+}
+
+// TestOpenJournalHealsATornTail: the fragment is truncated at open, so O_APPEND
+// can never weld the next record onto it.
+func TestOpenJournalHealsATornTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "journal.ndjson")
+	if err := os.WriteFile(path, []byte("{\"phase\":\"begin\",\"seq\":1,\"id\":\"whole\"}\n{\"phase\":\"beg"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	j, err := OpenJournal(path)
+	if err != nil {
+		t.Fatalf("OpenJournal: %v", err)
+	}
+	defer j.Close()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) == 0 || b[len(b)-1] != '\n' {
+		t.Fatalf("journal does not end on a record boundary: %q", b)
+	}
+	if want := "{\"phase\":\"begin\",\"seq\":1,\"id\":\"whole\"}\n"; string(b) != want {
+		t.Fatalf("journal = %q, want the torn fragment gone and only %q left", b, want)
+	}
+}
+
+// TestJournalFsyncsItsParentDirectory is SF27. A file's data being durable does
+// not make its directory entry durable, so on a first-ever run a power loss
+// between Begin and Apply could leave the journal unlinked — the system proxy
+// pointing at a dead port with no record dpb set it. fsync on a directory is
+// unobservable from inside the process, so the seam is what is asserted.
+func TestJournalFsyncsItsParentDirectory(t *testing.T) {
+	var synced []string
+	old := dirSyncer
+	t.Cleanup(func() { dirSyncer = old })
+	dirSyncer = func(dir string) error {
+		synced = append(synced, dir)
+		return old(dir)
+	}
+
+	dir := filepath.Join(t.TempDir(), "state")
+	j, err := OpenJournal(filepath.Join(dir, "journal.ndjson"))
+	if err != nil {
+		t.Fatalf("OpenJournal: %v", err)
+	}
+	defer j.Close()
+	if len(synced) != 1 || synced[0] != dir {
+		t.Fatalf("directories fsynced = %v, want [%s]", synced, dir)
+	}
+}
+
+func TestFsyncDirReportsAMissingDirectory(t *testing.T) {
+	if err := fsyncDir(filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Fatal("fsyncDir on a missing directory must fail")
+	}
+}
+
+// TestJournalRecordsANonZeroStartTime is the second effect of MF8: fileJournal
+// records the owning process's start time so Replay can defeat pid reuse, and
+// it read it through the same locale-dependent ps parse. On a Turkish Mac every
+// Record and the lock file were written with StartedAt zero, disabling the
+// defence entirely.
+func TestJournalRecordsANonZeroStartTime(t *testing.T) {
+	t.Setenv("LC_ALL", "tr_TR.UTF-8")
+	t.Setenv("LANG", "tr_TR.UTF-8")
+	path := filepath.Join(t.TempDir(), "journal.ndjson")
+	j, err := OpenJournal(path)
+	if err != nil {
+		t.Fatalf("OpenJournal: %v", err)
+	}
+	defer j.Close()
+	ctx := context.Background()
+	if _, err := j.Begin(ctx, Record{Kind: OpRoute, ID: "x"}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	pending, err := j.Pending(ctx)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("Pending = %+v", pending)
+	}
+	if pending[0].StartedAt.IsZero() {
+		t.Fatal("the record carries no start time, so pid reuse cannot be detected")
+	}
+	if pending[0].PID != os.Getpid() {
+		t.Fatalf("record PID = %d, want %d", pending[0].PID, os.Getpid())
+	}
+}
+
+func TestOpenJournalReportsAFailedDirectorySync(t *testing.T) {
+	old := dirSyncer
+	t.Cleanup(func() { dirSyncer = old })
+	dirSyncer = func(string) error { return errors.New("injected") }
+	if _, err := OpenJournal(filepath.Join(t.TempDir(), "journal.ndjson")); err == nil {
+		t.Fatal("OpenJournal must report a parent directory it could not make durable")
+	}
+}
+
+func TestOpenJournalReportsAnUnhealableTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "journal.ndjson")
+	if err := os.WriteFile(path, []byte("fragment with no newline"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	// Read-only: the heal cannot truncate, and OpenJournal must say so rather
+	// than carry on and weld the next record onto the fragment.
+	if _, err := OpenJournal(path); err == nil {
+		t.Fatal("OpenJournal accepted a torn tail it could not heal")
 	}
 }

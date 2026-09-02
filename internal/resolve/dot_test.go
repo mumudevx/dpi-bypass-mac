@@ -256,3 +256,25 @@ func TestDoTExchangeFailures(t *testing.T) {
 		}
 	})
 }
+
+// TestDoTRefusesPort53 pins the distinction the whole transport rests on. DoT
+// is a TLS stream on 853 (DOSSIER GT4: "DoT/853 connects"); a "dot" endpoint
+// pointed at 53 is a TLS handshake attempted against the plaintext DNS port,
+// which MEASUREMENTS.md §2 measures as connection-reset at every port on this
+// ISP. Accepting it costs a full per-rung budget per query and answers nothing.
+func TestDoTRefusesPort53(t *testing.T) {
+	if _, err := NewDoT("8.8.8.8:53", nil); err == nil {
+		t.Fatal("a DoT endpoint on port 53 must be refused")
+	}
+	if _, err := NewDoTServerName("8.8.8.8:53", "dns.google", nil); err == nil {
+		t.Fatal("an explicit ServerName does not make port 53 DoT")
+	}
+	// The Endpoint form is the one a profile or a config layer would carry.
+	if _, err := (Endpoint{Label: "bad", Transport: "dot", Target: "9.9.9.9:53"}).New(nil, nil); err == nil {
+		t.Fatal("Endpoint.New must not build a DoT resolver on port 53")
+	}
+	// 853 is still fine.
+	if _, err := NewDoT("9.9.9.9:853", nil); err != nil {
+		t.Fatalf("DoT on 853 must still build: %v", err)
+	}
+}

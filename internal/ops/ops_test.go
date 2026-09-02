@@ -415,7 +415,9 @@ func TestChunkStaysInsideTheSegmentBudget(t *testing.T) {
 	payload, meta := ttHello(t)
 	bud := strategy.DefaultBudget()
 
-	for _, size := range []int{1, 2, 4, 12, 40} {
+	// Every size here fills the budget AND ends its chunked prefix past the SNI;
+	// a size that does not is refused outright (see TestChunkRefusesAPrefix...).
+	for _, size := range []int{9, 12, 20, 40} {
 		spec := fmt.Sprintf("chunk:size=%d", size)
 		p := mustBuild(t, spec, payload, meta)
 		if p.WriteCount() > bud.MaxSegments {
@@ -466,7 +468,7 @@ func TestChunkRejectsAnInertSize(t *testing.T) {
 // scoring the code against one afternoon in Kayseri.
 func TestChunkDoesNotEvadeTT2026(t *testing.T) {
 	payload, meta := ttHello(t)
-	for _, spec := range []string{"chunk:size=4", "chunk:size=12", "split:pos=1", "split:pos=snimid"} {
+	for _, spec := range []string{"chunk:size=9", "chunk:size=12", "split:pos=1", "split:pos=snimid"} {
 		p := mustBuild(t, spec, payload, meta)
 		if v := censor(testcensor.TT2026(ttHost), 443, p); !v.Blocked() {
 			t.Errorf("%s: evaded a TCP-reassembling middlebox, which §3.1 says is impossible", spec)
@@ -671,11 +673,67 @@ func TestHostMutatorsCompose(t *testing.T) {
 	}
 }
 
-func TestTLSPadPushesTheSNI(t *testing.T) {
+// TestTLSPadIsRefusedAtParseTime pins SF3.
+//
+// tlspad rewrote the ClientHello in flight. dpb is a byte relay: the client's
+// crypto/tls has already committed those exact bytes to its handshake
+// transcript, so an inserted padding extension desynchronises the TLS 1.3 key
+// schedule and the connection dies with `bad record MAC` whatever the DPI does
+// — measured 0/2 live against an unblocked control that plain passes 2/2, and
+// reproduced with the network removed entirely. Worse, dpb scored that purely
+// local alert as verdict RESET and told the user it was censorship.
+//
+// So it must not be selectable at all. The refusal is at PARSE time, with the
+// citation, the way the unreachable family works: a user who pastes the spec is
+// told which mechanism cannot work here, not "unknown op".
+func TestTLSPadIsRefusedAtParseTime(t *testing.T) {
 	payload, meta := ttHello(t)
-	p := mustBuild(t, "tlspad:to=600", payload, meta)
 
-	m := tlsmsg.Parse(p.Payload, 443)
+	for _, spec := range []string{"tlspad", "tlspad:to=600", "tlspad:to=600|tlsfrag:pos=snimid"} {
+		_, err := NewRegistry().Get(spec)
+		if !errors.Is(err, strategy.ErrOpRejected) {
+			t.Errorf("%s: err = %v, want ErrOpRejected", spec, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "transcript") {
+			t.Errorf("%s: the refusal must say why: %v", spec, err)
+		}
+	}
+
+	// The backstop, for a caller that compiles the op without going through the
+	// registry: it still cannot emit a rewritten hello.
+	for _, o := range All() {
+		if o.Name() != "tlspad" {
+			continue
+		}
+		step, err := o.Compile(strategy.Args{"to": "600"})
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+		b := &strategy.Builder{Payload: append([]byte(nil), payload...), Meta: meta, Caps: allCaps}
+		if err := step.Apply(b); !errors.Is(err, strategy.ErrOpRejected) {
+			t.Fatalf("Apply err = %v, want ErrOpRejected", err)
+		}
+		if !bytes.Equal(b.Payload, payload) {
+			t.Error("a rejected mutator must not have touched the payload")
+		}
+	}
+}
+
+// TestPadHelloStillProducesAWalkableHello keeps the rewrite itself honest.
+//
+// padHello is no longer reachable as a strategy, but it is the payload a
+// respecified low-TTL DECOY would carry (the real hello following it
+// unmodified, which is the only shape that can answer PLAN's inspection-depth
+// question without breaking the client's transcript). It stays tested so that
+// respecification has something that works to stand on.
+func TestPadHelloStillProducesAWalkableHello(t *testing.T) {
+	payload, meta := ttHello(t)
+	out, err := padHello(payload, meta, 600)
+	if err != nil {
+		t.Fatalf("padHello: %v", err)
+	}
+	m := tlsmsg.Parse(out, 443)
 	if !m.Complete || m.ServerName != ttHost {
 		t.Fatalf("padded hello does not parse: %+v", m)
 	}
@@ -685,44 +743,24 @@ func TestTLSPadPushesTheSNI(t *testing.T) {
 	if m.BodyLen != ttBodyLen+(600-ttSNIStart) {
 		t.Errorf("body = %d, want %d", m.BodyLen, ttBodyLen+(600-ttSNIStart))
 	}
-	if _, _, err := walkHelloExtensions(p.Payload[5 : 5+m.BodyLen]); err != nil {
+	if _, _, err := walkHelloExtensions(out[5 : 5+m.BodyLen]); err != nil {
 		t.Fatalf("padded hello is not structurally walkable: %v", err)
 	}
 
-	// Composition is the point: after tlspad the cut positions a reframer
-	// resolves are the PADDED ones, so the rule is enforced on the bytes that
-	// will actually be written.
-	comp := mustBuild(t, "tlspad:to=600|tlsfrag:pos=snimid", payload, meta)
-	h, _ := tlsmsg.ParseHeader(comp.Segments[0].Data)
-	if h.Length != 600+len(ttHost)/2 {
-		t.Errorf("first record body = %d, want the padded snimid %d", h.Length, 600+len(ttHost)/2)
-	}
-	if v := censor(testcensor.TT2026(ttHost), 443, comp); v.Blocked() {
-		t.Errorf("the padded, reframed hello must still evade: %v", v)
-	}
-}
-
-func TestTLSPadRefusals(t *testing.T) {
-	payload, meta := ttHello(t)
-
-	if _, err := buildSpec(t, "tlspad:to=114", payload, meta); !errors.Is(err, strategy.ErrBadValue) {
+	if _, err := padHello(payload, meta, 114); !errors.Is(err, strategy.ErrBadValue) {
 		t.Error("a target less than one extension header past the SNI must be refused")
 	}
-	if _, err := buildSpec(t, "tlspad:to=16000", payload, meta); !errors.Is(err, strategy.ErrBadValue) {
+	if _, err := padHello(payload, meta, 16000); !errors.Is(err, strategy.ErrBadValue) {
 		t.Error("padding past the 16384-byte record limit must be refused")
 	}
-
 	http, hm := httpFixture("discord.com")
-	if _, err := buildSpec(t, "tlspad:to=600", http, hm); !errors.Is(err, strategy.ErrNeedSNI) {
-		t.Error("tlspad on a plaintext request must be refused")
+	if _, err := padHello(http, hm, 600); !errors.Is(err, strategy.ErrNeedComplete) && !errors.Is(err, strategy.ErrNeedSNI) {
+		t.Errorf("a plaintext request has no hello to pad: err = %v", err)
 	}
-
 	// A hello that already carries a padding extension is refused rather than
 	// silently given a second one, which RFC 8446 §4.2 forbids.
-	padded := mustBuild(t, "tlspad:to=300", payload, meta).Payload
-	pm := tlsmsg.Parse(padded, 443)
-	if _, err := buildSpec(t, "tlspad:to=600", padded, pm); !errors.Is(err, ErrAlreadyPadded) {
-		t.Fatalf("err = %v, want ErrAlreadyPadded", err)
+	if _, err := padHello(out, m, 1200); !errors.Is(err, ErrAlreadyPadded) {
+		t.Errorf("err = %v, want ErrAlreadyPadded", err)
 	}
 }
 
@@ -879,7 +917,9 @@ func TestTRLadderIsMEASUREMENTS53(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"", "tlsfrag:pos=snimid", "chunk:size=12", "chunk:size=4", "oob:pos=1"}
+	// chunk:size=4 is deliberately absent: chunkOp refuses a size whose prefix
+	// stops short of the SNI, so shipping it would burn a connection per walk.
+	want := []string{"", "tlsfrag:pos=snimid", "chunk:size=12", "oob:pos=1"}
 	if len(rungs) != len(want) {
 		t.Fatalf("%d rungs, want %d", len(rungs), len(want))
 	}
@@ -1002,7 +1042,7 @@ func TestSchedulingOpsRejectBadParameters(t *testing.T) {
 	r := NewRegistry()
 	for _, spec := range []string{
 		"oob:pos=1,junk=999", "oob:pos=1,junk=x", "disorder:pos=1,ttl=0", "disorder:pos=1,ttl=256",
-		"chunk:size=0", "quicfake:ttl=0", "tlspad:to=0", "hostpad:len=99999",
+		"chunk:size=0", "quicfake:ttl=0", "hostpad:len=99999",
 	} {
 		if _, err := r.Get(spec); !errors.Is(err, strategy.ErrBadValue) {
 			t.Errorf("%s: err = %v, want ErrBadValue", spec, err)
@@ -1021,7 +1061,7 @@ func TestSchedulingOpsRejectBadParameters(t *testing.T) {
 // quietly dropped in normal operation and is an error under Strict.
 func TestStrictModeRefusesADowngrade(t *testing.T) {
 	payload, meta := ttHello(t)
-	for _, spec := range []string{"oob:pos=99999", "split:pos=99999", "disorder:pos=99999", "chunk:size=1"} {
+	for _, spec := range []string{"oob:pos=99999", "split:pos=99999", "disorder:pos=99999", "chunk:size=64"} {
 		s, err := NewRegistry().Get(spec)
 		if err != nil {
 			t.Fatal(err)
@@ -1035,9 +1075,11 @@ func TestStrictModeRefusesADowngrade(t *testing.T) {
 		}
 		_, err = s.BuildWith(b)
 		switch spec {
-		case "chunk:size=1":
-			// Not a downgrade: chunking the head is what this op does, and the
-			// geometry is deterministic given (size, budget).
+		case "chunk:size=64":
+			// Not a downgrade: chunking the head is what this op does, the
+			// geometry is deterministic given (size, budget), and 2x64 = 128
+			// clears the SNI's payload end at 127, so what is emitted is what
+			// the name promises.
 			if err != nil {
 				t.Errorf("%s under a 3-segment budget: %v", spec, err)
 			}
@@ -1051,7 +1093,9 @@ func TestStrictModeRefusesADowngrade(t *testing.T) {
 
 func TestChunkHonoursACustomBudget(t *testing.T) {
 	payload, meta := ttHello(t)
-	s, err := NewRegistry().Get("chunk:size=4")
+	// 5x32 = 160 clears the SNI's payload end at 127 under the 6-segment budget
+	// below, and 15x32 clears it under the default one.
+	s, err := NewRegistry().Get("chunk:size=32")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1095,8 +1139,8 @@ func TestRejectedOpsCannotEmitEvenOffTheRegistryPath(t *testing.T) {
 			t.Errorf("%s: Apply err = %v, want ErrOpRejected", o.Name(), err)
 		}
 	}
-	if n != 7 {
-		t.Errorf("%d rejected ops registered, want 7", n)
+	if n != 8 {
+		t.Errorf("%d rejected ops registered, want 8", n)
 	}
 }
 
@@ -1188,5 +1232,284 @@ func TestDeterminismSeparatesRuleFromConstant(t *testing.T) {
 	}
 	if s.Determinism() != strategy.DetEmpirical {
 		t.Error("a composite with chunk must not claim to be rule-based")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Wave-1 review regressions.
+// ---------------------------------------------------------------------------
+
+// ttSNIEndAbs is where the hostname ends in PAYLOAD coordinates: the record
+// header is 5 bytes, so §3.2's body offset 122 is payload offset 127. Every
+// assertion below about "past the SNI" is stated against this number, which is
+// the same 5 + sniEnd = 127 MEASUREMENTS.md §3.4's correction quotes.
+const ttSNIEndAbs = 5 + ttSNIEnd
+
+// TestChunkRefusesAPrefixThatStopsShortOfTheSNI pins MF4.
+//
+// chunkOp fills the segment budget with MaxSegments-1 boundaries and puts the
+// whole remainder in ONE write, so the chunked prefix covers only 15 x size
+// bytes. MEASUREMENTS.md §3.4's correction measures the shipped emitter on this
+// line:
+//
+//	chunk:size=   2      4      8      9     12     20
+//	shipped op  RESET  RESET  RESET   PASS   PASS  RESET
+//
+// and the boundary is exactly the predicate below: 8x15 = 120 does not clear
+// the hostname's payload end at 127 and does not bypass; 9x15 = 135 does clear
+// it and does. Before this fix chunk:size=4 chunked the first 60 bytes and sent
+// the SNI intact in a 1443-byte tail — a plain write wearing chunk's name,
+// which the tr ladder shipped as rung 4 and the prober cached as "blocked".
+func TestChunkRefusesAPrefixThatStopsShortOfTheSNI(t *testing.T) {
+	payload, meta := ttHello(t)
+	maxSegs := strategy.DefaultBudget().MaxSegments
+
+	for size := 1; size <= 20; size++ {
+		spec := fmt.Sprintf("chunk:size=%d", size)
+		p, err := buildSpec(t, spec, payload, meta)
+		prefix := (maxSegs - 1) * size
+
+		if prefix <= ttSNIEndAbs {
+			if !errors.Is(err, strategy.ErrBudget) {
+				t.Errorf("%s: prefix ends at %d, inside the SNI ending at %d; err = %v, want ErrBudget",
+					spec, prefix, ttSNIEndAbs, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: prefix ends at %d, past the SNI ending at %d, so it must build: %v",
+				spec, prefix, ttSNIEndAbs, err)
+			continue
+		}
+		// What the predicate actually buys: the unchunked tail begins after the
+		// hostname, so the DPI never sees the SNI in one contiguous write.
+		tailStart := len(p.Payload) - len(p.Segments[len(p.Segments)-1].Data)
+		if tailStart <= ttSNIEndAbs {
+			t.Errorf("%s: the single tail write starts at %d, at or before the SNI end %d",
+				spec, tailStart, ttSNIEndAbs)
+		}
+	}
+
+	// The measured boundary itself, stated once so a later change to the budget
+	// or the fixture cannot move it silently.
+	if _, err := buildSpec(t, "chunk:size=8", payload, meta); !errors.Is(err, strategy.ErrBudget) {
+		t.Errorf("size=8 covers 120 bytes and measured RESET: err = %v, want ErrBudget", err)
+	}
+	if _, err := buildSpec(t, "chunk:size=9", payload, meta); err != nil {
+		t.Errorf("size=9 covers 135 bytes and measured PASS: %v", err)
+	}
+
+	// ErrBudget, not a bespoke sentinel: flow's ladder already skips a rung
+	// whose spec cannot be built, and probe records it unmeasurable rather than
+	// caching a blocked measurement that is an artefact of this geometry.
+	_, err := buildSpec(t, "chunk:size=4", payload, meta)
+	if !errors.Is(err, strategy.ErrBudget) {
+		t.Fatalf("err = %v, want ErrBudget", err)
+	}
+	for _, want := range []string{"discord.gg", "127", "§3.4"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must name %q: %v", want, err)
+		}
+	}
+
+	// A message with no hostname has no rule to break: the geometry is judged by
+	// nothing and the head chunking still applies.
+	http, hm := httpFixture("discord.com")
+	long := append(append([]byte(nil), http...), bytes.Repeat([]byte("x"), 4000)...)
+	if _, err := buildSpec(t, "chunk:size=4", long, hm); err != nil {
+		t.Errorf("a plaintext request carries no SNI predicate: %v", err)
+	}
+}
+
+// TestChunkPrefixPredicateSurvivesStrictMode: the surviving geometry is the op's
+// SPECIFIED behaviour, not a downgrade, so the prober can still measure it.
+//
+// This is the half of MF4's proposed fix that is deliberately NOT implemented.
+// Routing the truncation through Builder.downgrade would make every chunk size
+// below ~94 an error under Strict — and probe/trial.go sets Strict on every
+// trial, so `dpb probe --strategy chunk:size=12` could no longer be run at all,
+// which is the measurement MEASUREMENTS.md §3.4's correction table was taken
+// with. With the predicate above in place there is nothing left to downgrade:
+// what is emitted is what the label promises, and the geometry is recorded in
+// the plan's notes for `dpb why`.
+func TestChunkPrefixPredicateSurvivesStrictMode(t *testing.T) {
+	payload, meta := ttHello(t)
+	s, err := NewRegistry().Get("chunk:size=12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &strategy.Builder{
+		Payload: append([]byte(nil), payload...),
+		Meta:    meta,
+		Caps:    allCaps,
+		Budget:  strategy.DefaultBudget(),
+		Strict:  true,
+	}
+	p, err := s.BuildWith(b)
+	if err != nil {
+		t.Fatalf("the prober must be able to measure the shipped rung: %v", err)
+	}
+	if len(p.Notes) == 0 {
+		t.Error("the truncated geometry must be recorded in the plan the prober scores")
+	}
+}
+
+// TestAnchorsResolveInPayloadCoordinates pins SF1.
+//
+// tlsmsg.Meta states the SNI extent in RECORD-BODY coordinates; Builder.SplitAt
+// indexes the PAYLOAD. The two differ by BodyOff = 5 for TLS. split, oob and
+// disorder handed the body-relative answer straight to SplitAt, so every cut
+// landed 5 bytes early: pos=snistart cut before the hostname, pos=sniend cut
+// inside it, and on this fixture pos=snimid cut at 117 — exactly sniStart in
+// payload coordinates — leaving the hostname wholly contiguous in segment 2,
+// the opposite of what the token names.
+func TestAnchorsResolveInPayloadCoordinates(t *testing.T) {
+	payload, meta := ttHello(t)
+
+	// Where the hostname really is, in the coordinates the schedule uses.
+	if got := string(payload[ttSNIEndAbs-len(ttHost) : ttSNIEndAbs]); got != ttHost {
+		t.Fatalf("fixture: payload[%d:%d) = %q, want %q", ttSNIEndAbs-len(ttHost), ttSNIEndAbs, got, ttHost)
+	}
+
+	cases := []struct {
+		anchor string
+		want   int
+	}{
+		{"snistart", 5 + ttSNIStart},               // 117: the first byte of the hostname
+		{"snimid", 5 + ttSNIStart + len(ttHost)/2}, // 122: strictly inside it
+		{"sniend", ttSNIEndAbs},                    // 127: just past it
+		{"bodymid", 5 + ttBodyLen/2},               // the middle of the record body
+	}
+	for _, c := range cases {
+		for _, op := range []string{"split", "oob", "disorder"} {
+			spec := op + ":pos=" + c.anchor
+			p := mustBuild(t, spec, payload, meta)
+			if got := len(p.Segments[0].Data); got != c.want {
+				t.Errorf("%s: first segment is %d bytes, want the cut at payload offset %d",
+					spec, got, c.want)
+			}
+		}
+	}
+
+	// The point of the anchor, stated as behaviour rather than as arithmetic:
+	// snimid really does straddle the hostname, snistart really does start it,
+	// sniend really does complete it.
+	mid := mustBuild(t, "split:pos=snimid", payload, meta)
+	if bytes.Contains(mid.Segments[0].Data, []byte(ttHost)) || bytes.Contains(mid.Segments[1].Data, []byte(ttHost)) {
+		t.Error("split:pos=snimid must leave the hostname in neither segment whole")
+	}
+	start := mustBuild(t, "split:pos=snistart", payload, meta)
+	if !bytes.HasPrefix(start.Segments[1].Data, []byte(ttHost)) {
+		t.Error("split:pos=snistart must cut exactly at the first byte of the hostname")
+	}
+	end := mustBuild(t, "split:pos=sniend", payload, meta)
+	if !bytes.HasSuffix(end.Segments[0].Data, []byte(ttHost)) {
+		t.Error("split:pos=sniend must cut exactly at the last byte of the hostname")
+	}
+
+	// The reframers keep the OTHER coordinate system, which is the one
+	// MEASUREMENTS.md §3.2's rule and ReframeFirstRecord's cuts are stated in.
+	// Converting them too would have been the mirror-image bug.
+	frag := mustBuild(t, "tlsfrag:pos=snimid", payload, meta)
+	h, ok := tlsmsg.ParseHeader(frag.Segments[0].Data)
+	if !ok || h.Length != ttSNIStart+len(ttHost)/2 {
+		t.Errorf("tlsfrag:pos=snimid first record body = %d, want the body-relative %d",
+			h.Length, ttSNIStart+len(ttHost)/2)
+	}
+}
+
+// TestSideEffectOpsRefuseASingleSegment pins SF4.
+//
+// Builder.SplitAt legally produces ONE segment when it has no usable offset —
+// outside Strict mode that is a note, not an error. oob and disorder then acted
+// as if the split had happened: oob:pos=0 emitted [stream 1502, oob 1], writing
+// the complete unmodified hello first so the junk byte lands after the DPI has
+// already parsed it; disorder:pos=0 emitted [stream 1502, ttl=1], putting the
+// ENTIRE hello on the wire with a hop limit that cannot reach the origin. Both
+// were scored and cached under the names "oob" and "disorder".
+func TestSideEffectOpsRefuseASingleSegment(t *testing.T) {
+	payload, meta := ttHello(t)
+
+	for _, spec := range []string{"oob:pos=0", "disorder:pos=0", "oob:pos=99999", "disorder:pos=99999"} {
+		p, err := buildSpec(t, spec, payload, meta)
+		if !errors.Is(err, strategy.ErrDowngrade) {
+			t.Errorf("%s: err = %v (plan %s), want ErrDowngrade — a single segment is not a split",
+				spec, err, p.Summary())
+		}
+	}
+
+	// Not over-broad: a usable offset still produces the side effect.
+	if p := mustBuild(t, "oob:pos=1", payload, meta); p.WriteCount() != 3 {
+		t.Errorf("oob:pos=1: %d writes, want head + oob + tail", p.WriteCount())
+	}
+	if p := mustBuild(t, "disorder:pos=1", payload, meta); p.Segments[0].TTL == 0 {
+		t.Error("disorder:pos=1 must still lower the leading segment's hop limit")
+	}
+}
+
+// TestDeclaredCapsCoverEmittedCaps pins SF14 and its whole class.
+//
+// Strategy.CheckAgainst is gate 3: it compares the transport's capabilities
+// against the ops' DECLARED ones before a byte moves. emit.Sender then compares
+// them against the plan's DERIVED ones. If the second set is not a subset of
+// the first, the gate passes and the send fails on an already-open socket with
+// a capability error — which is exactly what quicfake did, declaring CapUDPTTL
+// while emitting SegFakeRaw segments that derive CapRawInject.
+func TestDeclaredCapsCoverEmittedCaps(t *testing.T) {
+	tls, tm := ttHello(t)
+	http, hm := httpFixture("discord.com")
+	quic, qm := quicFixture()
+	fixtures := []struct {
+		name    string
+		payload []byte
+		meta    tlsmsg.Meta
+	}{{"tls", tls, tm}, {"http", http, hm}, {"quic", quic, qm}}
+
+	for _, d := range NewRegistry().Docs() {
+		if d.Rejected != "" {
+			continue
+		}
+		specs := []string{d.Name}
+		for _, param := range d.Params {
+			for _, v := range sweepValues(param) {
+				specs = append(specs, d.Name+":"+param.Name+"="+v)
+			}
+		}
+		for _, spec := range specs {
+			s, err := NewRegistry().Get(spec)
+			if err != nil {
+				continue // this spec is not well-formed on its own
+			}
+			for _, f := range fixtures {
+				p, err := s.Build(f.payload, f.meta, allCaps, strategy.DefaultBudget())
+				if err != nil {
+					continue
+				}
+				if miss := s.Caps().Missing(p.Caps()); miss != 0 {
+					t.Errorf("%s on %s: the plan needs %s but the op declares only %s (missing %s), "+
+						"so gate 3 passes and emit fails on an open socket",
+						spec, f.name, p.Caps(), s.Caps(), miss)
+				}
+			}
+		}
+	}
+}
+
+// TestQuicFakeRefusesBeforeTheSocketIsOpen is SF14 stated at the transport the
+// op was written for: a connected UDP socket grants streamwrite, nodelay and
+// both TTL bits, and grants rawinject to nobody.
+func TestQuicFakeRefusesBeforeTheSocketIsOpen(t *testing.T) {
+	_, meta := quicFixture()
+	s, err := NewRegistry().Get("quicfake:count=2,ttl=4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	udp := strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapSockTTL | strategy.CapUDPTTL
+	err = s.CheckAgainst(udp, meta)
+	if !errors.Is(err, strategy.ErrCapUnavailable) {
+		t.Fatalf("err = %v, want ErrCapUnavailable at gate 3", err)
+	}
+	if !strings.Contains(err.Error(), "rawinject") {
+		t.Errorf("the shortfall must be named: %v", err)
 	}
 }

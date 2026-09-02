@@ -261,7 +261,9 @@ func TestSleepCtxHonoursCancellation(t *testing.T) {
 func TestProbeChainIsTheShippedChain(t *testing.T) {
 	t.Parallel()
 	g := &globals{env: Env{Stdout: io.Discard, Stderr: io.Discard}}
-	c, err := probeChain(g)
+	// nil ranker: composition is the claim here, and ranking is the only part
+	// that would need a live network.
+	c, err := probeChain(g, nil)
 	if err != nil {
 		t.Fatalf("probeChain: %v", err)
 	}

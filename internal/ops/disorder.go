@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"fmt"
+
 	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
 )
 
@@ -26,7 +28,8 @@ func disorderOp() strategy.Op {
 		Caps:        caps,
 		Determinism: strategy.DetEmpirical,
 		Params: []strategy.ParamDoc{
-			{Name: "pos", Probe: []string{"1", "3", "snimid"}, Doc: "absolute payload offset of the segment boundary"},
+			{Name: "pos", Probe: []string{"1", "3", "snimid"}, Doc: "payload-absolute offset of the segment boundary; " +
+				"an SNI or body anchor is resolved in record-body coordinates and converted"},
 			{Name: "ttl", Default: "1", Probe: []string{"1", "2", "3"}, Doc: "IP TTL of the leading segment"},
 		},
 		Summary: "send the head with a low IP TTL so only the middlebox sees it",
@@ -42,12 +45,25 @@ func disorderOp() strategy.Op {
 			return nil, err
 		}
 		return strategy.StepFunc("disorder", caps, func(b *strategy.Builder) error {
-			off, err := resolvePos(b, "disorder", p)
+			off, err := resolvePayloadPos(b, "disorder", p)
 			if err != nil {
 				return err
 			}
 			if err := b.SplitAt(off); err != nil {
 				return err
+			}
+			// SplitAt is documented to produce ONE segment when it has no usable
+			// offset, which outside Strict mode is a note rather than an error.
+			// Lowering segment 0's TTL then puts the ENTIRE first message on the
+			// wire with a hop limit of 1: it dies before the origin and the
+			// connection is guaranteed dead, scored and cached under the name
+			// "disorder". Refused for the same reason SetSegTTL refuses a
+			// missing capability (builder.go).
+			if len(b.Segs) < 2 {
+				return fmt.Errorf("%w: disorder pos %s resolved to payload offset %d, which produced no "+
+					"write boundary in a %d-byte message, so the whole first message would go out at ttl "+
+					"%d and never reach the origin",
+					strategy.ErrDowngrade, p, off, len(b.Payload), ttl)
 			}
 			// SetSegTTL refuses outright when the transport cannot set a TTL.
 			// Emitting the head at the default TTL is not a weaker disorder, it

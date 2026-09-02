@@ -369,12 +369,23 @@ func (f *fakeSystem) route(args []string) (string, int) {
 	}
 	// A delete names the same scope it was added in, so an -ifscope delete must
 	// not take out the unscoped route that shares the destination.
+	//
+	// It must NOT be narrowed by the interface an `-interface` add named. The
+	// kernel resolves RTM_DELETE by destination + netmask + explicit -ifscope
+	// only: rtrequest_common_locked/rt_lookup never compare the link gateway
+	// that -interface supplies. A fake that filtered by it would hide the
+	// deletion of a coexisting VPN's half-default, which is the whole failure
+	// this table exists to expose.
 	victim := -1
 	for i, r := range f.routes {
-		if r.Dst == dst && r.Scoped == scoped && (iface == "" || r.Iface == iface) {
-			victim = i
-			break
+		if r.Dst != dst || r.Scoped != scoped {
+			continue
 		}
+		if scoped && iface != "" && r.Iface != iface {
+			continue
+		}
+		victim = i
+		break
 	}
 	switch verb {
 	case "add":

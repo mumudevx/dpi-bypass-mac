@@ -60,16 +60,26 @@ type scriptConn struct {
 	closed    bool
 	rdeadline time.Time
 	caps      strategy.Cap
+	remote    netip.AddrPort
 
 	done chan struct{}
 }
 
 func newScriptConn(steps ...step) *scriptConn {
 	return &scriptConn{
-		steps: steps,
-		caps:  strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapSockTTL | strategy.CapOOB,
-		done:  make(chan struct{}),
+		steps:  steps,
+		caps:   strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapSockTTL | strategy.CapOOB,
+		remote: testAddr,
+		done:   make(chan struct{}),
 	}
+}
+
+// from is newScriptConn with the peer address the upstream connection claims,
+// so a test can put a script behind the BTK sinkhole address.
+func newScriptConnFrom(peer netip.AddrPort, steps ...step) *scriptConn {
+	c := newScriptConn(steps...)
+	c.remote = peer
+	return c
 }
 
 func (c *scriptConn) Read(b []byte) (int, error) {
@@ -105,7 +115,10 @@ func (c *scriptConn) Read(b []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	if len(s.data) > 0 {
-		return copy(b, s.data), nil
+		// data AND err together is the shape a middlebox that injects a forged
+		// response and then a reset produces, and Read is allowed to return
+		// both. A step with only data returns a nil error as before.
+		return copy(b, s.data), s.err
 	}
 	if s.err != nil {
 		return 0, s.err
@@ -139,7 +152,7 @@ func (c *scriptConn) Close() error {
 func (c *scriptConn) LocalAddr() net.Addr {
 	return net.TCPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1"))
 }
-func (c *scriptConn) RemoteAddr() net.Addr { return net.TCPAddrFromAddrPort(testAddr) }
+func (c *scriptConn) RemoteAddr() net.Addr { return net.TCPAddrFromAddrPort(c.remote) }
 
 func (c *scriptConn) SetDeadline(t time.Time) error { return c.SetReadDeadline(t) }
 func (c *scriptConn) SetReadDeadline(t time.Time) error {
@@ -172,7 +185,7 @@ func (c *scriptConn) ResetTTL() error {
 func (c *scriptConn) InjectRaw([]byte) error          { return emit.ErrCapUnavailable }
 func (c *scriptConn) SeqState() (emit.SeqState, bool) { return emit.SeqState{}, false }
 func (c *scriptConn) Local() netip.AddrPort           { return netip.MustParseAddrPort("127.0.0.1:1") }
-func (c *scriptConn) Remote() netip.AddrPort          { return testAddr }
+func (c *scriptConn) Remote() netip.AddrPort          { return c.remote }
 
 func (c *scriptConn) stream() []byte {
 	c.mu.Lock()

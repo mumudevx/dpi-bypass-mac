@@ -3,6 +3,7 @@ package resolve
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
 	"sync"
@@ -602,5 +603,320 @@ func TestChainDefaultsAreUsable(t *testing.T) {
 	}
 	if got := c.Health(); len(got) != 0 {
 		t.Fatalf("Health = %v", got)
+	}
+}
+
+// flakyResolver fails its first exchange and answers every one after it. It is
+// how a transient failure on an encrypted rung is expressed: the rung is not
+// dead, it just lost this attempt.
+type flakyResolver struct {
+	label     string
+	transport string
+	t         *testing.T
+	mu        sync.Mutex
+	n         int
+}
+
+func (f *flakyResolver) Label() string     { return f.label }
+func (f *flakyResolver) Transport() string { return f.transport }
+
+func (f *flakyResolver) Calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
+}
+
+func (f *flakyResolver) Exchange(_ context.Context, q []byte) ([]byte, error) {
+	f.mu.Lock()
+	f.n++
+	n := f.n
+	f.mu.Unlock()
+	if n == 1 {
+		return nil, errors.New("transient failure")
+	}
+	return answerFor(f.t, q, genuineAnswer[0]), nil
+}
+
+// TestRungBudgetFitsTheShippedDefaults pins the arithmetic that makes the whole
+// chain reachable.
+//
+// The shipped chain is len(DefaultEndpoints()) rungs at defaultPerTry, and the
+// only caller budget in the tree is probe.DefaultTrialTimeout at 8 s. A flat
+// per-rung deadline spends 4 s on rung 1, 4 s on rung 2 and then runs out —
+// which is how the two alternate-port rungs that MEASUREMENTS.md §2 measures as
+// the ONLY plaintext transport working on this line became unreachable.
+func TestRungBudgetFitsTheShippedDefaults(t *testing.T) {
+	const callerBudget = 8 * time.Second
+	rungs := len(DefaultEndpoints())
+
+	// The shipped chain walked under the shipped caller budget: every rung has
+	// to fit, and the sum has to stay inside the budget.
+	total := time.Duration(0)
+	remaining := callerBudget
+	for left := rungs; left > 0; left-- {
+		b := rungBudget(defaultPerTry, remaining, left)
+		if b <= 0 {
+			t.Fatalf("rung %d of %d got no budget out of %s", rungs-left+1, rungs, callerBudget)
+		}
+		total += b
+		remaining -= b
+	}
+	if total > callerBudget {
+		t.Fatalf("the walk costs %s against a %s caller budget", total, callerBudget)
+	}
+	if got := rungBudget(defaultPerTry, callerBudget, rungs); got != callerBudget/time.Duration(rungs) {
+		t.Fatalf("rungBudget = %s, want an even share of %s across %d rungs", got, callerBudget, rungs)
+	}
+
+	// A generous budget must not stretch a rung past PerTry.
+	if got := rungBudget(defaultPerTry, time.Hour, 1); got != defaultPerTry {
+		t.Fatalf("rungBudget = %s, want PerTry %s", got, defaultPerTry)
+	}
+	// A spent budget buys nothing, and a bad rung count must not divide by zero.
+	if got := rungBudget(defaultPerTry, -time.Second, 3); got != 0 {
+		t.Fatalf("rungBudget on a spent budget = %s, want 0", got)
+	}
+	if got := rungBudget(defaultPerTry, time.Second, 0); got != time.Second {
+		t.Fatalf("rungBudget with no rungs left = %s, want the whole remainder", got)
+	}
+}
+
+// TestChainReachesTheLastRungInsideTheCallerDeadline is the same defect on the
+// wire, and it deliberately does NOT use fastChain: the point is that the
+// SHIPPED PerTry, over a chain as long as the SHIPPED one, still lands inside
+// the caller's deadline. Nothing here overrides Options.PerTry, so defaultPerTry
+// is what is under test.
+//
+// The budget is scaled down from probe.DefaultTrialTimeout only so the test is
+// fast; the ratio is what matters and it is worse here than in production
+// (1.5 s against a 4 s PerTry, versus 8 s against the same 4 s), so a chain that
+// passes this cannot fail the shipped arithmetic.
+func TestChainReachesTheLastRungInsideTheCallerDeadline(t *testing.T) {
+	n := len(DefaultEndpoints())
+	rungs := make([]Resolver, 0, n)
+	drops := make([]*fakeResolver, 0, n-1)
+	for i := range n - 1 {
+		d := dropping(t, fmt.Sprintf("drop-%d", i))
+		drops = append(drops, d)
+		rungs = append(rungs, d)
+	}
+	last := answering(t, "udp-alt-last", "udp-alt", genuineAnswer[0])
+	rungs = append(rungs, last)
+
+	c := NewChain(Options{Resolvers: rungs, Logf: func(string, ...any) {}})
+	if c.perTry != defaultPerTry {
+		t.Fatalf("this test must run at the shipped PerTry, got %s", c.perTry)
+	}
+
+	const budget = 1500 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	start := time.Now()
+	ans, err := c.Exchange(ctx, mustQuery(t, "discord.com", dns.TypeA))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Exchange: %v (after %s)", err, elapsed)
+	}
+	if got := addrStrings(AnswerAddrs(ans)); got != genuineAnswer[0].String() {
+		t.Fatalf("answer = %s, want the last rung's %s", got, genuineAnswer[0])
+	}
+	if last.Calls() != 1 {
+		t.Fatalf("the alternate-port rung was reached %d times, want 1", last.Calls())
+	}
+	for i, d := range drops {
+		if d.Calls() != 1 {
+			t.Fatalf("rung %d was tried %d times, want 1", i, d.Calls())
+		}
+	}
+	if elapsed > budget {
+		t.Fatalf("the walk took %s, past the caller's %s deadline", elapsed, budget)
+	}
+}
+
+// TestChainRestartsAtAnEncryptedRungOnTruncation pins the truncation design
+// that DefaultEndpoints' own ordering made unreachable: all three encrypted
+// rungs sit BEFORE both plaintext rungs, so "continue forward to an encrypted
+// resolver" can never find one. MEASUREMENTS.md §2 rules out the RFC's TCP
+// retry, so restarting the walk is the only move left.
+func TestChainRestartsAtAnEncryptedRungOnTruncation(t *testing.T) {
+	doh := &flakyResolver{label: "doh", transport: "doh", t: t}
+	trunc := truncating(t, "udp-alt", "udp-alt")
+	c := fastChain(t, Options{Resolvers: []Resolver{doh, trunc}})
+
+	ans, err := c.Exchange(context.Background(), mustQuery(t, "discord.com", dns.TypeA))
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if Truncated(ans) {
+		t.Fatal("the walk must restart at the encrypted rung rather than hand back TC=1")
+	}
+	if doh.Calls() != 2 {
+		t.Fatalf("the encrypted rung was tried %d times, want 2 (the walk restarts at it)", doh.Calls())
+	}
+	if trunc.Calls() != 1 {
+		t.Fatalf("the plaintext rung was tried %d times, want 1", trunc.Calls())
+	}
+	if got := addrStrings(AnswerAddrs(ans)); got != genuineAnswer[0].String() {
+		t.Fatalf("answer = %s, want %s", got, genuineAnswer[0])
+	}
+}
+
+// TestChainTruncationRetryStaysInsideTheCallerDeadline: the restart is an extra
+// pass, so it must be paid for out of what is left of the caller's budget and
+// never out of a fresh one.
+func TestChainTruncationRetryStaysInsideTheCallerDeadline(t *testing.T) {
+	doh := dropping(t, "doh")
+	doh.transport = "doh"
+	trunc := truncating(t, "udp-alt", "udp-alt")
+	c := NewChain(Options{Resolvers: []Resolver{doh, trunc}, Logf: func(string, ...any) {}})
+
+	const budget = 600 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	start := time.Now()
+	ans, err := c.Exchange(ctx, mustQuery(t, "discord.com", dns.TypeA))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if !Truncated(ans) {
+		t.Fatal("with no encrypted rung left, the truncated answer is what the caller gets")
+	}
+	if elapsed > budget+250*time.Millisecond {
+		t.Fatalf("the walk plus its truncation retry took %s, past the caller's %s deadline", elapsed, budget)
+	}
+}
+
+// TestCachedAnswerCarriesTheCallersQuestionBytes pins RFC 1035 §4.1.2 for the
+// cache path. cacheKey and FirstQuestion both lower-case, so a stub using 0x20
+// case randomisation would get back a question it did not ask and drop the
+// reply as a spoof — a silent resolution failure with no error anywhere.
+func TestCachedAnswerCarriesTheCallersQuestionBytes(t *testing.T) {
+	up := answering(t, "up", "doh", genuineAnswer[0])
+	c := fastChain(t, Options{Resolvers: []Resolver{up}, CacheTTL: time.Minute})
+
+	if _, err := c.Exchange(context.Background(), mustQuery(t, "discord.com", dns.TypeA)); err != nil {
+		t.Fatalf("priming Exchange: %v", err)
+	}
+
+	mixed := mustQuery(t, "discord.com", dns.TypeA)
+	copy(mixed[headerLen+1:], []byte("DiScOrD"))
+	if err := SetMsgID(mixed, 0x4242); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Exchange(context.Background(), mixed)
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if up.Calls() != 1 {
+		t.Fatalf("the second query must be served from cache, upstream calls = %d", up.Calls())
+	}
+	qe, err := questionEnd(mixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(resp[headerLen:qe]) != string(mixed[headerLen:qe]) {
+		t.Fatalf("question = %q, want the caller's own %q", resp[headerLen:qe], mixed[headerLen:qe])
+	}
+	if id, _ := MsgID(resp); id != 0x4242 {
+		t.Fatalf("id = %#x, want the caller's 0x4242", id)
+	}
+	if got := addrStrings(AnswerAddrs(resp)); got != genuineAnswer[0].String() {
+		t.Fatalf("the answer section must survive the splice: %s", got)
+	}
+}
+
+// TestChainInvalidatesWhatItServedBeforeThePoisonWasProved covers the second
+// half of the poison defect: the uniqueness heuristic needs uniformQuorum
+// distinct names, so the first uniformQuorum-1 block pages are served as clean
+// and cached. Without an invalidation path they keep being served until the TTL
+// expires, long after the chain knows better.
+func TestChainInvalidatesWhatItServedBeforeThePoisonWasProved(t *testing.T) {
+	block := netip.MustParseAddr("10.9.9.1")
+	rung := &fakeResolver{label: "up", transport: "udp-alt", t: t,
+		reply: func(t *testing.T, q []byte) []byte { return answerFor(t, q, block) }}
+	c := fastChain(t, Options{Resolvers: []Resolver{rung}, CacheTTL: time.Minute})
+
+	for _, n := range DefaultPoisonProbes {
+		_, _ = c.Exchange(context.Background(), mustQuery(t, n, dns.TypeA))
+	}
+	ans, err := c.Exchange(context.Background(), mustQuery(t, DefaultPoisonProbes[0], dns.TypeA))
+	if err == nil {
+		t.Fatalf("the block page must not keep being served from cache: %v", AnswerAddrs(ans))
+	}
+	if rc := Rcode(ans); rc != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d, want SERVFAIL", rc)
+	}
+}
+
+// TestChainCatchesTheAnswerThatCompletesTheQuorum: Learn used to run before
+// Check for the same name, so the answer that pushed the heuristic over its
+// threshold was itself scored clean and served.
+func TestChainCatchesTheAnswerThatCompletesTheQuorum(t *testing.T) {
+	block := []netip.Addr{netip.MustParseAddr("10.9.9.1"), netip.MustParseAddr("10.9.9.2")}
+	rung := &fakeResolver{label: "up", transport: "udp-alt", t: t,
+		reply: func(t *testing.T, q []byte) []byte { return answerFor(t, q, block...) }}
+	c := fastChain(t, Options{Resolvers: []Resolver{rung}, CacheTTL: time.Minute})
+
+	last := DefaultPoisonProbes[len(DefaultPoisonProbes)-1]
+	for _, n := range DefaultPoisonProbes[:len(DefaultPoisonProbes)-1] {
+		_, _ = c.Exchange(context.Background(), mustQuery(t, n, dns.TypeA))
+	}
+	ans, err := c.Exchange(context.Background(), mustQuery(t, last, dns.TypeA))
+	if err == nil {
+		t.Fatalf("%s completed the quorum and must not be served: %v", last, AnswerAddrs(ans))
+	}
+}
+
+// TestNotePoisonBlamesOnlyTheAddressThatMatched: an IPv4 sinkhole verdict on a
+// message that also carries a legitimate IPv6 record must not latch v6Poisoned,
+// which has no expiry and would amputate AAAA for the life of the Chain.
+func TestNotePoisonBlamesOnlyTheAddressThatMatched(t *testing.T) {
+	c := fastChain(t, Options{Resolvers: []Resolver{answering(t, "x", "udp-alt", genuineAnswer[0])}})
+	c.notePoison("discord.com", Signal{
+		Poisoned: true, Sinkhole: true, Addr: ttSinkhole,
+		Detail: "sinkhole",
+	})
+	if seen, why := c.aaaa.v6PoisonSeen(); seen {
+		t.Fatalf("an IPv4 sinkhole must not condemn IPv6: %s", why)
+	}
+
+	v6 := netip.MustParseAddr("2a01:358:4014:a00::3")
+	c.notePoison("discord.com", Signal{Poisoned: true, Sinkhole: true, Addr: v6, Detail: "sinkhole"})
+	seen, why := c.aaaa.v6PoisonSeen()
+	if !seen {
+		t.Fatal("an IPv6 sinkhole is the positive evidence AAAAAuto waits for")
+	}
+	if !strings.Contains(why, v6.String()) {
+		t.Fatalf("the reason must name the address that matched, got %q", why)
+	}
+}
+
+// TestChainCachesNoDataBriefly pins cachePut's promise for the NOERROR /
+// zero-answer reply a filtering resolver returns (and the one SynthEmpty
+// produces): it is a negative answer and gets negTTL, never the positive
+// cacheTTL, so a censored transport gets another chance soon.
+func TestChainCachesNoDataBriefly(t *testing.T) {
+	now := time.Now()
+	nodata := &fakeResolver{label: "up", transport: "udp-alt", t: t,
+		reply: func(t *testing.T, q []byte) []byte { return SynthEmpty(q) }}
+	c := fastChain(t, Options{
+		Resolvers: []Resolver{nodata},
+		CacheTTL:  time.Hour,
+		NegTTL:    5 * time.Second,
+		Now:       func() time.Time { return now },
+	})
+	q := mustQuery(t, "discord.com", dns.TypeA)
+	if _, err := c.Exchange(context.Background(), q); err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	key := cacheKey{name: "discord.com", qtype: dns.TypeA, class: dns.ClassINET}
+	e, ok := c.cache[key]
+	if !ok {
+		t.Fatal("a NOERROR/no-answer reply is still cached, briefly")
+	}
+	if got := e.exp.Sub(now); got != 5*time.Second {
+		t.Fatalf("NODATA cached for %s, want the %s negative TTL and never the %s positive one",
+			got, 5*time.Second, time.Hour)
 	}
 }

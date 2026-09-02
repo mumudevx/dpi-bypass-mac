@@ -15,7 +15,8 @@ import (
 	"github.com/miekg/dns"
 )
 
-// encryptedStreamFiles are the only files allowed to name a stream network.
+// encryptedStreamFiles may name a stream network, but only inside a function
+// that also reaches for crypto/tls.
 //
 // MEASUREMENTS.md §2 measures plaintext DNS over TCP as connection-reset at
 // every port tested — `dig +tcp @8.8.8.8 discord.com` and `dig +tcp -p 1253
@@ -23,9 +24,45 @@ import (
 // for exactly the names this tool exists to reach. DoT/853 and DoH/443 are
 // different transports, measured working (DOSSIER GT4), and they are the only
 // reason a stream is opened here at all.
+//
+// Exempting these two files wholesale was a real hole, not a theoretical one:
+// the wave 1 review appended a working plaintext DNS-over-TCP/53 client to
+// dot.go and every package in the tree stayed green. The exemption is now
+// scoped to the function rather than the file, so a plaintext stream client
+// added beside the encrypted one is caught by construction.
 var encryptedStreamFiles = map[string]bool{
 	"doh.go": true,
 	"dot.go": true,
+}
+
+// tlsGuarded reports whether the function enclosing pos reaches for crypto/tls.
+// A stream dial that never mentions tls is a plaintext stream dial, whatever
+// file it lives in. Declarations outside any function (streamNetwork's own
+// const) carry no dial and are accepted.
+func tlsGuarded(f *ast.File, pos token.Pos) bool {
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if ok && fd.Pos() <= pos && pos <= fd.End() {
+			fn = fd
+			break
+		}
+	}
+	if fn == nil {
+		return true
+	}
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "tls" {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // TestNoPlaintextTCPPathExists walks this package's own source and asserts that
@@ -44,13 +81,11 @@ func TestNoPlaintextTCPPathExists(t *testing.T) {
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		if encryptedStreamFiles[name] {
-			continue
-		}
 		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
+		encrypted := encryptedStreamFiles[name]
 		ast.Inspect(f, func(n ast.Node) bool {
 			lit, ok := n.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
@@ -62,9 +97,16 @@ func TestNoPlaintextTCPPathExists(t *testing.T) {
 			}
 			switch s {
 			case "tcp", "tcp4", "tcp6":
+				if encrypted && tlsGuarded(f, lit.Pos()) {
+					return true
+				}
 				p := fset.Position(lit.Pos())
+				why := ": names the stream network "
+				if encrypted {
+					why = ": names the stream network outside any TLS-carrying function, so it is a plaintext stream: "
+				}
 				findings = append(findings,
-					name+":"+strconv.Itoa(p.Line)+": names the stream network "+strconv.Quote(s))
+					name+":"+strconv.Itoa(p.Line)+why+strconv.Quote(s))
 			}
 			return true
 		})

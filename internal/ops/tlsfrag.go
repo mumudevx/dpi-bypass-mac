@@ -135,10 +135,11 @@ func tlsFragOp() strategy.Op {
 			return nil, err
 		}
 		return strategy.StepFunc("tlsfrag", capsStream, func(b *strategy.Builder) error {
-			cut, ok := p.Resolve(b.Meta)
-			if !ok {
-				return fmt.Errorf("%w: pos %s does not resolve against this message (proto %s, sni %v)",
-					strategy.ErrNeedSNI, p, b.Meta.Proto, b.Meta.HasSNI())
+			// Record-body coordinates: ReframeFirstRecord's cuts and the §3.2
+			// rule are both stated in them. See split.go for the two systems.
+			cut, err := resolveBodyPos(b, "tlsfrag", p)
+			if err != nil {
+				return err
 			}
 			if err := refuseAfterSNI(b, "tlsfrag", p.String(), cut); err != nil {
 				return err

@@ -125,6 +125,27 @@ Non-monotonic and not explained by any simple model, while every result in §3.2
 is explained by one rule. Chunking belongs in the probe ladder as a fallback, not
 as the shipped default.
 
+**Important caveat on these numbers.** The harness above chunks the *entire*
+ClientHello. An implementation that caps its segment count — as `internal/ops`
+does, at 16 segments, to stay clear of the XNU `if_sndbyte_unsent` panic — emits
+a different shape under the same label, and measures differently:
+
+```
+chunk:size=       2      4      8      9     12     20
+shipped op     RESET  RESET  RESET   PASS   PASS  RESET
+this harness    PASS   PASS   FAIL      -    PASS   FAIL
+```
+
+The shipped op's results are explained by a necessary condition: with 15
+boundaries available, the chunked prefix covers `15 x size` bytes, and it must
+extend past the SNI (`5 + sniEnd` = 127 here) for the bypass to occur.
+`9 x 15 = 135 > 127` passes; `8 x 15 = 120 < 127` does not. It is necessary but
+not sufficient — `size=20` covers 300 bytes and still fails.
+
+This is the same lesson as §3.5, sharper: **a chunk size is meaningless without
+the write geometry it was measured under.** Quote a size only together with the
+segment budget, and never carry a size from one implementation to another.
+
 ### 3.5 Corrections to the research dossier
 
 - The dossier's P0 recommendation — "chunked ClientHello splitting with a probed

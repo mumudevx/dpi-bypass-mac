@@ -90,10 +90,12 @@ func (o *dnsOp) prepare(ctx context.Context, e Env) error {
 		if err := res.Error(); err != nil {
 			return err
 		}
-		// notSelf: a captured 127.0.0.1 is the residue of a run that died before
-		// it could restore anything. Restoring it would leave the machine pointed
-		// at a resolver that is not listening.
-		o.prev[svc] = notSelfServers(parseDNSServers(res.Combined))
+		// notSelf: a captured resolver that is one of ours is the residue of a
+		// run that died before it could restore anything, and restoring it would
+		// leave the machine pointed at a resolver that is not listening. It is
+		// only OUR residue when a previous run is known to have died, though —
+		// otherwise 127.0.0.1 here is the user's own dnscrypt-proxy.
+		o.prev[svc] = notSelfServers(parseDNSServers(res.Combined), o.servers, e.PriorResidue)
 	}
 	o.prepared = true
 	return nil
@@ -178,6 +180,18 @@ func (o *dnsOp) VerifyReverted(ctx context.Context, e Env) error {
 	}
 	if got := primaryNameservers(resolvers); hasPrefixList(got, o.servers) {
 		return fmt.Errorf("scutil --dns still reports our nameservers %v", o.servers)
+	}
+	// scutil reports the primary service only, while Revert mutated every
+	// service in o.services. Read the rest back so the verifier covers every
+	// mutation instead of one of them.
+	for _, svc := range o.services {
+		res := env.Runner.Run(ctx, "networksetup", "-getdnsservers", svc)
+		if err := res.Error(); err != nil {
+			return err
+		}
+		if hasPrefixList(parseDNSServers(res.Combined), o.servers) {
+			return fmt.Errorf("networksetup still reports our nameservers %v on %s", o.servers, svc)
+		}
 	}
 	return nil
 }

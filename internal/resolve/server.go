@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -28,6 +29,10 @@ const (
 	// local process must not be able to turn one query per packet into one
 	// goroutine plus one upstream exchange per packet.
 	inFlightMax = 256
+	// dropLogEvery rate-limits the over-budget log line. Logging every drop
+	// during a flood would move the stall from the upstream exchange onto
+	// stderr, which is the same bug in a different place.
+	dropLogEvery = 1024
 )
 
 // Server answers DNS for local stubs, over UDP and over TCP.
@@ -38,9 +43,10 @@ const (
 // the machine. It does not: this server answers it in process from the same
 // chain, whose own upstream transports remain DoH, DoT and alternate-port UDP.
 type Server struct {
-	chain *Chain
-	logf  func(string, ...any)
-	sem   chan struct{}
+	chain   *Chain
+	logf    func(string, ...any)
+	sem     chan struct{}
+	dropped atomic.Uint64
 }
 
 func NewServer(c *Chain, logf func(string, ...any)) *Server {
@@ -89,7 +95,7 @@ func (s *Server) ServeUDP(ctx context.Context, pc net.PacketConn) error {
 		if n > 0 {
 			query := make([]byte, n)
 			copy(query, buf[:n])
-			s.dispatch(ctx, "resolve.server.udp", func() {
+			s.dispatch("resolve.server.udp", func() {
 				resp := s.Answer(ctx, query)
 				if len(resp) == 0 {
 					return
@@ -153,6 +159,17 @@ func (s *Server) serveTCPConn(ctx context.Context, conn net.Conn) {
 		if len(resp) == 0 {
 			return
 		}
+		if Truncated(resp) {
+			// TC is meaningless on a stream: RFC 7766 §8 has the server send
+			// the whole answer here, and a stub that asked over TCP *because*
+			// of a TC=1 UDP answer has nowhere left to escalate to. Serving it
+			// TC=1 again is a silent resolution failure; SERVFAIL is a failure
+			// it can see. The chain never reaches plaintext TCP/53 for a
+			// second opinion — MEASUREMENTS.md §2 measures that as
+			// connection-reset at every port.
+			s.logf("resolve: server: refusing to serve a truncated answer over TCP for %s", questionLabel(query))
+			resp = SynthRcode(query, dns.RcodeServerFailure)
+		}
 		if len(resp) > 0xffff {
 			resp = SynthRcode(query, dns.RcodeServerFailure)
 		}
@@ -171,21 +188,38 @@ func (s *Server) serveTCPConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// dispatch runs fn on a guarded goroutine, or inline when the in-flight budget
-// is spent. Running inline throttles a flood instead of dropping the query,
-// which a stub would read as a timeout and answer with a TCP retry.
-func (s *Server) dispatch(ctx context.Context, name string, fn func()) {
+// dispatch runs fn on a guarded goroutine, and drops the query when the
+// in-flight budget is spent.
+//
+// It must never run fn on the caller's goroutine. This is called from the
+// ServeUDP read loop, which owns the socket the whole machine's stub resolver
+// talks to, so running one Chain.Exchange inline stalls DNS for every other
+// process behind it: measured, 4000 queries from one socket against a 300 ms
+// upstream left an unrelated single query answered after 6.85 s. That branch
+// was also the only one outside flow.Safe, so a panic reachable from
+// Chain.Exchange killed the process under load alone — exactly what the panic
+// barrier exists to prevent.
+//
+// Dropping is the honest failure: a stub that gets nothing retries, and its
+// TCP retry is answered in process by ServeTCP from the same chain.
+func (s *Server) dispatch(name string, fn func()) bool {
 	select {
 	case s.sem <- struct{}{}:
 		flow.Safe(name, s.logf, func() {
 			defer func() { <-s.sem }()
 			fn()
 		})
+		return true
 	default:
-		fn()
+		if n := s.dropped.Add(1); (n-1)%dropLogEvery == 0 {
+			s.logf("resolve: server: %d queries dropped: more than %d exchanges already in flight", n, inFlightMax)
+		}
+		return false
 	}
-	_ = ctx
 }
+
+// Dropped counts queries refused because the in-flight budget was spent.
+func (s *Server) Dropped() uint64 { return s.dropped.Load() }
 
 // closeOnDone closes a listener when the context is cancelled, which is the
 // only way to interrupt a blocking Accept or ReadFrom.

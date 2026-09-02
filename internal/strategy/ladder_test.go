@@ -13,8 +13,10 @@ func TestTRLadderMatchesTheMeasuredOrder(t *testing.T) {
 		"",                   // plain: 0/6 bypass, 8/8 controls, 20/20 fragile
 		"tlsfrag:pos=snimid", // 6/6 bypass, 8/8 controls, 1/20 fragile, rule-based
 		"chunk:size=12",      // 6/6 bypass, 8/8 controls, 14/20 fragile
-		"chunk:size=4",       // 6/6 bypass, 6/8 controls, 13/20 fragile
 		"oob:pos=1",          // 6/6 bypass, 6/8 controls, 0/20 fragile
+		// chunk:size=4 was rung 4 until the emitter began refusing any size
+		// whose 15-boundary prefix stops short of the SNI. §3.4's correction
+		// note has the arithmetic: 15x4 = 60, and the SNI ends at 127.
 	}
 	got, err := Ladder("tr")
 	if err != nil {
@@ -177,7 +179,7 @@ func TestLadderReportsAnUnregisteredOp(t *testing.T) {
 
 func TestParseLadder(t *testing.T) {
 	byName, err := ParseLadder("tr")
-	if err != nil || len(byName) != 5 {
+	if err != nil || len(byName) != 4 {
 		t.Fatalf("ParseLadder(tr) = %d rungs, %v", len(byName), err)
 	}
 	if _, err := ParseLadder(" tr "); err != nil {
@@ -239,10 +241,86 @@ func TestProbeFullSweepsTheMeasuredPoints(t *testing.T) {
 			t.Errorf("probe-full is missing %q", want)
 		}
 	}
-	// The sweep must not include a cut the validator will always refuse.
-	for _, s := range specs {
-		if strings.Contains(s, "tlsfrag:pos=sniend\"") || strings.HasSuffix(s, "pos=sniend") {
-			t.Errorf("probe-full includes %q, which ErrCutAfterSNI always refuses", s)
+	// The sweep must not include a cut the validator will always refuse: a rung
+	// that can never emit is a wasted probe attempt whose only output is a
+	// LOCAL-ERROR line.
+	//
+	// This is a semantic check, not a pattern match. The clause it replaces
+	// searched for a literal double quote inside a spec string
+	// (`strings.Contains(s, "tlsfrag:pos=sniend\"")`), which no spec can ever
+	// contain, so only an exact `pos=sniend` suffix was caught: adding
+	// `tlsfrag:pos=sniend+200` left this test PASSing, and the only complaint
+	// anywhere was TestGoldenPlans printing it as a paste-ready expectation.
+	for _, s := range alwaysRefusedCuts(specs) {
+		t.Errorf("probe-full includes %q, which ErrCutAfterSNI always refuses", s)
+	}
+}
+
+// alwaysRefusedCuts returns the specs whose plan can never be built, because
+// the cut they name lands at or past sniEnd for EVERY hello.
+//
+// "Every hello" is why this walks a family of fixtures rather than one. A cut
+// anchored to the SNI (tlsfrag:pos=sniend+200) is refused whatever the geometry
+// and belongs on this list; a fixed period (tlsevery:period=128) is refused
+// only when the hostname happens to end before it, and builds fine for a hello
+// whose SNI sits deeper — a real case, since a Chrome hello with a randomised
+// extension order and an MLKEM key share can carry the name well past 128.
+// Flagging those would delete measured points from the sweep: MEASUREMENTS.md
+// §3 measured every-16, every-64 and every-256, and §3.5 requires the prober to
+// measure the emitter this tool ships rather than to assume.
+//
+// Errors other than ErrCutAfterSNI are deliberately ignored. The sweep is meant
+// to contain rungs that do not apply to a TLS hello (the Host-header ops) and
+// rungs that are expected to fail on the wire; this guard is only about a cut
+// the validator itself always rejects.
+func alwaysRefusedCuts(specs []string) []string {
+	// §3.2's own geometry, plus two hellos carrying the name progressively
+	// deeper into the body.
+	fixtures := [][2]int{{112, 122}, {300, 330}, {600, 640}}
+
+	var bad []string
+	for _, spec := range specs {
+		if spec == "" {
+			continue
 		}
+		st, err := Parse(spec)
+		if err != nil {
+			continue // TestEveryShippedLadderRungIsStable owns parse failures
+		}
+		refusedEverywhere := true
+		for _, f := range fixtures {
+			payload, m := tlsFixture(1497, f[0], f[1])
+			if _, err := st.Build(payload, m, allCaps, DefaultBudget()); !errors.Is(err, ErrCutAfterSNI) {
+				refusedEverywhere = false
+				break
+			}
+		}
+		if refusedEverywhere {
+			bad = append(bad, spec)
+		}
+	}
+	return bad
+}
+
+// TestAlwaysRefusedCutsActuallyFires is the guard's own regression test. The
+// clause it replaces was dead for the life of the tree and nothing noticed,
+// which is the failure mode a guard with no meta-test always has.
+func TestAlwaysRefusedCutsActuallyFires(t *testing.T) {
+	// Every one of these is anchored past sniEnd, so it is refused whatever the
+	// hello looks like. sniend+200 and sniend+1 are exactly the shapes the old
+	// pattern match missed: it searched a spec string for a literal quote.
+	bad := []string{"tlsfrag:pos=sniend", "tlsfrag:pos=sniend+200", "tlsfrag:pos=sniend+1"}
+	if got := alwaysRefusedCuts(bad); len(got) != len(bad) {
+		t.Fatalf("guard caught %v, want all of %v", got, bad)
+	}
+
+	// And it must not flag a rung that builds for some realistic hello, or the
+	// sweep would lose points MEASUREMENTS.md §3 was derived from. period=128
+	// and period=256 are refused on §3.2's own fixture and build fine on a
+	// hello whose SNI sits deeper, which is why the check spans fixtures.
+	ok := []string{"", "tlsfrag:pos=sniend-1", "tlsfrag:pos=snistart-20", "tlsfrag:pos=snimid|chunk:size=12",
+		"tlsevery:period=128", "tlsevery:period=256", "chunk:size=12", "hostpad"}
+	if got := alwaysRefusedCuts(ok); len(got) != 0 {
+		t.Fatalf("guard flagged buildable rungs: %v", got)
 	}
 }

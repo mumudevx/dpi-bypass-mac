@@ -30,11 +30,37 @@ var ErrNeedQUIC = errors.New("ops: op requires a QUIC Initial datagram")
 // tracking the connection ID associates them with the flow, and a fixed filler
 // payload so the plan is a pure function of its inputs — a probe result that
 // cannot be reproduced byte for byte is not a measurement.
+//
+// The declared capabilities are the ones this op's PLAN actually needs, not the
+// ones its mechanism is named after. The decoys are SegFakeRaw segments, and
+// strategy.Plan.Caps derives CapRawInject from that kind; declaring only
+// CapUDPTTL let Strategy.CheckAgainst pass and left emit.Sender to fail at
+// connect time with "missing rawinject" on a socket that was already open.
+// Gate 3 is where a capability shortfall must be named, so the declaration now
+// matches the emission and quicfake is refused before a byte moves.
+//
+// CapRawInject is granted by no transport in this build (UDPTransport.InjectRaw
+// is an unconditional error and nothing constructs a RawInjector), so quicfake
+// is unusable until either a raw injector exists or the segment contract is
+// respecified. The respecification is the better answer and is owed to
+// strategy, not to this file: byedpi's desync_udp sends its decoys as ORDINARY
+// WRITES on the connected socket with the hop limit lowered, which needs a
+// segment kind that is a datagram write and is exempt from Plan's
+// StreamBytes==Payload invariant. SegStream cannot express it — a decoy is not
+// part of the payload, so ErrStreamCorrupt fires on every such plan — and
+// weakening that invariant to make room for one unmeasured op is not a trade
+// this package may make on its own.
 func quicFakeOp() strategy.Op {
+	// What the plan will ask for, bit for bit: the decoy kind gives
+	// CapRawInject, the hop limit on each decoy segment gives CapSockTTL, more
+	// than one segment gives CapNoDelay, and CapUDPTTL keeps the op off a TCP
+	// transport, which is the only place its datagram shape means anything.
+	// UDPTransport grants everything here except CapRawInject.
+	const caps = capsStream | strategy.CapUDPTTL | strategy.CapSockTTL | strategy.CapRawInject
 	return newOp(strategy.OpDoc{
 		Name:        "quicfake",
 		Kind:        strategy.KindSide,
-		Caps:        strategy.CapUDPTTL,
+		Caps:        caps,
 		Determinism: strategy.DetEmpirical,
 		Params: []strategy.ParamDoc{
 			{Name: "count", Default: "2", Probe: []string{"1", "2", "4"}, Doc: "decoy Initials to emit first"},
@@ -52,7 +78,7 @@ func quicFakeOp() strategy.Op {
 		if err != nil {
 			return nil, err
 		}
-		return strategy.StepFunc("quicfake", strategy.CapUDPTTL, func(b *strategy.Builder) error {
+		return strategy.StepFunc("quicfake", caps, func(b *strategy.Builder) error {
 			q, ok := tlsmsg.ParseQUICInitial(b.Payload)
 			if !ok {
 				return fmt.Errorf("%w: the first message is %s, %d bytes", ErrNeedQUIC, b.Meta.Proto, len(b.Payload))

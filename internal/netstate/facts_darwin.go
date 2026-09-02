@@ -43,7 +43,16 @@ func CollectFacts(ctx context.Context, e Env) (*Facts, error) {
 	if e.RIB == nil {
 		return nil, fmt.Errorf("netstate: cannot collect facts without a RIB reader")
 	}
-	def, ok, err := e.RIB.Default()
+	// One read of the whole table, not two. The uplink and the VPN verdict have
+	// to describe the same instant: Facts exists so a mid-run reconfiguration
+	// cannot make two Ops disagree, and reading the RIB twice would reintroduce
+	// exactly that disagreement between the default route and the half-default
+	// pair classifyVPN now looks for.
+	rs, err := e.RIB.Routes()
+	if err != nil {
+		return nil, fmt.Errorf("netstate: read routing table: %w", err)
+	}
+	def, ok, err := pickDefault(rs, "")
 	if err != nil {
 		return nil, fmt.Errorf("netstate: read default route: %w", err)
 	}
@@ -80,7 +89,7 @@ func CollectFacts(ctx context.Context, e Env) (*Facts, error) {
 	if err != nil {
 		e.logf("netstate: %v", err)
 	}
-	f.VPN = classifyVPN(def, ok, ncs)
+	f.VPN = classifyVPN(rs, def, ok, ncs, e.SelfIface)
 	return f, nil
 }
 
@@ -108,14 +117,34 @@ func globalAddrs(in *net.Interface) (v4, v6 []netip.Addr, err error) {
 	return v4, v6, nil
 }
 
+// halfDefaultPairs are the prefix pairs that between them cover the whole
+// address space without touching 0.0.0.0/0 or ::/0.
+//
+// This is the idiom wg-quick, Tailscale, Mullvad and the WireGuard CLI use, and
+// they use it deliberately: installing the two halves leaves the real default
+// route in place, so the tunnel can be torn down without the machine losing its
+// gateway. A classifier that only inspects the unscoped default therefore never
+// sees the most common macOS full tunnel — and those tools do not appear in
+// `scutil --nc list` either, so the second signal is silent too.
+var halfDefaultPairs = [][2]netip.Prefix{
+	{netip.MustParsePrefix("0.0.0.0/1"), netip.MustParsePrefix("128.0.0.0/1")},
+	{netip.MustParsePrefix("::/1"), netip.MustParsePrefix("8000::/1")},
+}
+
 // classifyVPN decides whether a VPN is present and whether it is full-tunnel.
 //
-// Two independent signals: scutil --nc reports configured VPN services and
-// their connection state, and the RIB says which interface owns the unscoped
-// default route. Only the second can distinguish "a VPN is connected" from "a
-// VPN is carrying all my traffic", and only the second sees a VPN configured
-// outside the system's network-extension framework.
-func classifyVPN(def RouteEntry, haveDefault bool, ncs []NCService) VPNState {
+// Three signals: scutil --nc reports configured VPN services and their
+// connection state; the RIB says which interface owns the unscoped default
+// route; and the RIB also shows the half-default pair a WireGuard-style tunnel
+// installs instead of a default. Only the RIB can distinguish "a VPN is
+// connected" from "a VPN is carrying all my traffic", and only the RIB sees a
+// VPN configured outside the system's network-extension framework.
+//
+// selfIface names our own utun, if we have one. Our capture routes are the same
+// half-default pair (docs/PLAN.md's mutated-state table, row 8), so without
+// excluding it a network-change re-collect would classify dpb as a full-tunnel
+// VPN and refuse to run alongside itself.
+func classifyVPN(rs []RouteEntry, def RouteEntry, haveDefault bool, ncs []NCService, selfIface string) VPNState {
 	var st VPNState
 	for _, s := range ncs {
 		if s.Connected() {
@@ -128,8 +157,43 @@ func classifyVPN(def RouteEntry, haveDefault bool, ncs []NCService) VPNState {
 		st.Present = true
 		st.FullTunnel = true
 		st.Iface = def.Iface
+		return st
+	}
+	if iface, ok := halfTunnelIface(rs, selfIface); ok {
+		st.Present = true
+		st.FullTunnel = true
+		st.Iface = iface
 	}
 	return st
+}
+
+// halfTunnelIface reports the tunnel interface that owns both halves of a
+// half-default pair, if any. Both halves must be unscoped and on the same
+// interface: a scoped half is Private-Relay-shaped, and one half on its own
+// covers only part of the address space, which is a split tunnel we can work
+// alongside.
+func halfTunnelIface(rs []RouteEntry, selfIface string) (string, bool) {
+	for _, pair := range halfDefaultPairs {
+		lower := map[string]bool{}
+		for _, r := range rs {
+			if r.Dst != pair[0] || r.Scoped || r.Iface == selfIface || !isTunnelIface(r.Iface) {
+				continue
+			}
+			lower[r.Iface] = true
+		}
+		if len(lower) == 0 {
+			continue
+		}
+		for _, r := range rs {
+			if r.Dst != pair[1] || r.Scoped {
+				continue
+			}
+			if lower[r.Iface] {
+				return r.Iface, true
+			}
+		}
+	}
+	return "", false
 }
 
 // isTunnelIface recognises the interface-name families macOS gives to tunnels.

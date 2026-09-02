@@ -136,7 +136,7 @@ func (o *proxyOp) prepare(ctx context.Context, e Env) error {
 	}
 	o.prev = make(map[string]proxyPrev, len(o.services))
 	for _, svc := range o.services {
-		p, err := capturePrev(ctx, env.Runner, o.kind, svc)
+		p, err := o.capturePrev(ctx, env.Runner, svc, e.PriorResidue)
 		if err != nil {
 			return err
 		}
@@ -146,39 +146,42 @@ func (o *proxyOp) prepare(ctx context.Context, e Env) error {
 	return nil
 }
 
-func capturePrev(ctx context.Context, r Runner, kind OpKind, svc string) (proxyPrev, error) {
+// capturePrev is a method so the notSelf guards can compare what they read
+// against the exact URL / host:port this Op is about to install. Deciding
+// "ours" from loopback alone destroys the user's own local proxy.
+func (o *proxyOp) capturePrev(ctx context.Context, r Runner, svc string, priorResidue bool) (proxyPrev, error) {
 	var p proxyPrev
-	switch kind {
+	switch o.kind {
 	case OpProxyPAC:
 		kv, err := networksetupKV(ctx, r, "-getautoproxyurl", svc)
 		if err != nil {
 			return p, err
 		}
-		p.PACURL = notSelfPAC(nullToEmpty(kv["URL"]))
+		p.PACURL = notSelfPAC(nullToEmpty(kv["URL"]), o.url, priorResidue)
 		p.PACOn = yes(kv["Enabled"]) && p.PACURL != ""
 	case OpProxyHTTP:
 		kv, err := networksetupKV(ctx, r, "-getwebproxy", svc)
 		if err != nil {
 			return p, err
 		}
-		p.WebHost = notSelfHost(nullToEmpty(kv["Server"]))
 		p.WebPort = atoi(kv["Port"])
+		p.WebHost = notSelfHost(nullToEmpty(kv["Server"]), p.WebPort, o.host, o.port, priorResidue)
 		p.WebOn = yes(kv["Enabled"]) && p.WebHost != ""
 
 		kv, err = networksetupKV(ctx, r, "-getsecurewebproxy", svc)
 		if err != nil {
 			return p, err
 		}
-		p.SecureHost = notSelfHost(nullToEmpty(kv["Server"]))
 		p.SecurePort = atoi(kv["Port"])
+		p.SecureHost = notSelfHost(nullToEmpty(kv["Server"]), p.SecurePort, o.host, o.port, priorResidue)
 		p.SecureOn = yes(kv["Enabled"]) && p.SecureHost != ""
 	case OpProxySOCKS:
 		kv, err := networksetupKV(ctx, r, "-getsocksfirewallproxy", svc)
 		if err != nil {
 			return p, err
 		}
-		p.SOCKSHost = notSelfHost(nullToEmpty(kv["Server"]))
 		p.SOCKSPort = atoi(kv["Port"])
+		p.SOCKSHost = notSelfHost(nullToEmpty(kv["Server"]), p.SOCKSPort, o.host, o.port, priorResidue)
 		p.SOCKSOn = yes(kv["Enabled"]) && p.SOCKSHost != ""
 	}
 	return p, nil
@@ -271,8 +274,16 @@ func (o *proxyOp) Revert(ctx context.Context, e Env) error {
 	var firstErr error
 	for _, svc := range o.services {
 		p := o.prev[svc]
-		for _, args := range revertCmds(o.kind, svc, p) {
-			if err := r.Run(ctx, "networksetup", args...).Error(); err != nil && firstErr == nil {
+		for _, c := range revertCmds(o.kind, svc, p) {
+			err := r.Run(ctx, "networksetup", c.args...).Error()
+			if err == nil {
+				continue
+			}
+			if c.soft {
+				e.logf("netstate: %v (tidying only; the state command decides)", err)
+				continue
+			}
+			if firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -280,42 +291,71 @@ func (o *proxyOp) Revert(ctx context.Context, e Env) error {
 	return firstErr
 }
 
-func revertCmds(kind OpKind, svc string, p proxyPrev) [][]string {
+// revertCmd is one networksetup invocation. soft marks a command whose failure
+// must not fail the revert: clearing a stored proxy field is tidying, and what
+// the user actually needs is the setting switched off. A networksetup that
+// refuses an empty server must not leave the journal entry pending forever.
+type revertCmd struct {
+	args []string
+	soft bool
+}
+
+// revertCmds builds the absolute state to restore. It is idempotent by
+// construction: every command sets a value rather than toggling one.
+//
+// The empty-previous case does NOT just switch the setting off. macOS keeps a
+// disabled proxy's Server and Port — confirmed live on this machine:
+// `networksetup -getwebproxy Wi-Fi` reports "Enabled: No, Server: 127.0.0.1,
+// Port: 8080" from an earlier run — so switching off alone abandons the fields
+// pointing at our dead port, and the next time the user ticks the box in System
+// Settings they get a total HTTP/HTTPS outage. Clearing the fields first
+// restores what was there before us.
+func revertCmds(kind OpKind, svc string, p proxyPrev) []revertCmd {
 	switch kind {
 	case OpProxyPAC:
 		if p.PACURL == "" {
-			// Either there was nothing here, or what was here pointed at us. Both
-			// mean "off": pinning the user to a dead PAC URL is worse than no PAC.
-			return [][]string{{"-setautoproxystate", svc, "off"}}
+			// Either there was nothing here, or what was here was ours. Both mean
+			// "off": pinning the user to a dead PAC URL is worse than no PAC.
+			return []revertCmd{
+				{args: []string{"-setautoproxyurl", svc, ""}, soft: true},
+				{args: []string{"-setautoproxystate", svc, "off"}},
+			}
 		}
-		return [][]string{
-			{"-setautoproxyurl", svc, p.PACURL},
-			{"-setautoproxystate", svc, onOff(p.PACOn)},
+		return []revertCmd{
+			{args: []string{"-setautoproxyurl", svc, p.PACURL}},
+			{args: []string{"-setautoproxystate", svc, onOff(p.PACOn)}},
 		}
 	case OpProxyHTTP:
-		var cmds [][]string
+		var cmds []revertCmd
 		if p.WebHost == "" {
-			cmds = append(cmds, []string{"-setwebproxystate", svc, "off"})
+			cmds = append(cmds,
+				revertCmd{args: []string{"-setwebproxy", svc, "", "0"}, soft: true},
+				revertCmd{args: []string{"-setwebproxystate", svc, "off"}})
 		} else {
 			cmds = append(cmds,
-				[]string{"-setwebproxy", svc, p.WebHost, strconv.Itoa(p.WebPort)},
-				[]string{"-setwebproxystate", svc, onOff(p.WebOn)})
+				revertCmd{args: []string{"-setwebproxy", svc, p.WebHost, strconv.Itoa(p.WebPort)}},
+				revertCmd{args: []string{"-setwebproxystate", svc, onOff(p.WebOn)}})
 		}
 		if p.SecureHost == "" {
-			cmds = append(cmds, []string{"-setsecurewebproxystate", svc, "off"})
+			cmds = append(cmds,
+				revertCmd{args: []string{"-setsecurewebproxy", svc, "", "0"}, soft: true},
+				revertCmd{args: []string{"-setsecurewebproxystate", svc, "off"}})
 		} else {
 			cmds = append(cmds,
-				[]string{"-setsecurewebproxy", svc, p.SecureHost, strconv.Itoa(p.SecurePort)},
-				[]string{"-setsecurewebproxystate", svc, onOff(p.SecureOn)})
+				revertCmd{args: []string{"-setsecurewebproxy", svc, p.SecureHost, strconv.Itoa(p.SecurePort)}},
+				revertCmd{args: []string{"-setsecurewebproxystate", svc, onOff(p.SecureOn)}})
 		}
 		return cmds
 	default:
 		if p.SOCKSHost == "" {
-			return [][]string{{"-setsocksfirewallproxystate", svc, "off"}}
+			return []revertCmd{
+				{args: []string{"-setsocksfirewallproxy", svc, "", "0"}, soft: true},
+				{args: []string{"-setsocksfirewallproxystate", svc, "off"}},
+			}
 		}
-		return [][]string{
-			{"-setsocksfirewallproxy", svc, p.SOCKSHost, strconv.Itoa(p.SOCKSPort)},
-			{"-setsocksfirewallproxystate", svc, onOff(p.SOCKSOn)},
+		return []revertCmd{
+			{args: []string{"-setsocksfirewallproxy", svc, p.SOCKSHost, strconv.Itoa(p.SOCKSPort)}},
+			{args: []string{"-setsocksfirewallproxystate", svc, onOff(p.SOCKSOn)}},
 		}
 	}
 }
@@ -346,6 +386,51 @@ func (o *proxyOp) VerifyReverted(ctx context.Context, e Env) error {
 		if checkProxyPair(st, "SOCKS", o.host, o.port) == nil {
 			return fmt.Errorf("scutil --proxy still reports our SOCKS proxy %s:%d", o.host, o.port)
 		}
+	}
+	// scutil answers for the primary service only, but Revert mutated every
+	// service in o.services, so on its own it covers 1 of N mutations while
+	// UndoAll closes the journal entry on that basis. Read each service back to
+	// cover the rest. This is not a second subsystem — networksetup is what
+	// wrote — so the scutil assertion above stays as the independent one.
+	for _, svc := range o.services {
+		if err := o.verifyServiceReverted(ctx, env.Runner, svc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (o *proxyOp) verifyServiceReverted(ctx context.Context, r Runner, svc string) error {
+	switch o.kind {
+	case OpProxyPAC:
+		kv, err := networksetupKV(ctx, r, "-getautoproxyurl", svc)
+		if err != nil {
+			return err
+		}
+		if yes(kv["Enabled"]) && nullToEmpty(kv["URL"]) == o.url {
+			return fmt.Errorf("networksetup still reports our auto-proxy URL %s on %s", o.url, svc)
+		}
+	case OpProxyHTTP:
+		for _, verb := range []string{"-getwebproxy", "-getsecurewebproxy"} {
+			if err := o.checkServiceOff(ctx, r, verb, svc); err != nil {
+				return err
+			}
+		}
+	case OpProxySOCKS:
+		if err := o.checkServiceOff(ctx, r, "-getsocksfirewallproxy", svc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (o *proxyOp) checkServiceOff(ctx context.Context, r Runner, verb, svc string) error {
+	kv, err := networksetupKV(ctx, r, verb, svc)
+	if err != nil {
+		return err
+	}
+	if yes(kv["Enabled"]) && nullToEmpty(kv["Server"]) == o.host && atoi(kv["Port"]) == o.port {
+		return fmt.Errorf("networksetup %s %s still reports our proxy %s:%d", verb, svc, o.host, o.port)
 	}
 	return nil
 }

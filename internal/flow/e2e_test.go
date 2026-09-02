@@ -192,7 +192,8 @@ func TestEndToEndFragileOriginIsUntouched(t *testing.T) {
 	if out.Escalations() != 0 {
 		t.Fatalf("a fragile origin was desynced %d time(s)", out.Escalations())
 	}
-	if v := store.get(t, "www.yapikredi.com.tr"); !v.Expires.IsZero() || v.Source != policy.SrcLearnedPlain {
-		t.Fatalf("cached verdict = %s expires %v, want SrcLearnedPlain with no expiry", v.Source, v.Expires)
+	if v := store.get(t, "www.yapikredi.com.tr"); v.Expires.IsZero() || v.Source != policy.SrcLearnedPlain {
+		t.Fatalf("cached verdict = %s expires %v, want SrcLearnedPlain with a TTL: a plain verdict is "+
+			"relayed as ScopeDirect and so can only be re-tested by expiring", v.Source, v.Expires)
 	}
 }

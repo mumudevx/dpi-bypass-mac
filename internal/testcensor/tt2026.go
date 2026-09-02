@@ -80,6 +80,55 @@ func Naive(blocked ...string) Model {
 	}
 }
 
+// noReassemblyWindow is how much of a flow NoReassembly reads before it gives
+// up and forwards. One ClientHello and a little room: a middlebox that keeps
+// scanning a bulk transfer for hostnames does not exist, and without a window
+// the model would never reach a decision at all, only run out of segments.
+const noReassemblyWindow = 4096
+
+// NoReassembly is a middlebox that inspects each TCP segment on its own.
+//
+// It is a CONTRAST model and not a claim about Türk Telekom: §3.1 measured
+// every two-segment split at 0/5 there, including one cut inside the hostname,
+// which is exactly why TT2026 sets ReassembleTCP. This model is the other side
+// of that measurement — the class of middlebox that inspects packets rather
+// than streams, which is common enough that §3.1 had to be run to rule it out
+// here, and which another Turkish ISP may well be.
+//
+// It exists because of a gap in the suite rather than a gap in the modelling.
+// Every model in this package reassembles TCP, so no test anywhere could assert
+// that a chunking emitter still chunks: rungs 3 and 4 of the shipped tr ladder
+// were scored only as failures (see TestChunkDoesNotEvadeTT2026, which is an
+// honest negative and stays), leaving nothing but shape assertions behind them.
+// A change that kept the segment count and sizes intact while destroying the
+// bypass property — writing the hostname contiguously into one segment — was
+// invisible to the whole suite. Under this model that change is a test failure.
+//
+// The predicate it enforces is a mechanism, not a lookup table: a segment-wise
+// scanner matches a hostname only when one segment carries the whole of it. It
+// deliberately does NOT reproduce MEASUREMENTS.md §3.4's chunk curve. §3.4's
+// own correction gives the measured necessary condition on the real line — the
+// chunked prefix must extend past 5+sniEnd — but records in the same breath
+// that the condition is not sufficient (size=20 covers 300 bytes and still
+// fails), so there is no rule to encode. Modelling it anyway would be the
+// lookup-table-in-a-hypothesis'-clothes that TT2026's doc comment refuses.
+func NoReassembly(blocked ...string) Model {
+	if len(blocked) == 0 {
+		blocked = BlockedTT
+	}
+	return Model{
+		Name: "noreassembly",
+		Doc: "segment-wise hostname scanner; contrast model only — §3.1 measures Türk Telekom " +
+			"as the opposite. Chunking evades it exactly when no single segment carries the " +
+			"whole hostname.",
+		Ports:         []int{443},
+		Blocked:       append([]string(nil), blocked...),
+		ReassembleTCP: false,
+		InspectBytes:  noReassemblyWindow,
+		Action:        ActionReset,
+	}
+}
+
 // Open is an uncensored network. loss is the fraction of connections that fail
 // for ordinary reasons; the prober is required to report "nothing is blocked
 // here" against it rather than mistaking loss for censorship and inventing a

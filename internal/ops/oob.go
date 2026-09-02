@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"fmt"
+
 	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
 )
 
@@ -25,7 +27,8 @@ func oobOp() strategy.Op {
 		Caps:        caps,
 		Determinism: strategy.DetEmpirical,
 		Params: []strategy.ParamDoc{
-			{Name: "pos", Probe: []string{"1", "3"}, Doc: "absolute payload offset the junk byte follows"},
+			{Name: "pos", Probe: []string{"1", "3"}, Doc: "payload-absolute offset the junk byte follows; an SNI " +
+				"or body anchor is resolved in record-body coordinates and converted"},
 			{Name: "junk", Default: "1", Probe: []string{"1", "97"}, Doc: "the out-of-band byte value, 0..255"},
 		},
 		Summary: "MSG_OOB junk byte at a split point",
@@ -41,12 +44,25 @@ func oobOp() strategy.Op {
 			return nil, err
 		}
 		return strategy.StepFunc("oob", caps, func(b *strategy.Builder) error {
-			off, err := resolvePos(b, "oob", p)
+			off, err := resolvePayloadPos(b, "oob", p)
 			if err != nil {
 				return err
 			}
 			if err := b.SplitAt(off); err != nil {
 				return err
+			}
+			// SplitAt is documented to produce ONE segment when it has no usable
+			// offset, which outside Strict mode is a note rather than an error.
+			// Marking segment 0 then places the urgent byte after the COMPLETE
+			// first message: the DPI has already parsed the hostname by the time
+			// the junk arrives, so the plan is a plain write plus a stray byte
+			// wearing oob's name. Refused, the way SetSegTTL refuses to emit a
+			// plain split under disorder's name (builder.go).
+			if len(b.Segs) < 2 {
+				return fmt.Errorf("%w: oob pos %s resolved to payload offset %d, which produced no write "+
+					"boundary in a %d-byte message, so the junk byte would follow the whole first message "+
+					"and the DPI would have parsed the hostname already",
+					strategy.ErrDowngrade, p, off, len(b.Payload))
 			}
 			return b.MarkOOB(0, byte(junk))
 		}), nil

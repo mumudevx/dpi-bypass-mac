@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSinkholeSentinelIsRejected pins MEASUREMENTS.md §2: the system resolver at
@@ -67,15 +68,74 @@ func TestUniformNeedsAQuorum(t *testing.T) {
 	}
 }
 
-func TestUniformIgnoresMultiAddressAnswers(t *testing.T) {
-	d := NewDetector([]netip.Addr{}, []string{"discord.com", "discord.gg", "cdn.discordapp.com"})
-	// A real Cloudflare answer carries several addresses; learning from it
-	// would poison the heuristic with legitimate shared infrastructure.
-	for _, n := range []string{"discord.com", "discord.gg", "cdn.discordapp.com"} {
-		d.Learn(n, genuineAnswer)
+// TestUniformCatchesMultiAddressPoison is the fix for the guard this test used
+// to encode backwards.
+//
+// It previously asserted that "multi-address answers must never feed the
+// heuristic", which is what made the uniqueness defence inert: measured on the
+// live line, all five shipped rungs answer every one of the three
+// DefaultPoisonProbes with FIVE A records, so a len(addrs)==1 gate is never
+// satisfied in normal operation and a censor injecting two block-page addresses
+// is served as clean. The heuristic keys on the whole address set instead.
+func TestUniformCatchesMultiAddressPoison(t *testing.T) {
+	probes := []string{"discord.com", "discord.gg", "cdn.discordapp.com"}
+	blockPage := []netip.Addr{
+		netip.MustParseAddr("10.9.9.1"),
+		netip.MustParseAddr("10.9.9.2"),
 	}
-	if sig := d.Check("discord.com", []netip.Addr{genuineAnswer[0]}); sig.Poisoned {
-		t.Fatalf("multi-address answers must never feed the heuristic: %+v", sig)
+	d := NewDetector([]netip.Addr{}, probes)
+	for _, n := range probes {
+		if sig := d.Check(n, blockPage); sig.Poisoned && n != probes[len(probes)-1] {
+			t.Fatalf("%s: quorum reached too early: %+v", n, sig)
+		}
+		d.Learn(n, blockPage)
+	}
+	// Order is not part of the answer: every resolver here rotates its RRset,
+	// so the reversed set must reach the same verdict.
+	sig := d.Check("anything.example", []netip.Addr{blockPage[1], blockPage[0]})
+	if !sig.Poisoned || !sig.Uniform {
+		t.Fatalf("three distinct blocked names on one two-address set is a censor: %+v", sig)
+	}
+	if !sig.Addr.IsValid() {
+		t.Fatalf("a uniform signal must name an address: %+v", sig)
+	}
+}
+
+// TestUniformDoesNotFireOnRealCDNAnswers is the false positive the old
+// single-address gate was defending against, held with the set-keyed heuristic.
+//
+// Measured on the live Türk Telekom line through both alternate-port rungs, the
+// three probe names return three DIFFERENT five-address Cloudflare sets:
+// discord.com -> 162.159.{128.233,135.232,136.232,137.232,138.232},
+// discord.gg -> 162.159.{130,133,134,135,136}.234, and cdn.discordapp.com ->
+// 162.159.{129,130,133,134,135}.233. Distinct sets can never reach one quorum.
+func TestUniformDoesNotFireOnRealCDNAnswers(t *testing.T) {
+	probes := []string{"discord.com", "discord.gg", "cdn.discordapp.com"}
+	live := map[string][]netip.Addr{
+		"discord.com": {
+			netip.MustParseAddr("162.159.128.233"), netip.MustParseAddr("162.159.135.232"),
+			netip.MustParseAddr("162.159.136.232"), netip.MustParseAddr("162.159.137.232"),
+			netip.MustParseAddr("162.159.138.232"),
+		},
+		"discord.gg": {
+			netip.MustParseAddr("162.159.130.234"), netip.MustParseAddr("162.159.133.234"),
+			netip.MustParseAddr("162.159.134.234"), netip.MustParseAddr("162.159.135.234"),
+			netip.MustParseAddr("162.159.136.234"),
+		},
+		"cdn.discordapp.com": {
+			netip.MustParseAddr("162.159.129.233"), netip.MustParseAddr("162.159.130.233"),
+			netip.MustParseAddr("162.159.133.233"), netip.MustParseAddr("162.159.134.233"),
+			netip.MustParseAddr("162.159.135.233"),
+		},
+	}
+	d := NewDetector([]netip.Addr{}, probes)
+	for i := 0; i < 3; i++ {
+		for _, n := range probes {
+			if sig := d.Check(n, live[n]); sig.Poisoned {
+				t.Fatalf("the measured live answer for %s must never be flagged: %+v", n, sig)
+			}
+			d.Learn(n, live[n])
+		}
 	}
 	// A name outside the probe set is not evidence about anything.
 	single := netip.MustParseAddr("10.0.0.1")
@@ -84,6 +144,29 @@ func TestUniformIgnoresMultiAddressAnswers(t *testing.T) {
 	}
 	if sig := d.Check("d.example", []netip.Addr{single}); sig.Poisoned {
 		t.Fatalf("names outside the probe set are not evidence: %+v", sig)
+	}
+}
+
+// TestDetectorObservationsExpire pins the per-network lifetime: a captive
+// portal that answers everything with one address must not follow the machine
+// onto the next network.
+func TestDetectorObservationsExpire(t *testing.T) {
+	shared := netip.MustParseAddr("10.44.44.44")
+	probes := []string{"discord.com", "discord.gg", "cdn.discordapp.com"}
+	d := NewDetector([]netip.Addr{}, probes).(*detector)
+	base := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	clock := base
+	d.now = func() time.Time { return clock }
+
+	for _, n := range probes {
+		d.Learn(n, []netip.Addr{shared})
+	}
+	if sig := d.Check("x.example", []netip.Addr{shared}); !sig.Uniform {
+		t.Fatalf("quorum must be reached on the network it was observed on: %+v", sig)
+	}
+	clock = base.Add(answerSetTTL + time.Second)
+	if sig := d.Check("x.example", []netip.Addr{shared}); sig.Poisoned {
+		t.Fatalf("an observation older than %s must not condemn the next network: %+v", answerSetTTL, sig)
 	}
 }
 
@@ -112,8 +195,8 @@ func TestDetectorCapAndInvalidInputs(t *testing.T) {
 		a := netip.AddrFrom4([4]byte{10, byte(i >> 8), byte(i), 1})
 		d.Learn("discord.com", []netip.Addr{a})
 	}
-	if len(d.singles) > uniformCap {
-		t.Fatalf("learned map grew to %d, above the %d cap", len(d.singles), uniformCap)
+	if len(d.sets) > uniformCap {
+		t.Fatalf("learned map grew to %d, above the %d cap", len(d.sets), uniformCap)
 	}
 	if sig := d.Check("discord.com", nil); sig.Poisoned {
 		t.Fatalf("an empty answer is not poison: %+v", sig)

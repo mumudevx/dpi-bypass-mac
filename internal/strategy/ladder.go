@@ -21,8 +21,14 @@ var ladders = map[string][]string{
 	//   1. ""                  plain      0/6 bypass · 8/8 controls · 20/20 fragile
 	//   2. tlsfrag:pos=snimid  §3.2/§5.1  6/6 bypass · 8/8 controls ·  1/20 fragile
 	//   3. chunk:size=12       §3.4/§5.1  6/6 bypass · 8/8 controls · 14/20 fragile
-	//   4. chunk:size=4        §3.4/§5.1  6/6 bypass · 6/8 controls · 13/20 fragile
-	//   5. oob:pos=1           §3/§5.1    6/6 bypass · 6/8 controls ·  0/20 fragile
+	//   4. oob:pos=1           §3/§5.1    6/6 bypass · 6/8 controls ·  0/20 fragile
+	//
+	// chunk:size=4 was rung 4 and is gone. §3.4's correction note records why:
+	// the measured 6/6 was taken with a harness that chunks the whole message,
+	// while chunkOp caps at 16 segments, so size=4 chunks only the first 60
+	// bytes and the SNI travels intact in the tail. chunkOp now refuses any
+	// size whose prefix stops short of the SNI, and a rung that cannot build
+	// costs a dialled connection and an attempt slot for nothing.
 	//
 	// disorder (0/10, §3.5) and split (0/5, §3.1) are registered, tested ops and
 	// are deliberately absent: the DPI reassembles TCP, so neither can help on
@@ -32,7 +38,6 @@ var ladders = map[string][]string{
 		"",
 		"tlsfrag:pos=snimid",
 		"chunk:size=12",
-		"chunk:size=4",
 		"oob:pos=1",
 	},
 
@@ -48,7 +53,6 @@ var ladders = map[string][]string{
 		"tlsfrag:pos=snimid",
 		"tlsevery:period=64",
 		"chunk:size=12",
-		"chunk:size=4",
 	},
 
 	// probe-full is the prober's sweep: the discrete points actually measured in

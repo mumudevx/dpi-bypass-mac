@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 )
 
 // Endpoint is one rung of the DNS chain expressed as data, so the shipped
@@ -81,6 +82,18 @@ func (e Endpoint) New(dial DialFunc, ud *net.Dialer) (Resolver, error) {
 	case "udp", "udp-alt":
 		return NewUDP(e.Label, e.Target, ud)
 	default:
+		// A transport that names a stream network is not merely unknown, it is
+		// forbidden, and it must say so with the measurement attached.
+		// ForbidTCP is the lever a configuration layer trips: a profile
+		// carrying `transport = "tcp"` (or an `allow_tcp53 = true` that lowers
+		// to one) fails here rather than becoming a silent hole in the chain.
+		// This is the only call site where the argument is data rather than a
+		// compile-time constant, which is the whole point of the lever.
+		if strings.HasPrefix(e.Transport, streamNetwork) {
+			if err := ForbidTCP(e.Transport); err != nil {
+				return nil, fmt.Errorf("resolve: endpoint %q: %w", e.Label, err)
+			}
+		}
 		return nil, fmt.Errorf("resolve: endpoint %q has unknown transport %q", e.Label, e.Transport)
 	}
 }

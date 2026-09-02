@@ -165,20 +165,37 @@ func TestAdoptedRecordIsSkippedByReplay(t *testing.T) {
 }
 
 // TestNotSelf is the second half of the restoration guarantee: a captured
-// proxy entry that already points at our own listener is discarded, so Revert
-// turns the setting off instead of pinning the user to a dead port.
+// proxy entry that is OUR OWN listener is discarded, so Revert turns the
+// setting off instead of pinning the user to a dead port.
+//
+// This test used to assert the opposite of what it asserts now. It set up a
+// user-shaped loopback configuration on a DIFFERENT port and demanded that a
+// clean exit destroy it, which is how a green suite shipped a tool that wiped
+// the resolver, web proxy and PAC of anyone running dnscrypt-proxy, AdGuard
+// Home, mitmproxy or Charles. The residue case it meant to cover is the one
+// below: state that is byte-for-byte what this run is about to install can only
+// have come from a previous run of ours.
 func TestNotSelf(t *testing.T) {
+	const pac = "http://127.0.0.1:9090/dpb.pac"
+	const proxy = "http://127.0.0.1:9090"
 	f := newFakeSystem()
-	f.svc["Wi-Fi"].pacURL, f.svc["Wi-Fi"].pacOn = "http://127.0.0.1:8080/dpb.pac", true
-	f.svc["Wi-Fi"].dns = []string{"127.0.0.1"}
-	f.env["HTTPS_PROXY"] = "http://localhost:8080"
-	m, _ := newTestManager(t, f)
+	f.svc["Wi-Fi"].pacURL, f.svc["Wi-Fi"].pacOn = pac, true
+	f.svc["Wi-Fi"].dns = []string{"127.0.0.1", "9.9.9.9"}
+	f.env["HTTPS_PROXY"] = proxy
+	j, _ := openTestJournal(t)
+	e := f.env0()
+	// Residue means a previous run died: that is what PriorResidue reports, and
+	// for DNS it is the only signal there is — networksetup carries no port, so
+	// a lone 127.0.0.1 is otherwise indistinguishable from the user's own
+	// resolver.
+	e.PriorResidue = true
+	m := NewManager(j, e)
 	ctx := context.Background()
 
 	ops := []Op{
-		NewPAC(f, "http://127.0.0.1:9090/dpb.pac", []string{"Wi-Fi"}),
+		NewPAC(f, pac, []string{"Wi-Fi"}),
 		NewDNSServers(f, []string{"127.0.0.1", "9.9.9.9"}, []string{"Wi-Fi"}),
-		NewLaunchEnv(f, "http://127.0.0.1:9090", nil),
+		NewLaunchEnv(f, proxy, nil),
 	}
 	for _, op := range ops {
 		if err := m.Do(ctx, op); err != nil {
@@ -192,11 +209,53 @@ func TestNotSelf(t *testing.T) {
 	if f.svc["Wi-Fi"].pacOn {
 		t.Fatal("Revert re-enabled a PAC pointing at a listener that no longer exists")
 	}
-	if len(f.svc["Wi-Fi"].dns) != 0 {
-		t.Fatalf("Revert restored our own resolver: %v", f.svc["Wi-Fi"].dns)
+	if f.svc["Wi-Fi"].pacURL != "" {
+		t.Fatalf("Revert left our dead PAC URL %q behind a disabled toggle", f.svc["Wi-Fi"].pacURL)
+	}
+	// --set-dns writes our loopback resolver followed by the machine's
+	// originals, so stripping the loopback entry recovers the user's list.
+	if !reflect.DeepEqual(f.svc["Wi-Fi"].dns, []string{"9.9.9.9"}) {
+		t.Fatalf("resolvers after teardown = %v, want our own entry gone and the rest restored", f.svc["Wi-Fi"].dns)
 	}
 	if v, ok := f.env["HTTPS_PROXY"]; ok {
 		t.Fatalf("Revert restored HTTPS_PROXY=%q, which points at us", v)
+	}
+}
+
+// TestCleanExitPreservesAUsersLocalServices is MF5 at the Manager level: the
+// whole lifecycle, not just the capture step. Everything the user had on
+// loopback before dpb ran must be exactly what they have after it exits.
+func TestCleanExitPreservesAUsersLocalServices(t *testing.T) {
+	f := newFakeSystem()
+	// dnscrypt-proxy, a local web proxy, a locally served PAC, proxy env vars.
+	f.svc["Wi-Fi"].dns = []string{"127.0.0.1"}
+	f.svc["Wi-Fi"].pacURL, f.svc["Wi-Fi"].pacOn = "http://127.0.0.1:3000/user.pac", true
+	f.svc["Wi-Fi"].webHost, f.svc["Wi-Fi"].webPort, f.svc["Wi-Fi"].webOn = "127.0.0.1", 8888, true
+	f.svc["Wi-Fi"].secHost, f.svc["Wi-Fi"].secPort, f.svc["Wi-Fi"].secOn = "127.0.0.1", 8888, true
+	f.env["HTTP_PROXY"], f.env["HTTPS_PROXY"] = "http://127.0.0.1:8888", "http://127.0.0.1:8888"
+	before := f.snapshot()
+
+	m, j := newTestManager(t, f)
+	ctx := context.Background()
+	ops := []Op{
+		NewPAC(f, "http://127.0.0.1:9090/dpb.pac", []string{"Wi-Fi"}),
+		NewWebProxy(f, "127.0.0.1", 9090, []string{"Wi-Fi"}),
+		NewDNSServers(f, []string{"127.0.0.1", "9.9.9.9"}, []string{"Wi-Fi"}),
+		NewLaunchEnv(f, "http://127.0.0.1:9090", nil),
+	}
+	for _, op := range ops {
+		if err := m.Do(ctx, op); err != nil {
+			t.Fatalf("Do(%s): %v", op.ID(), err)
+		}
+	}
+	if errs := m.UndoAll(ctx); len(errs) != 0 {
+		t.Fatalf("UndoAll: %v", errs)
+	}
+	if got := f.snapshot(); got != before {
+		t.Fatalf("a clean exit changed the user's own configuration:\n before %s\n after  %s", before, got)
+	}
+	if pending, _ := j.Pending(ctx); len(pending) != 0 {
+		t.Fatalf("journal not drained: %+v", pending)
 	}
 }
 
@@ -618,7 +677,14 @@ func TestOurOwnResidueIsNotAdopted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m, j := newTestManager(t, f)
+	j, _ := openTestJournal(t)
+	e := f.env0()
+	// The journal from the killed run is gone, but the lock file it left behind
+	// still names a dead owner — that is what PriorResidue reports, and it is
+	// the only thing that lets an Op discard a loopback resolver it cannot
+	// match exactly.
+	e.PriorResidue = true
+	m := NewManager(j, e)
 	ctx := context.Background()
 	ops := []Op{
 		NewPAC(f, pacURL, []string{"Wi-Fi"}),
@@ -674,5 +740,115 @@ func TestAdoptionStillAppliesToRoutes(t *testing.T) {
 	}
 	if rec := m.Applied(); len(rec) != 1 || !rec[0].Adopted {
 		t.Fatalf("record = %+v, want Adopted", rec)
+	}
+}
+
+// TestRollbackAfterAFailedAddLeavesAVPNAlone is MF6, and it needs MF7's gate to
+// be understood: when classifyVPN misses a half-tunnel, dpb goes ahead and
+// installs its capture routes on top of one.
+//
+// The adoption pre-check is stricter than route(8)'s own uniqueness rule —
+// matchRoute requires the interface to match — so a half-default already
+// installed by another tunnel is NOT adopted. Apply then gets the exit-0
+// "File exists" liar, and rollback used to call Revert unconditionally. The
+// kernel resolves RTM_DELETE by destination + netmask + explicit -ifscope, and
+// the link gateway an `-interface` add supplies is not part of the lookup, so
+// that delete removed the VPN's route. VerifyReverted then looked only for our
+// own interface, found nothing, called the revert clean and closed the entry —
+// so the deletion was not even recorded. The VPN keeps reporting "connected"
+// while half the user's traffic leaves in the clear over the censored line.
+func TestRollbackAfterAFailedAddLeavesAVPNAlone(t *testing.T) {
+	dst := netip.MustParsePrefix("0.0.0.0/1")
+	f := newFakeSystem()
+	f.ifaces["utun4"] = &fakeIface{index: 22, mtu: 1500, up: true}
+	f.ifaces["utun6"] = &fakeIface{index: 20, mtu: 1420, up: true}
+	// WireGuard/Tailscale/Mullvad own the half-defaults.
+	f.routes = append(f.routes,
+		RouteEntry{Dst: dst, Iface: "utun6", Index: 20},
+		RouteEntry{Dst: netip.MustParsePrefix("128.0.0.0/1"), Iface: "utun6", Index: 20})
+	m, j := newTestManager(t, f)
+	ctx := context.Background()
+
+	err := m.Do(ctx, NewRoute(f, dst, netip.Addr{}, "utun4"))
+	if err == nil {
+		t.Fatal("Do succeeded even though route(8) reported File exists")
+	}
+	if dels := f.callsContaining("route -n delete"); len(dels) != 0 {
+		t.Fatalf("rollback deleted a route it never created: %v", dels)
+	}
+	if ok, _ := f.Exists(dst, "utun6"); !ok {
+		t.Fatal("the coexisting tunnel's half-default was deleted")
+	}
+	// Nothing was mutated, so there is no residue for Replay to chase.
+	if pending, _ := j.Pending(ctx); len(pending) != 0 {
+		t.Fatalf("an Op that changed nothing left a pending journal entry: %+v", pending)
+	}
+}
+
+// TestRollbackStillRevertsWhatItApplied: the MF6 guard must not weaken the
+// rollback it lives inside. An Apply that succeeded is still undone when Verify
+// fails afterwards.
+func TestRollbackStillRevertsWhatItApplied(t *testing.T) {
+	dst := netip.MustParsePrefix("0.0.0.0/1")
+	f := newFakeSystem()
+	f.ifaces["utun4"] = &fakeIface{index: 22, mtu: 1500, up: true}
+	m, j := newTestManager(t, f)
+	ctx := context.Background()
+
+	op := &chaosOp{Op: NewRoute(f, dst, netip.Addr{}, "utun4"), fired: map[string]bool{}, failVerify: true}
+	if err := m.Do(ctx, op); err == nil {
+		t.Fatal("Do succeeded despite an injected Verify failure")
+	}
+	if dels := f.callsContaining("route -n delete"); len(dels) != 1 {
+		t.Fatalf("a route we did add must be deleted on rollback: %v", f.callsContaining("route"))
+	}
+	if ok, _ := f.Exists(dst, "utun4"); ok {
+		t.Fatal("our own half-applied route survived rollback")
+	}
+	if pending, _ := j.Pending(ctx); len(pending) != 0 {
+		t.Fatalf("a confirmed rollback must close its journal entry: %+v", pending)
+	}
+}
+
+// TestMatchRouteRequiresTheRightScope is SF16. `wantScoped && !r.Scoped` let a
+// scoped entry satisfy an unscoped match, so Manager.Do marked a record
+// adopted/applied/verified with zero route(8) calls — dpb reporting success
+// having installed nothing — and on the revert side VerifyReverted matched a
+// scoped sibling forever, so the journal entry never closed.
+func TestMatchRouteRequiresTheRightScope(t *testing.T) {
+	dst := netip.MustParsePrefix("0.0.0.0/0")
+	gw := netip.MustParseAddr("192.168.0.1")
+	scoped := []RouteEntry{{Dst: dst, Gateway: gw, Iface: "en0", Scoped: true}}
+	unscoped := []RouteEntry{{Dst: dst, Gateway: gw, Iface: "en0"}}
+
+	if matchRoute(unscoped, dst, gw, "en0", true) {
+		t.Fatal("an unscoped entry satisfied a scoped match")
+	}
+	if matchRoute(scoped, dst, gw, "en0", false) {
+		t.Fatal("a scoped entry satisfied an unscoped match")
+	}
+	if !matchRoute(scoped, dst, gw, "en0", true) || !matchRoute(unscoped, dst, gw, "en0", false) {
+		t.Fatal("matchRoute rejected an entry that does match")
+	}
+}
+
+// TestScopedSiblingIsNotAdopted drives SF16 through Manager.Do: a scoped
+// default on en0 must not make an unscoped add look already-present.
+func TestScopedSiblingIsNotAdopted(t *testing.T) {
+	dst := netip.MustParsePrefix("0.0.0.0/1")
+	f := newFakeSystem()
+	f.routes = append(f.routes, RouteEntry{Dst: dst, Iface: "utun4", Index: 22, Scoped: true})
+	f.ifaces["utun4"] = &fakeIface{index: 22, mtu: 1500, up: true}
+	m, _ := newTestManager(t, f)
+
+	if err := m.Do(context.Background(), NewRoute(f, dst, netip.Addr{}, "utun4")); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	rec := m.Applied()
+	if len(rec) != 1 || rec[0].Adopted {
+		t.Fatalf("record = %+v, want a real apply rather than adoption of a scoped sibling", rec)
+	}
+	if adds := f.callsContaining("route -n add"); len(adds) != 1 {
+		t.Fatalf("expected the route to actually be installed, calls: %v", f.callsContaining("route"))
 	}
 }

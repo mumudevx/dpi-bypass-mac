@@ -320,3 +320,120 @@ func TestActionAndVerdictStrings(t *testing.T) {
 		t.Errorf("DNSRole(9) = %q", got)
 	}
 }
+
+// chunkSegments reproduces the shipped chunk emitter's write geometry: at most
+// budgetBoundaries cuts of `size` bytes over the head of the message, with
+// everything left over in one final write.
+//
+// MEASUREMENTS.md §3.4's correction note is about exactly this shape — "a chunk
+// size is meaningless without the write geometry it was measured under" — so a
+// test that chunked the whole message would be measuring a different emitter
+// from the one the ladder ships.
+func chunkSegments(msg []byte, size, budgetBoundaries int) [][]byte {
+	var segs [][]byte
+	prev := 0
+	for o := size; o < len(msg) && len(segs) < budgetBoundaries; o += size {
+		segs = append(segs, msg[prev:o])
+		prev = o
+	}
+	return append(segs, msg[prev:])
+}
+
+// hostnameContiguous reports whether any single segment carries the whole
+// hostname. It is the predicate NoReassembly enforces, computed independently
+// of the model so the test asserts an agreement rather than a tautology.
+func hostnameContiguous(segs [][]byte, name string) bool {
+	for _, s := range segs {
+		if strings.Contains(strings.ToLower(string(s)), strings.ToLower(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestChunkEvadesANonReassemblingMiddlebox is the bypass-level assertion the
+// chunk rungs never had.
+//
+// Every model in this package reassembles TCP, so chunking was scored only as a
+// failure and the rungs were pinned by shape assertions alone: a regression
+// that kept the segment count and sizes while writing the hostname contiguously
+// into one segment passed the entire suite. The assertion here is the PREDICATE
+// rather than a list of sizes — which sizes ship is the ladder's business, and
+// MEASUREMENTS.md §3.5 is explicit that a size is not portable between
+// implementations — so it holds whatever rungs the ladder ends up carrying.
+func TestChunkEvadesANonReassemblingMiddlebox(t *testing.T) {
+	hello := clientHello(t, "discord.com")
+	const host = "discord.com"
+
+	// The shipped budget: 16 segments, so 15 boundaries and one tail write.
+	// MEASUREMENTS.md §3.4's correction table was measured at this geometry.
+	const boundaries = 15
+
+	var evaded, blocked []int
+	for size := 1; size <= 64; size++ {
+		segs := chunkSegments(hello, size, boundaries)
+		want := hostnameContiguous(segs, host)
+		got := feed(NoReassembly(), segs...).Blocked()
+		if got != want {
+			t.Errorf("chunk-%d over %d segments: blocked = %v, want %v (hostname contiguous in one segment = %v)",
+				size, len(segs), got, want, want)
+		}
+		if got {
+			blocked = append(blocked, size)
+		} else {
+			evaded = append(evaded, size)
+		}
+	}
+
+	// The contrast must actually contrast: a model nothing evades and a model
+	// everything evades are both worthless as assertions.
+	if len(evaded) == 0 {
+		t.Fatal("no chunk size evaded the contrast model; the rungs still have no bypass-level assertion")
+	}
+	if len(blocked) == 0 {
+		t.Fatal("every chunk size evaded the contrast model; it asserts nothing about the emitter")
+	}
+	t.Logf("chunk sizes 1..64 over %d boundaries: %d evade, %d are blocked", boundaries, len(evaded), len(blocked))
+
+	// And the honest negative stays true: none of this evades the measured
+	// model, because §3.1 measured Türk Telekom as reassembling TCP.
+	for _, size := range []int{evaded[0], evaded[len(evaded)-1]} {
+		segs := chunkSegments(hello, size, boundaries)
+		if !feed(TT2026(), segs...).Blocked() {
+			t.Errorf("chunk-%d evaded TT2026; §3.1 says TCP framing is not the mechanism there", size)
+		}
+	}
+}
+
+// TestNoReassemblyIsNotVacuous pins the two ends of the contrast model, so a
+// change that quietly turned it into "everything passes" is a failure rather
+// than a silently weaker suite.
+func TestNoReassemblyIsNotVacuous(t *testing.T) {
+	hello := clientHello(t, "discord.com")
+
+	// One write carrying the whole hello: nothing to evade with.
+	if v := feed(NoReassembly(), hello); !v.Blocked() {
+		t.Fatalf("a plain hello in one segment must be blocked: %v", v)
+	}
+	// A benign name is not blocked, so the model is matching hostnames rather
+	// than shapes.
+	if v := feed(NoReassembly(), clientHello(t, "cloudflare.com")); v.Blocked() {
+		t.Fatalf("benign SNI was blocked: %v", v)
+	}
+	// The two models are genuinely independent, and a cut before the hostname
+	// shows it. tlsfrag:pos=snistart-20 ends record 1 before the SNI, so TT2026
+	// never matches (§3.2) — but it emits ONE TCP segment carrying two records
+	// (§3.1 measured that shape at 3/3 on the real line) with the hostname
+	// still contiguous in it, so a segment-wise scanner does match. Neither
+	// rung is a bypass against both mechanisms, which is why the ladder needs
+	// more than one rung and why the suite needs more than one model.
+	sniStart, _ := sniExtent(t, hello)
+	early := split(t, hello, sniStart-20)
+	if v := feed(TT2026(), early); v.Blocked() {
+		t.Fatalf("a cut before the SNI must evade TT2026 (§3.2): %v", v)
+	}
+	if v := feed(NoReassembly(), early); !v.Blocked() {
+		t.Fatalf("the same cut leaves the hostname whole in one segment, so a "+
+			"segment-wise scanner must still match: %v", v)
+	}
+}
