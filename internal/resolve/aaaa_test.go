@@ -3,6 +3,7 @@ package resolve
 import (
 	"context"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -112,4 +113,61 @@ func TestHasGlobalIPv4IsReadOnly(t *testing.T) {
 	// The value depends on the machine; what matters is that reading it
 	// inspects interface state and resolves nothing.
 	_ = hasGlobalIPv4()
+}
+
+// TestOwnDialsSkipAAAAWithNoIPv6Path is the regression for a real outage found
+// by running the proxy on this machine: www.turkiye.gov.tr answers in both
+// families, this host has no global IPv6 address, the A lookup lost one race,
+// the AAAA-only answer was cached, and eight consecutive requests through the
+// proxy failed instantly with "connect: no route to host" — while the site
+// loaded fine outside dpb.
+//
+// The old rule reasoned that our own dials are protected in both families, so
+// only poisoning could justify withholding one. Protected is not reachable.
+func TestOwnDialsSkipAAAAWithNoIPv6Path(t *testing.T) {
+	t.Parallel()
+	yes := func() bool { return true }
+	no := func() bool { return false }
+	noNAT64 := func(context.Context) NAT64 { return NAT64{} }
+
+	for _, tc := range []struct {
+		name      string
+		v6Host    func() bool
+		v6Path    func() bool
+		wantOwn   bool
+		wantWhyIn string
+	}{
+		{"no v6 on the host: withheld from our own dials", no, no, false, "no global IPv6 address"},
+		{"v6 on the host: allowed for our own dials", yes, no, true, ""},
+		{"v6 carried by a tunnel: allowed", yes, yes, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &aaaaPolicy{mode: AAAAAuto, v4Path: yes, v6Path: tc.v6Path, v6Host: tc.v6Host, nat64: noNAT64}
+			got, why := p.allow(context.Background())
+			if got != tc.wantOwn {
+				t.Fatalf("allow() = %v (%q), want %v", got, why, tc.wantOwn)
+			}
+			if tc.wantWhyIn != "" && !strings.Contains(why, tc.wantWhyIn) {
+				t.Errorf("reason %q does not mention %q", why, tc.wantWhyIn)
+			}
+		})
+	}
+
+	// Suppressing a family the host cannot reach must never be the thing that
+	// takes the last address away: with no v4 path either, AAAA stays allowed.
+	p := &aaaaPolicy{mode: AAAAAuto, v4Path: no, v6Path: no, v6Host: no, nat64: noNAT64}
+	if ok, why := p.allow(context.Background()); !ok {
+		t.Errorf("with no IPv4 path, AAAA must stay allowed or there is nothing left to dial: %q", why)
+	}
+	// NAT64 is the other escape: there the AAAA *is* the connectivity.
+	p = &aaaaPolicy{mode: AAAAAuto, v4Path: yes, v6Path: no, v6Host: no,
+		nat64: func(context.Context) NAT64 { return NAT64{Detected: true} }}
+	if ok, why := p.allow(context.Background()); !ok {
+		t.Errorf("on a NAT64 network AAAA must stay allowed: %q", why)
+	}
+	// A nil predicate must not suppress a whole family by omission.
+	p = &aaaaPolicy{mode: AAAAAuto, v4Path: yes, v6Path: no, nat64: noNAT64}
+	if ok, _ := p.allow(context.Background()); !ok {
+		t.Error("an unwired v6Host predicate must read as reachable")
+	}
 }

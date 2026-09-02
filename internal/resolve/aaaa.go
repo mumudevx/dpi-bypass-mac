@@ -64,6 +64,7 @@ type aaaaPolicy struct {
 	mode   AAAAMode
 	v4Path func() bool
 	v6Path func() bool
+	v6Host func() bool
 	nat64  func(context.Context) NAT64
 
 	mu         sync.Mutex
@@ -97,9 +98,13 @@ func (p *aaaaPolicy) v6Protected() bool {
 // addresses this process is about to dial — and why not when they may not.
 //
 // Our own dials are protected in both families by construction: whatever we
-// dial, we dial through the ladder. So the only reason to withhold an IPv6
-// address from ourselves is positive evidence that IPv6 answers on this network
-// are poisoned.
+// dial, we dial through the ladder. But PROTECTED is not REACHABLE, and that
+// distinction cost a real outage: on a machine with no global IPv6 address,
+// www.turkiye.gov.tr resolved to both families, the A lookup lost one race, the
+// AAAA-only answer was cached, and eight consecutive requests through the proxy
+// died instantly with "connect: no route to host" while the site loaded fine
+// outside dpb. So an address family this host cannot reach is withheld from our
+// own dials too, under the same escapes as every other suppression.
 func (p *aaaaPolicy) allow(ctx context.Context) (bool, string) {
 	return p.decide(ctx, false)
 }
@@ -148,7 +153,8 @@ func (p *aaaaPolicy) decide(ctx context.Context, served bool) (bool, string) {
 	}
 	poisoned, why := p.v6PoisonSeen()
 	unprotected := served && !p.v6Protected()
-	if !poisoned && !unprotected {
+	unreachable := !served && !p.v6Reachable()
+	if !poisoned && !unprotected && !unreachable {
 		return true, ""
 	}
 	if p.v4Path == nil || !p.v4Path() {
@@ -163,7 +169,47 @@ func (p *aaaaPolicy) decide(ctx context.Context, served bool) (bool, string) {
 		return false, "ipv6 = auto and nothing is carrying IPv6 on this run, so an AAAA answer " +
 			"would hand an application an address dpb cannot protect"
 	}
+	if unreachable {
+		return false, "ipv6 = auto and this host has no global IPv6 address, so dialling an " +
+			"AAAA answer can only fail with no route to host"
+	}
 	return false, "ipv6 = auto and " + why
+}
+
+// v6Reachable reports whether this host could dial an IPv6 address at all.
+// A nil predicate reads as reachable: this gate withholds addresses, so an
+// unwired predicate must not be the thing that suppresses a whole family.
+func (p *aaaaPolicy) v6Reachable() bool {
+	if p.v6Host == nil {
+		return true
+	}
+	return p.v6Host()
+}
+
+// hasGlobalIPv6 is v6Reachable's default: a routable IPv6 address on some
+// interface. A link-local address is not one — every macOS interface has one
+// and none of them can reach the internet. Under --tun the utun's ULA counts,
+// which is correct: that run is carrying IPv6 itself.
+func hasGlobalIPv6() bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true
+	}
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(n.IP)
+		if !ok {
+			continue
+		}
+		if ip.Is6() && !ip.Is4In6() && !ip.IsLoopback() &&
+			!ip.IsLinkLocalUnicast() && !ip.IsUnspecified() {
+			return true
+		}
+	}
+	return false
 }
 
 // hasGlobalIPv4 reports whether any interface carries a routable IPv4 address.

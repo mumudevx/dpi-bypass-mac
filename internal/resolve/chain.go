@@ -78,6 +78,10 @@ type Options struct {
 	// processes only; dpb's own lookups are unaffected, because whatever this
 	// process dials it dials through the ladder.
 	V6Protected func() bool
+
+	// V6Host overrides the "can this host reach IPv6 at all" test. Nil uses
+	// hasGlobalIPv6. Tests set it; production does not.
+	V6Host func() bool
 	// Now is the clock, for tests.
 	Now func() time.Time
 }
@@ -169,7 +173,11 @@ func NewChain(o Options) *Chain {
 	if v4 == nil {
 		v4 = hasGlobalIPv4
 	}
-	c.aaaa = &aaaaPolicy{mode: o.AAAA, v4Path: v4, v6Path: o.V6Protected, nat64: c.nat64Cached}
+	v6 := o.V6Host
+	if v6 == nil {
+		v6 = hasGlobalIPv6
+	}
+	c.aaaa = &aaaaPolicy{mode: o.AAAA, v4Path: v4, v6Path: o.V6Protected, v6Host: v6, nat64: c.nat64Cached}
 	return c
 }
 
