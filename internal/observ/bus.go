@@ -129,6 +129,13 @@ type Bus struct {
 }
 
 // NewBus returns an empty bus.
+//
+// Nothing in the shipped binary subscribes yet: the event VOCABULARY here
+// (ConnEvent, StateEvent, DriftEvent) is load-bearing and used by counters.go
+// and the control socket, but the fan-out half has no consumer until something
+// wants a live stream — a route-change watcher or a `dpb watch` command are the
+// obvious candidates. Wiring a publisher with no subscriber would be ceremony,
+// so this is left explicit rather than pretended.
 func NewBus() *Bus { return &Bus{subs: make(map[*Sub]struct{})} }
 
 // Subscribe registers a subscriber. buffer <= 0 uses DefaultSubBuffer.

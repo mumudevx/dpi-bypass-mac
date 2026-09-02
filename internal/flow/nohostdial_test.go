@@ -72,6 +72,19 @@ var reviewedAddrExprs = map[string]map[string]string{
 			"converts the result to netip.AddrPort. netip.AddrPort.String() cannot " +
 			"render a name, so Go's resolver is never consulted (MEASUREMENTS.md §5.4).",
 	},
+	"internal/observ/client.go": {
+		"c.path": "the network argument is the literal \"unix\", so the address is a " +
+			"filesystem path for an AF_UNIX socket and not a host at all: the kernel " +
+			"never consults any resolver for it. c.path comes from " +
+			"paths.Layout.ControlSocket(), which joins the process's own state directory " +
+			"(MEASUREMENTS.md §5.4).",
+	},
+	"internal/cliapp/selftest.go": {
+		"d.addr": "d.addr is censorLine.origin.Addr(), the Addr() of a net.Listener this " +
+			"process bound itself on 127.0.0.1:0, so it is always an IP literal with a " +
+			"port and can never be a name Go's resolver would be asked about " +
+			"(MEASUREMENTS.md §5.4).",
+	},
 }
 
 // dialSelectors are the selector names that denote "open a connection". The

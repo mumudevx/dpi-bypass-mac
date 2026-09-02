@@ -20,6 +20,7 @@ COVER_PROFILE := coverage.out
 # plan's test strategy: every confirmed defect in the previous tree lived in a
 # 0.0%-covered function, so 0% is a build failure rather than a warning.
 COVER_GATED := \
+	internal/cliapp \
 	internal/flow \
 	internal/strategy \
 	internal/ops \
@@ -33,13 +34,28 @@ COVER_GATED := \
 	internal/probe
 
 # A regex matching a file inside any gated package.
-COVER_GATED_RE := $(MODULE)/(internal/(flow|strategy|ops|emit|tlsmsg|front/proxyfe|front/tunfe|netstate|policy|resolve|probe))/
+COVER_GATED_RE := $(MODULE)/(internal/(cliapp|flow|strategy|ops|emit|tlsmsg|front/proxyfe|front/tunfe|netstate|policy|resolve|probe))/
 
-# Statement-coverage floor, and the two exceptions whose syscall leaves are
-# only reachable from root-gated integration tests.
-COVER_MIN     := 85
-COVER_MIN_LOW := 70
-COVER_LOW_PKGS := internal/front/tunfe internal/netstate
+# Statement-coverage floor.
+COVER_MIN := 85
+
+# Per-package floors that differ from COVER_MIN. These are exceptions with a
+# reason, never a knob to turn when the gate goes red:
+#
+#   internal/front/tunfe, internal/netstate  their syscall leaves are only
+#     reachable from root-gated integration tests.
+#   internal/cliapp  the command tree is the largest package in the tree and
+#     most of it is wiring that only a whole `dpb run` exercises; it entered
+#     the gate at the floor it met on the day it was added. It is here rather
+#     than outside the gate because it is where most of the code now lives,
+#     and a gate that skips the largest package has stopped being a gate.
+#
+# A floor may be RAISED as coverage improves. Lowering one to make a red build
+# pass defeats the entire mechanism, so don't.
+COVER_FLOORS := \
+	internal/front/tunfe=70 \
+	internal/netstate=70 \
+	internal/cliapp=83
 
 .PHONY: all build install test race cover cover-gate fuzz vet fmt lint tidy clean deps
 
@@ -98,22 +114,24 @@ cover-gate: $(COVER_PROFILE)
 	@echo "cover-gate: statement coverage per gated package"
 	@awk -v mod='$(MODULE)/' \
 		-v gated='$(COVER_GATED)' \
-		-v low='$(COVER_LOW_PKGS)' \
-		-v min=$(COVER_MIN) -v minlow=$(COVER_MIN_LOW) \
+		-v floors='$(COVER_FLOORS)' \
+		-v min=$(COVER_MIN) \
 		'NR > 1 { \
 			stm[$$1] = $$2; if ($$3 + 0 > cnt[$$1]) cnt[$$1] = $$3 + 0 } \
 		 END { \
 			for (k in stm) { \
 				split(k, a, ":"); f = a[1]; sub(mod, "", f); d = f; sub(/\/[^\/]*$$/, "", d); \
 				s[d] += stm[k]; if (cnt[k] > 0) c[d] += stm[k] } \
-			n = split(gated, g, " "); m = split(low, lw, " "); \
+			m = split(floors, fo, " "); \
+			for (j = 1; j <= m; j++) { split(fo[j], kv, "="); fl[kv[1]] = kv[2] + 0 } \
+			n = split(gated, g, " "); \
 			for (i = 1; i <= n; i++) { \
 				d = g[i]; \
 				if (!(d in s) || s[d] == 0) { printf "  SKIP  %-24s (no code yet)\n", d; continue } \
-				floor = min; for (j = 1; j <= m; j++) if (lw[j] == d) floor = minlow; \
+				floor = (d in fl) ? fl[d] : min; \
 				p = 100 * c[d] / s[d]; \
 				status = (p + 0.05 < floor) ? "LOW " : "ok  "; \
-				printf "  %s  %-24s %5.1f%% (min %d%%)\n", status, d, p, floor; \
+				printf "  %s  %-24s %5.1f%% (min %d%%, %d stmts)\n", status, d, p, floor, s[d]; \
 				if (p + 0.05 < floor) bad++ } \
 			if (bad) { printf "cover-gate: %d package(s) below the coverage floor\n", bad; exit 1 } }' \
 		$(COVER_PROFILE)

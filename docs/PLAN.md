@@ -39,6 +39,17 @@ actually shipped.
 
 **A8.** Verdict lifetime: the plan's 'plain works is self-revalidating at no cost' rationale is false once policy rewrites SrcLearnedPlain to ScopeDirect — the ladder is never invoked again, so it cannot revalidate. The plan should specify a TTL for learned-plain equal to the desync TTL, and specify that flow must refuse to record a plain win against a known sinkhole or a TLS alert, matching what probe already does.
 
+**A10. Exit code 4 is "needs root" only.** The plan's CLI-surface table and M13's
+acceptance clause both assign 4 to `dpb tune`'s "nothing is blocked here", which
+collides with `dpb service install --system`'s "needs root" — observed in one
+binary, and a script cannot branch on it. `ExitNothingBlocked` is 6. 4 keeps the
+meaning the LaunchAgent already branches on.
+
+**A11. The coverage gate covers `internal/cliapp`.** The plan's gated-package list
+predates that package becoming the largest in the tree (~2700 statements), so
+total coverage could fall while every gate stayed green. The Makefile's gated set
+and floors are now the reference, not this document.
+
 **A9. What wave 1 shipped, against what this plan specifies.**
 
 - The TR ladder is four rungs, not five: `["", "tlsfrag:pos=snimid",

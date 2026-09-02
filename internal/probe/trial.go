@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -80,6 +81,25 @@ type Trial struct {
 	// claims tlsfrag but emitted one segment carrying the whole hello measured
 	// nothing, so the count is recorded rather than assumed.
 	Segments int
+	// SNIStart and SNIEnd are the body-relative extent of the SNI hostname in
+	// the ClientHello this client actually produced, or 0 when there was none.
+	//
+	// They are recorded because the measured rule is stated in those
+	// coordinates (MEASUREMENTS.md §3.2: "body=1497, sni at [112,122)"), and
+	// the prober's first-record search has to be conducted in THIS client's
+	// coordinates rather than in the ones one afternoon in Kayseri happened to
+	// produce.
+	SNIStart int
+	SNIEnd   int
+	// RecordEnd is the body-relative end of the first TLS record as the plan
+	// actually emitted it — read back out of the emitted bytes, not predicted
+	// from the spec. For an unreframed plan it is the whole first record.
+	//
+	// It is what makes "where did the cut land, relative to the hostname" a
+	// measurement rather than a label, which is the distinction §3.5 records
+	// the previous implementation getting wrong: its cut was never verified to
+	// land before sniEnd at all.
+	RecordEnd int
 }
 
 // DefaultTrialTimeout bounds one attempt end to end.
@@ -222,6 +242,17 @@ func RunTrial(ctx context.Context, s strategy.Strategy, t Target, round int, o T
 		// The TLS handshake reads and writes directly on the conn, so the
 		// context alone would not unblock it.
 		if err := conn.SetDeadline(dl); err != nil {
+			// A conn that is already gone by the time the deadline is armed was
+			// torn down by the peer between the dial returning and this call.
+			// That is the network's doing and not ours, and calling it a local
+			// error would be the worst possible misattribution here: an
+			// address-level block resets at connect time, so the one shape a
+			// prober must recognise and STOP on would read as "dpb is broken"
+			// and be discarded from every denominator.
+			if errors.Is(err, net.ErrClosed) || flow.IsReset(err) {
+				return tr.fail(VerdictReset, fmt.Errorf("probe: connection gone before the handshake: %w", err),
+					o.now().Sub(start))
+			}
 			return tr.fail(VerdictLocalError, fmt.Errorf("probe: set deadline: %w", err), o.now().Sub(start))
 		}
 	}
@@ -249,6 +280,7 @@ func RunTrial(ctx context.Context, s strategy.Strategy, t Target, round int, o T
 	hsErr := tlsConn.HandshakeContext(ctx)
 	tr.Latency = o.now().Sub(start)
 	tr.Segments = dc.segments
+	tr.SNIStart, tr.SNIEnd, tr.RecordEnd = dc.sniStart, dc.sniEnd, dc.recordEnd
 
 	// A build or emit failure is ours, not the network's, and outranks whatever
 	// the handshake then reported: a strategy that never reached the wire has
@@ -388,8 +420,11 @@ type desyncConn struct {
 	logf     func(string, ...any)
 	emitFrom func() time.Time
 
-	first    bool
-	segments int
+	first     bool
+	segments  int
+	sniStart  int
+	sniEnd    int
+	recordEnd int
 	// err is a build or emit failure. It is recorded rather than returned
 	// verbatim so RunTrial can tell "we never emitted this strategy" from "the
 	// network killed the connection".
@@ -403,6 +438,9 @@ func (c *desyncConn) Write(b []byte) (int, error) {
 	c.first = true
 
 	m := tlsmsg.Parse(b, c.port)
+	if m.SNIEnd > 0 {
+		c.sniStart, c.sniEnd = m.SNIStart, m.SNIEnd
+	}
 	bld := &strategy.Builder{
 		Payload: append([]byte(nil), b...),
 		Meta:    m,
@@ -418,6 +456,7 @@ func (c *desyncConn) Write(b []byte) (int, error) {
 		return 0, c.err
 	}
 	c.segments = plan.WriteCount()
+	c.recordEnd = firstRecordEnd(plan.StreamBytes())
 	if c.logf != nil {
 		c.logf("probe: %s emits %d segment(s): %s", label(c.strat.Spec), plan.WriteCount(), plan.Summary())
 	}
@@ -440,3 +479,22 @@ func label(spec string) string {
 	}
 	return spec
 }
+
+// firstRecordEnd reads the body-relative end of the first TLS record back out
+// of the bytes a plan will actually put on the wire.
+//
+// Reading it from the emitted bytes rather than from the spec is deliberate: a
+// spec is what was asked for and the bytes are what happened, and the whole
+// reason strategy.ErrCutAfterSNI exists is that the previous implementation
+// never checked that the two agreed.
+func firstRecordEnd(b []byte) int {
+	if len(b) < tlsHeaderLen || b[0] != tlsRecTypeHandshake {
+		return 0
+	}
+	return int(binary.BigEndian.Uint16(b[3:5]))
+}
+
+const (
+	tlsHeaderLen        = 5
+	tlsRecTypeHandshake = 0x16
+)

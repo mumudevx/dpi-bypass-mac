@@ -1,0 +1,102 @@
+# global.toml — the conservative base every profile is layered on top of.
+#
+# Every value here is traceable to a first-hand measurement in
+# docs/MEASUREMENTS.md, to a verified system fact, or to an explicit dossier
+# item. Where a number is not measurable it says so.
+#
+# This file is decoded over config.Defaults() with unknown-key rejection, so a
+# key that this build does not read cannot be written here — which is the
+# structural fix for the previous implementation's `sni_match` setting, declared
+# and documented and read nowhere (MEASUREMENTS.md 3.5).
+
+profile = "global"
+
+# watch = connect plain, escalate only on a reset before any server byte reaches
+# the client. MEASUREMENTS.md 5.2: "not an optimisation but a correctness
+# requirement" — 10 of the 41 hosts probed in 5.1 break under the emitter that
+# defeats the DPI, and all ten are banks or .gov.tr.
+mode = "watch"
+
+listen = "127.0.0.1"
+port = 8080
+socks_port = 1080
+
+# both = auto-proxy URL + launchctl setenv. The PAC covers CFNetwork and
+# Chromium/Electron; the environment covers reqwest/curl/Go/Python/Node, which
+# GT24's otool/strings work shows is what Discord's updater.node actually reads.
+proxy_style = "both"
+
+# off in proxy mode: a proxied client hands us the name inside CONNECT, so DNS
+# needs no system mutation at all. That keeps the unprivileged blast radius at
+# two reversible settings.
+set_dns = false
+dns_port = 5353
+
+# No forced strategy. The ladder decides, per host, from evidence.
+strategy = ""
+
+# The measured TR ladder, even here. It is the only ladder this project has
+# first-hand data for; the "global" ladder in internal/strategy is a structural
+# guess and is selected by name only when an operator asks for it.
+ladder = "tr"
+
+max_attempts = 5
+attempt_budget = "5s"
+
+# DOSSIER 3: "Cap segments at 16." The XNU small-write guard.
+max_segments = 16
+
+# MEASUREMENTS.md 1: the measured block is SNI-keyed on 443. Port 80 carries the
+# hostcase/hostdot mutators.
+inspect_ports = [443, 80]
+
+# DOSSIER 2's corrected relay: readFirstMessage(client, 250ms, 64*1024). 250 ms
+# is ~11x the 22 ms RST latency of 6 and well inside a mail or FTP greeting.
+first_byte_wait = "250ms"
+complete_wait = "250ms"
+max_assembly = "2s"
+first_msg_max = 65536
+
+# Idle relay reaping. A sizing choice, not a measurement: long enough for a
+# browser to hold a keep-alive tunnel open between page loads, short enough that
+# a laptop that slept does not keep hundreds of dead sockets.
+idle_timeout = "120s"
+
+# UNMEASURED. GT13 gives no threshold for the XNU small-write panic and the
+# panic is destructive to reproduce. The primary emitter (tlsfrag) is one write
+# and can never reach the governor, so the exposure is confined to ladder rungs
+# 3-4. This is a guard, not a calibration.
+small_write_rate = 512
+small_write_burst = 64
+
+learn = true
+verdict_cache_cap = 4096
+
+# The compiled-in bypass list lives in internal/config/excludes.go, where it is
+# Go data that a config file can add to and cannot remove from. Anything here is
+# an addition on top of it.
+bypass = []
+include = []
+
+[dns]
+# "default" is resolve.DefaultEndpoints(), the chain measured in
+# MEASUREMENTS.md 2 and GT4. It is referenced rather than retyped so there is
+# exactly one copy of those addresses in the tree.
+chain = "default"
+
+# Structurally false. MEASUREMENTS.md 2: both `dig +tcp @8.8.8.8` and
+# `dig +tcp -p 1253 @77.88.8.8` are connection-reset on this line, so a
+# truncation fallback over TCP/53 fails for exactly the names this tool exists
+# to reach. Setting it true is a load error, not a fallback.
+allow_tcp53 = false
+
+# auto suppresses AAAA only on positive evidence. GT19 records a BTK-registered
+# IPv6 sinkhole, but blanket suppression on a 464XLAT carrier is a total outage.
+aaaa = "auto"
+
+# The chain has five rungs and walks them serially, so this bounds the worst
+# case at five times this value when every transport is dropped.
+per_try = "4s"
+
+prepend_doh = []
+prepend_udp = []

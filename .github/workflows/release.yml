@@ -1,0 +1,80 @@
+name: release
+
+# Cutting a release is one step: push a tag.
+#
+#   git tag -a v0.1.0 -m 'v0.1.0' && git push origin v0.1.0
+#
+# Two things must exist first, once, before that step works:
+#
+#   1. The repository github.com/mumudevx/homebrew-tap. An empty repository is
+#      enough; GoReleaser creates Formula/dpb.rb inside it.
+#   2. A repository secret named HOMEBREW_TAP_TOKEN, holding a fine-grained
+#      personal access token with Contents: read and write on that tap
+#      repository. The default GITHUB_TOKEN cannot write to another repository.
+#
+# Without the secret the release itself still succeeds and the archives, the
+# checksums and the generated formula are all published; only the push to the
+# tap is skipped, and Formula/dpb.rb in this repository is then the copy to
+# fill in by hand.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.26.4"
+
+jobs:
+  release:
+    # macOS, not Linux: most of this tree is GOOS=darwin only, and the tests
+    # below are the gate on whether the tag ships at all.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser needs the tag history for the changelog
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # A tag that does not pass its own tests must not become a release
+      # someone installs with one command.
+      - name: test (race)
+        run: go test ./... -race
+
+      - name: cover-gate
+        run: make cover-gate
+
+      - name: decide whether the tap can be published
+        id: tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$TAP_TOKEN" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; the release will be published but the Homebrew tap will not be updated."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          # Pinned to the v2 line on purpose: `brews` (a Homebrew *formula*, as
+          # opposed to a cask) is deprecated in v2.10 but still supported, and
+          # a cask would be quarantined by Homebrew on download. See the note
+          # in .goreleaser.yaml.
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty when the secret is unset. GORELEASER_SKIP_BREW is what stops
+          # goreleaser from trying to push into the tap without it; see
+          # brews[].skip_upload in .goreleaser.yaml.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GORELEASER_SKIP_BREW: ${{ steps.tap.outputs.skip }}

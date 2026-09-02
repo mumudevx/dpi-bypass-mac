@@ -1,0 +1,55 @@
+# turkey.toml — Türk Telekom AS9121, measured 2026-09-02.
+#
+# This profile is layered over global.toml. It only names what differs, so a
+# value not repeated here is global.toml's and is documented there.
+#
+# It is the only profile whose numbers were measured rather than reasoned about.
+# docs/MEASUREMENTS.md 4 is explicit that Superonline, Vodafone, Turknet and
+# every mobile network are unmeasured, and 3.4 shows efficacy is non-monotonic
+# within one ISP on one day — which is why there is no turkey-superonline.toml
+# and never will be. `dpb tune` running on the user's own line is the
+# ISP-specific knowledge.
+
+profile = "turkey"
+
+# The measured ladder, MEASUREMENTS.md 5.3, resolved from internal/strategy so
+# the rungs are not retyped here:
+#
+#   1. ""                   plain      0/6 bypass · 8/8 controls · 20/20 fragile
+#   2. tlsfrag:pos=snimid   3.2/5.1    6/6 bypass · 8/8 controls ·  1/20 fragile
+#   3. chunk:size=12        3.4/5.1    6/6 bypass · 8/8 controls · 14/20 fragile
+#   4. oob:pos=1            3/5.1      6/6 bypass · 6/8 controls ·  0/20 fragile
+#
+# Not in it, and why: chunk:size=5 is FAIL in 3.4 run A (it is SpoofDPI's number
+# and 3.5 warns that parameters are not portable); every plain TCP split is 0/5
+# because the DPI reassembles TCP (3.1); disorder is 0/10 (3.5);
+# tlsevery:period=256 is 0/3, consistent with the record rule.
+ladder = "tr"
+
+# The chain of MEASUREMENTS.md 2 and GT4, in measured order: DoH cloudflare-dns
+# (bootstrap 1.1.1.1/1.0.0.1), DoH dns.google (8.8.8.8/8.8.4.4), DoT 9.9.9.9:853,
+# UDP 77.88.8.8:1253, UDP 9.9.9.9:9953. The addresses live in
+# resolve.DefaultEndpoints(), which is pinned by a test; duplicating them into
+# TOML would create a second copy to keep in step.
+#
+# The poison sentinels are compiled in the same way: 195.175.254.2 (2, the ISP
+# resolver's answer for every blocked name) and 2a01:358:4014:a00::3 (GT19, RIPE
+# netname BTK) are resolve.DefaultSinkholes, which flow and probe share.
+[dns]
+chain = "default"
+
+# The prober's seed targets, MEASUREMENTS.md 1. media.discordapp.net (401) and
+# discord.media (520) are deliberately NOT here: both reach the origin, and
+# seeding them would make `dpb tune` chase a block that does not exist.
+#
+# fragile is left empty on purpose. It defaults to config.FragileHosts(), which
+# is the ten measured regressors from the compiled-in bypass list, so the
+# compatibility axis and the never-desync list cannot drift apart.
+[prober]
+blocked = ["discord.com", "discord.gg", "cdn.discordapp.com"]
+control = "cloudflare.com"
+control_addr = "162.159.128.233"
+fragile = []
+reps = 3
+cooldown = "400ms"
+concurrency = 4

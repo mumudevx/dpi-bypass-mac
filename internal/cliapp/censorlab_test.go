@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -157,3 +158,7 @@ func exportOriginCA(t *testing.T, o *testcensor.Origin) string {
 }
 
 func (l *censorLab) portArg() string { return strconv.Itoa(l.port()) }
+
+// loopbackPrefix is every address the fixture can dial, which is what makes
+// testcensor.IPBlock model an address-level block here.
+func loopbackPrefix() netip.Prefix { return netip.MustParsePrefix("127.0.0.0/8") }

@@ -29,6 +29,10 @@ const (
 	exitDoctor   = 3 // a doctor check failed
 	exitNeedRoot = 4 // the requested mode needs root
 	exitRefused  = 5 // refused for safety: VPN owns the default route, captive portal, IP-level block
+	// 6 is `dpb tune` finding nothing blocked on this line. It is a code of its
+	// own because 4 already means "needs root", and a script that branched on 4
+	// could not tell "re-run with sudo" from "there is nothing to measure".
+	exitNothingBlocked = 6
 )
 
 // teardownBudget is how long a panic- or signal-driven revert gets. It runs on

@@ -1,0 +1,172 @@
+# GoReleaser configuration for dpb.
+#
+# It builds darwin/arm64 and darwin/amd64, publishes a GitHub release with a
+# checksums file, and updates the Homebrew formula in mumudevx/homebrew-tap.
+#
+# Three things are deliberately absent.
+#
+#   1. No codesign hook. Go's own linker ad-hoc signs every darwin/arm64 binary
+#      host-independently — NeedCodeSign() is `ctxt.IsDarwin() && ctxt.IsARM64()`
+#      with no host check — so Apple Silicon's kill-on-unsigned requirement is
+#      already satisfied by `go build` alone. Verified on a plain `go build` of
+#      this tree: `codesign -dv ./dpb` reports
+#      `flags=0x20002(adhoc,linker-signed)` and `Signature=adhoc`. A `codesign
+#      -s -` hook would change nothing and would create the false belief that
+#      releases cannot be cut from a Linux runner.
+#
+#   2. No notarization and no Apple Developer account. Homebrew downloads with
+#      curl, and curl sets no com.apple.quarantine attribute, so a formula-
+#      installed CLI is never Gatekeeper-evaluated. Verified on this machine
+#      (macOS 26.3.1, Homebrew 6.0.18): every brew-installed binary checked
+#      carries only com.apple.provenance, and `xattr -p com.apple.quarantine`
+#      answers "No such xattr".
+#
+#   3. No universal binary. Two per-architecture archives are what the formula's
+#      on_arm / on_intel blocks want, and lipo would only add a step whose one
+#      job — preserving the signature — is not needed given (1).
+#
+# See docs/DOSSIER.md for the sources behind (1) and (2).
+
+version: 2
+
+project_name: dpb
+
+before:
+  hooks:
+    # `go mod tidy` is deliberately NOT run here. CI already asserts that tidy
+    # is a no-op, so running it during a release can only mutate the tree the
+    # tag points at.
+    - go mod download
+
+builds:
+  - id: dpb
+    main: ./cmd/dpb
+    binary: dpb
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - arm64
+      - amd64
+    flags:
+      - -trimpath
+    # These are the variables internal/buildinfo reads; `dpb version` falls
+    # back to the VCS stamp when they are empty, so a mistyped path here shows
+    # up as a version of "dev" rather than as a build failure. The Makefile
+    # sets the same three.
+    ldflags:
+      - -s -w
+      - -X github.com/mumudevx/dpi-bypass-mac/internal/buildinfo.Version={{.Version}}
+      - -X github.com/mumudevx/dpi-bypass-mac/internal/buildinfo.Commit={{.FullCommit}}
+      - -X github.com/mumudevx/dpi-bypass-mac/internal/buildinfo.Date={{.CommitDate}}
+    # Reproducible archives: without this the mtimes are the build time, so two
+    # builds of one tag produce two different sha256 values and the formula
+    # below cannot be checked by anyone but the person who cut the release.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: dpb
+    ids:
+      - dpb
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# A formula, not a cask, even though GoReleaser deprecated `brews` in favour of
+# `homebrew_casks` in v2.10.
+#
+# Homebrew Cask deliberately quarantines what it downloads — Homebrew 6.0.18's
+# Library/Homebrew/cask/download.rb calls quarantine() on the downloaded path,
+# which is what `--no-quarantine` exists to switch off. That would turn an
+# install that Gatekeeper never evaluates into one that it does, for a binary
+# with no Apple Developer identity behind it. Formulae and bottles are not
+# quarantined, and the September 2026 cask delisting applies to homebrew-cask
+# only. So this stays a formula until `brews` is actually removed; pin
+# goreleaser to the v2 line (the release workflow does).
+brews:
+  - name: dpb
+    ids:
+      - dpb
+    repository:
+      owner: mumudevx
+      name: homebrew-tap
+      # A cross-repository push needs a token with write access to the tap;
+      # the workflow's default GITHUB_TOKEN is scoped to this repository only.
+      # The `index .Env` form is the documented way to tolerate an unset
+      # variable: a bare {{ .Env.X }} fails the whole release when X is absent.
+      token: '{{ if index .Env "HOMEBREW_TAP_TOKEN" }}{{ .Env.HOMEBREW_TAP_TOKEN }}{{ end }}'
+    # Publishing to the tap is opt-in. The default is to skip it, so a local
+    # `goreleaser release` — or a release run before the tap token exists —
+    # still produces the archives, the checksums and dist/homebrew/Formula/dpb.rb
+    # without trying to push into a repository it has no credentials for. The
+    # release workflow sets this to false once it has seen the token.
+    skip_upload: '{{ if index .Env "GORELEASER_SKIP_BREW" }}{{ .Env.GORELEASER_SKIP_BREW }}{{ else }}true{{ end }}'
+    directory: Formula
+    homepage: "https://github.com/mumudevx/dpi-bypass-mac"
+    description: "macOS DPI bypass: connects plain first, desyncs only on evidence"
+    license: "MIT"
+    commit_author:
+      name: goreleaser
+      email: noreply@github.com
+    install: |
+      bin.install "dpb"
+    # Asserting on the version, not on the word "dpb": a formula still pointing
+    # at the previous release's bottle would pass the weaker test. `dpb
+    # strategy list` then proves the binary does more than print its own name,
+    # and it touches no network, no system setting and no privileged
+    # interface, so it is safe inside brew's sandbox.
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/dpb version")
+      assert_match "tlsfrag", shell_output("#{bin}/dpb strategy list")
+    # No `service` block. Homebrew's would write a second LaunchAgent
+    # (homebrew.mxcl.dpb) running the same binary as the one `dpb service
+    # install` writes (com.mumudevx.dpb). Two supervisors racing to bind the
+    # same port and to set and restore the same system proxy setting is a
+    # failure this tool must not ship: whichever loses the port exits, and its
+    # teardown restores the proxy the winner had just set.
+    caveats: |
+      dpb needs no root in proxy mode. Start it in the foreground with:
+
+        dpb run
+
+      To keep it running across logins, use dpb's own launchd installer rather
+      than `brew services` — it writes one job, com.mumudevx.dpb, and knows
+      where to put its logs:
+
+        dpb service install
+        dpb service status
+
+      Measure your own line before trusting any profile:
+
+        dpb tune
+
+release:
+  github:
+    owner: mumudevx
+    name: dpi-bypass-mac
+  prerelease: auto
+  footer: |
+    ---
+
+    Install:
+
+        brew tap mumudevx/tap
+        brew install dpb
+
+    Verify what you downloaded against `checksums.txt` before running it.
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
