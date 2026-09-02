@@ -180,6 +180,12 @@ func (p *aaaaPolicy) decide(ctx context.Context, served bool) (bool, string) {
 // A nil predicate reads as reachable: this gate withholds addresses, so an
 // unwired predicate must not be the thing that suppresses a whole family.
 func (p *aaaaPolicy) v6Reachable() bool {
+	// A run that is carrying IPv6 has, by definition, a path for it: the utun
+	// holds the address and the capture routes are installed. So protection
+	// implies reachability, and only an unprotected run has to ask the host.
+	if p.v6Protected() {
+		return true
+	}
 	if p.v6Host == nil {
 		return true
 	}

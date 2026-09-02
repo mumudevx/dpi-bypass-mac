@@ -110,7 +110,10 @@ func recordingResolver(t *testing.T, addrs ...netip.Addr) (*fakeResolver, func()
 func TestChainServedAAAAIsSuppressedWithoutACapture(t *testing.T) {
 	t.Parallel()
 	up, asked := recordingResolver(t, netip.MustParseAddr("2606:4700::1111"))
-	c := fastChain(t, Options{Resolvers: []Resolver{up}, AAAA: AAAAAuto, V4Path: alwaysTrue})
+	// V6Host is pinned so the subject stays the served-vs-own gate rather than
+	// whether the machine running the test has IPv6.
+	c := fastChain(t, Options{Resolvers: []Resolver{up}, AAAA: AAAAAuto, V4Path: alwaysTrue,
+		V6Host: alwaysTrue})
 
 	ans, err := c.ExchangeServed(context.Background(), mustQuery(t, "discord.com", dns.TypeAAAA))
 	if err != nil {

@@ -354,6 +354,9 @@ func TestChainAAAAAutoWaitsForEvidence(t *testing.T) {
 		Resolvers: []Resolver{poisoned, clean},
 		AAAA:      AAAAAuto,
 		V4Path:    func() bool { return true },
+		// Pinned: the subject is poison evidence, not whether the machine
+		// running the test can reach IPv6.
+		V6Host: func() bool { return true },
 	})
 
 	// Before any evidence, AAAA flows normally.
