@@ -11,6 +11,55 @@ milestones are built in parallel against these signatures.
 Evidence base: `DOSSIER.md` (research) and `MEASUREMENTS.md` (first-hand measurement).
 Where they disagree, MEASUREMENTS.md wins.
 
+---
+
+## Amendments — read these before the sections they amend
+
+The plan below was written before wave 1 was implemented and reviewed. Building it
+proved eight of its clauses wrong. Where an amendment here contradicts the body of
+the plan, the amendment wins; where it contradicts `MEASUREMENTS.md`, the
+measurement wins.
+
+Amendments A1-A8 come from the wave 1 adversarial review. A9 records what wave 1
+actually shipped.
+
+**A1.** §3.4 / ladder tables: PLAN records chunk:size=4 as a 6/6 bypass, but MEASUREMENTS.md measured a chunk-everything emitter and the shipped op is capped at 16 segments. The plan must state the geometry a chunk parameter implies — 'the chunked prefix must extend past BodyOff+SNIEnd' — and drop sizes 1..8 from the tr and global ladders and from the probe-full sweep, or raise the chunk segment budget. As written it invites exactly the parameter-portability error §3.5 warns about.
+
+**A2.** tune phase 3: the tlspad SNI sweep (300/600/1200/1500) is impossible for a byte relay — rewriting the ClientHello desynchronises the client's own TLS transcript, so every value returns failure regardless of the DPI. Respecify the inspection-depth probe as a low-TTL padded DECOY followed by the real unmodified hello, or delete it.
+
+**A3.** §Phase 3 classifier: 'split:pos=snimid (2 TCP segments, hostname straddled)' assumes payload-absolute anchor semantics that the code does not implement. Either the plan states the coordinate system explicitly or the classifier's conclusion ('the DPI does not reassemble TCP') is unsound as written.
+
+**A4.** Verification contract: PLAN.md:1501 row 2 specifies `launchctl getenv` as the verification for launchctl setenv, which contradicts manager.go:52's blanket 'Verify MUST read through a different subsystem'. Reconcile — either carve out an explicit, documented exception with the reason, or specify a real second observer.
+
+**A5.** 'Every exit path' teardown table: the specified behaviour (teardown on a fresh context.Background() with a 10 s budget, reverse order, second Ctrl-C within 3 s force-exits and prints the journal path) is not implemented at all and the omission is undeclared. Either implement it in M11 or amend the table to say when it lands.
+
+**A6.** §1836 killfuzz: the fuzzer's subject `dpb run --dry-run` does not exist until M11, so the journal's crash-durability guarantee has no evidence today. Mark the killfuzz-against-netstate step explicitly as M11 work rather than implying M6 satisfies it.
+
+**A7.** quicfake / SegFakeRaw: the plan lists a UDP/QUIC desync capability, but M4 and M5 left the segment-kind contract unreconciled and the op cannot emit on any transport. Decide the contract in the plan (decoy datagrams are ordinary writes on a connected socket with a lowered hop limit, as byedpi does) before the UDP datapath is built.
+
+**A8.** Verdict lifetime: the plan's 'plain works is self-revalidating at no cost' rationale is false once policy rewrites SrcLearnedPlain to ScopeDirect — the ladder is never invoked again, so it cannot revalidate. The plan should specify a TTL for learned-plain equal to the desync TTL, and specify that flow must refuse to record a plain win against a known sinkhole or a TLS alert, matching what probe already does.
+
+**A9. What wave 1 shipped, against what this plan specifies.**
+
+- The TR ladder is four rungs, not five: `["", "tlsfrag:pos=snimid",
+  "chunk:size=12", "oob:pos=1"]`. `global` is `["", "tlsfrag:pos=snimid",
+  "tlsevery:period=64", "chunk:size=12"]`. `chunk:size=4` is refused by the
+  emitter and is gone from both, per A1.
+- `flow.LadderRunner` distinguishes the commit guard from the evidence guard.
+  Any upstream byte still commits the connection; only a byte that is evidence
+  of a working handshake feeds the verdict store. A TLS alert, bytes returned
+  with a non-timeout error, or a peer in the sinkhole set are handed over and
+  cached as nothing.
+- A learned-plain verdict carries `LearnedPlainTTL`, equal to the desync TTL.
+  The plan's rationale that it is "self-revalidating at no cost" is false, per A8.
+- `probeChain` takes an optional ranker rather than ranking unconditionally, so
+  the chain's composition can be asserted without a live network.
+- Two build gates are stricter than the plan describes: the dial gate rejects
+  `net.Resolver` and any non-literal address expression outside
+  `internal/resolve` unless recorded with a written review, and the
+  no-plaintext-TCP-DNS gate is scoped to the enclosing function rather than the
+  file, so a plaintext stream client added beside an encrypted one is caught.
+
 
 ---
 
