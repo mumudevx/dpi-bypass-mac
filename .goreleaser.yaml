@@ -99,9 +99,16 @@ brews:
       name: homebrew-tap
       # A cross-repository push needs a token with write access to the tap;
       # the workflow's default GITHUB_TOKEN is scoped to this repository only.
-      # The `index .Env` form is the documented way to tolerate an unset
-      # variable: a bare {{ .Env.X }} fails the whole release when X is absent.
-      token: '{{ if index .Env "HOMEBREW_TAP_TOKEN" }}{{ .Env.HOMEBREW_TAP_TOKEN }}{{ end }}'
+      #
+      # This field takes `{{ .Env.NAME }}` and NOTHING else — goreleaser
+      # validates the shape and rejects any conditional or surrounding text
+      # with "expected {{ .Env.VAR_NAME }} only (no plain-text or other
+      # interpolation)". The v0.1.0 release failed here after publishing its
+      # archives, so the guard that used to live in this line has to live
+      # somewhere else. It does: the workflow always defines the variable (as
+      # the empty string when the secret is unset), so the lookup resolves, and
+      # skip_upload below is what actually decides whether the push happens.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     # Publishing to the tap is opt-in. The default is to skip it, so a local
     # `goreleaser release` — or a release run before the tap token exists —
     # still produces the archives, the checksums and dist/homebrew/Formula/dpb.rb
