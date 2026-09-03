@@ -41,15 +41,23 @@ Full numbers: [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md).
 
 ```sh
 brew tap mumudevx/tap
+brew trust mumudevx/tap
 brew install dpb
 ```
 
-> **Status.** This works from the `v0.1.0` release onward. If `brew tap`
-> returns a 404, that release has not been cut yet — build from source below.
-> The tap and the release are the only two pieces of this that live outside
-> the repository, and neither has been exercised end to end by anyone yet, so
-> treat the first install as unproven and check `dpb version` against the tag
-> you expected.
+The middle line is not optional on Homebrew 6.x, which refuses to load a
+formula from a third-party tap until the tap is trusted:
+
+```
+Error: Refusing to load formula mumudevx/tap/dpb from untrusted tap mumudevx/tap.
+```
+
+> **Status.** Installed and run end to end on macOS 26.3.1 / Homebrew 6.0.18,
+> Apple Silicon, from the `v0.1.0` release: `dpb 0.1.0 (b3c9bcce65ed)`, and
+> `dpb probe --host discord.com --strategy tlsfrag:pos=snimid` passes on a live
+> Türk Telekom line while the same probe with no strategy is reset. Intel has
+> not been tried — the amd64 archive is built and published but nobody has run
+> it. Check `dpb version` against the tag you expected.
 
 A brew-installed `dpb` is never evaluated by Gatekeeper, and this is not luck:
 Homebrew downloads formulae with `curl`, and `curl` sets no
@@ -162,8 +170,9 @@ the numbers:
 - The censor models in `internal/testcensor` are hypotheses about how the DPI
   works. The test suite proves the code matches the model. It cannot prove the
   model matches the middlebox.
-- Whether the Homebrew tap installs cleanly on a machine that is not this one
-  has not been checked by anyone yet.
+- The Homebrew install has been exercised on exactly one machine, the one this
+  was developed on. A clean machine, an Intel Mac, and an older Homebrew that
+  has no `brew trust` have all not been tried.
 
 ## Development
 
