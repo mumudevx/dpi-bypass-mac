@@ -3,6 +3,7 @@ package ops
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -32,7 +33,21 @@ func FuzzPlanPreservesPayload(f *testing.F) {
 	f.Add([]byte{}, 443, 4)
 
 	r := NewRegistry()
-	specs := fuzzSpecs()
+	// Drop specs naming an op that is registered but can never work here.
+	// Asking for one is supposed to produce a cited refusal, so a rejected op
+	// in this list makes the fuzzer fail on correct behaviour — which is how
+	// tlspad broke it after being rejected for desynchronising the client's
+	// TLS transcript. Filtering mechanically means the list cannot rot again.
+	var specs []string
+	for _, spec := range fuzzSpecs() {
+		if _, err := r.Get(spec); errors.Is(err, strategy.ErrOpRejected) {
+			continue
+		}
+		specs = append(specs, spec)
+	}
+	if len(specs) == 0 {
+		f.Fatal("every candidate spec was filtered out; the fuzzer would test nothing")
+	}
 	bud := strategy.DefaultBudget()
 	mutators := map[string]bool{}
 	for _, d := range r.Docs() {

@@ -995,6 +995,13 @@ func isTypedRefusal(err error) bool {
 	for _, sentinel := range []error{
 		strategy.ErrCutAfterSNI, strategy.ErrNeedComplete, strategy.ErrNeedSNI, strategy.ErrNeedHost,
 		strategy.ErrCapUnavailable, strategy.ErrBudget, strategy.ErrBadValue, strategy.ErrOpRejected,
+		// ErrDowngrade belongs here: strict mode refusing to emit a weaker plan
+		// than the spec names is "cannot apply here", not "the emitter is
+		// broken", and the ladder already treats a build error as a skip.
+		// FuzzPlanPreservesPayload found the omission on a 1-byte message,
+		// where oob:pos=1 produces no write boundary at all — two other tests
+		// in this file already assert ErrDowngrade for that exact shape.
+		strategy.ErrDowngrade,
 		ErrNeedQUIC, ErrNotClientHello, ErrAlreadyPadded, ErrNotApplicable,
 	} {
 		if errors.Is(err, sentinel) {
