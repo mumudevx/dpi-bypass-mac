@@ -238,7 +238,8 @@ func (s *Server) upgrade(ctx context.Context, client, up net.Conn, upr *bufio.Re
 	if err := resp.Write(client); err != nil {
 		return err
 	}
-	return s.relay(ctx, client, &bufConn{Conn: up, r: upr}, nil, nil)
+	_, rerr := s.relay(ctx, client, &bufConn{Conn: up, r: upr}, nil, nil)
+	return rerr
 }
 
 // hostOf is the authority the request is addressed to. RFC 9112 says the Host
