@@ -77,7 +77,7 @@ those would change anything above.
 ### From source
 
 ```sh
-git clone https://github.com/mumudevx/dpb
+git clone https://github.com/mumudevx/dpi-bypass-mac
 cd dpi-bypass-mac
 make build        # -> ./dpb
 ```

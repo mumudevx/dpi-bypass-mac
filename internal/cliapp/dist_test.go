@@ -149,8 +149,13 @@ func TestFormulaURLsMatchTheArchivesTheReleaseWillPublish(t *testing.T) {
 	}
 
 	for i, arch := range []string{"arm64", "amd64"} {
+		// The Go module path is github.com/mumudevx/dpb, but the GitHub repository
+		// slug is still github.com/mumudevx/dpi-bypass-mac — they diverged when we
+		// renamed the module as preparation for Windows support, but the repository
+		// itself was not renamed. The formula URL must follow .goreleaser.yaml's
+		// release.github.name, which points to the actual repository location.
 		want := fmt.Sprintf(
-			"https://github.com/mumudevx/dpb/releases/download/v%s/%s.tar.gz",
+			"https://github.com/mumudevx/dpi-bypass-mac/releases/download/v%s/%s.tar.gz",
 			version, renderArchiveName(tmpl, project, version, arch))
 		if urls[i][1] != want {
 			t.Errorf("formula url %d:\n got %s\nwant %s", i, urls[i][1], want)
