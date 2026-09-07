@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/buildinfo"
 )
 
 // The distribution files are three documents that have to agree with each
@@ -48,7 +48,7 @@ func findAll(t *testing.T, body, pattern string) [][]string {
 // buildinfo breaks this test's compilation.
 func TestReleaseConfigStampsTheVariablesVersionPrints(t *testing.T) {
 	t.Parallel()
-	const pkg = "github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
+	const pkg = "github.com/mumudevx/dpb/internal/buildinfo"
 
 	stamped := map[string]*string{
 		"Version": &buildinfo.Version,
@@ -150,7 +150,7 @@ func TestFormulaURLsMatchTheArchivesTheReleaseWillPublish(t *testing.T) {
 
 	for i, arch := range []string{"arm64", "amd64"} {
 		want := fmt.Sprintf(
-			"https://github.com/mumudevx/dpi-bypass-mac/releases/download/v%s/%s.tar.gz",
+			"https://github.com/mumudevx/dpb/releases/download/v%s/%s.tar.gz",
 			version, renderArchiveName(tmpl, project, version, arch))
 		if urls[i][1] != want {
 			t.Errorf("formula url %d:\n got %s\nwant %s", i, urls[i][1], want)

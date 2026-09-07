@@ -14,9 +14,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // `dpb coverage` answers "is anything actually going through this?"

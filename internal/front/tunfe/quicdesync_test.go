@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/strategy"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // QUICDesync, the third policy: emit the Initial through a UDP strategy instead

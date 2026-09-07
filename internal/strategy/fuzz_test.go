@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // A spec is a wire format: the prober serialises it, the verdict store caches

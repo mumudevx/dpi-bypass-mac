@@ -213,7 +213,7 @@ Expected: no output from `git status`; every package `ok` or `no test files`.
 - [ ] **Step 2: Rewrite the module path**
 
 ```bash
-OLD=github.com/mumudevx/dpi-bypass-mac
+OLD=github.com/mumudevx/dpb
 NEW=github.com/mumudevx/dpb
 grep -rl "$OLD" --include='*.go' --include='go.mod' --include='Makefile' \
   --include='*.yaml' --include='*.yml' --include='*.md' . \

@@ -11,12 +11,12 @@ import (
 
 	"net/netip"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/ops"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/ops"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/strategy"
+	"github.com/mumudevx/dpb/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // hello returns a captured ClientHello and its parse, which is what a front end

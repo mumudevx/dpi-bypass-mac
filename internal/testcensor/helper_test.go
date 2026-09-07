@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // clientHello captures a genuine ClientHello for name from crypto/tls.

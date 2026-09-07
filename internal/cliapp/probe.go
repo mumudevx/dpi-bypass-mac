@@ -15,11 +15,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/ops"
-	"github.com/mumudevx/dpi-bypass-mac/internal/probe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
+	"github.com/mumudevx/dpb/internal/emit"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/ops"
+	"github.com/mumudevx/dpb/internal/probe"
+	"github.com/mumudevx/dpb/internal/resolve"
 )
 
 // probeCooldown separates reps. MEASUREMENTS.md §6 shows the DPI carries no

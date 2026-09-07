@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/probe"
+	"github.com/mumudevx/dpb/internal/probe"
 )
 
 func TestTargetDialPortAndPin(t *testing.T) {

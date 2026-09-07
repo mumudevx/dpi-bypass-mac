@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // TestClassifyCommitGuard is the one table in this package that must never be

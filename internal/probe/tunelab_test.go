@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/ops"
-	"github.com/mumudevx/dpi-bypass-mac/internal/probe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/emit"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/ops"
+	"github.com/mumudevx/dpb/internal/probe"
+	"github.com/mumudevx/dpb/internal/strategy"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 // The seed target sets, verbatim from MEASUREMENTS.md.

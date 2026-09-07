@@ -14,9 +14,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testnet"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/paths"
+	"github.com/mumudevx/dpb/internal/testnet"
 )
 
 // ── a launchd that behaves like the one on this machine ─────────────────────

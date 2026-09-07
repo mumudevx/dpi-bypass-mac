@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // TestUDPRelayPreservesDatagramBoundaries: io.Copy is wrong on this path. A

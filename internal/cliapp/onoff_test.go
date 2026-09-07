@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
+	"github.com/mumudevx/dpb/internal/observ"
 )
 
 func TestOnOffReloadReachTheDaemon(t *testing.T) {

@@ -6,9 +6,9 @@ import (
 	"net"
 	"syscall"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
-	"github.com/mumudevx/dpi-bypass-mac/internal/httpmsg"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/emit"
+	"github.com/mumudevx/dpb/internal/httpmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // Failure is why an attempt ended. Retryable() is the whole point of the type:

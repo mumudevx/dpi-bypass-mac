@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testnet"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/testnet"
 )
 
 // fakeClock puts the two axes under the test's control. testnet.Clock drives

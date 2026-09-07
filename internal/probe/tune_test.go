@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/probe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/probe"
+	"github.com/mumudevx/dpb/internal/resolve"
+	"github.com/mumudevx/dpb/internal/strategy"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 // TestTuneConvergesOnTLSFrag is M13's acceptance clause, run offline.

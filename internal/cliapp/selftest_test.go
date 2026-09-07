@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/ops"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/emit"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/ops"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 // The M12 acceptance clause: `dpb selftest` runs the full censor matrix and

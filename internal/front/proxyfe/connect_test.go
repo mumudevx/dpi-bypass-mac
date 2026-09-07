@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 func openStore(t *testing.T) policy.Store {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
+	"github.com/mumudevx/dpb/internal/resolve"
 )
 
 // Shape is what kind of blocking this line does.

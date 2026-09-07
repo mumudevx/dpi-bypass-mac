@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netstate"
 )
 
 // RIB is an in-memory netstate.RIBReader.

@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // dpb ships for darwin only. This file exists so `GOOS=linux go build ./...` and

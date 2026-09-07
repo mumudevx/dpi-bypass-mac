@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // TestBringUpOrdering pins docs/PLAN.md data path F. The order is not a

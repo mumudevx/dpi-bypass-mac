@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/front/proxyfe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/emit"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/front/proxyfe"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 func TestNewRefusesIncompleteWiring(t *testing.T) {

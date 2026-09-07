@@ -9,7 +9,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
+	"github.com/mumudevx/dpb/internal/resolve"
 )
 
 // DNSOutcome is what one resolver did with one name.

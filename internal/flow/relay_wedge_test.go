@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
+	"github.com/mumudevx/dpb/internal/flow"
 )
 
 // deafPeerPair returns a loopback TCP pair whose far end never reads, plus a

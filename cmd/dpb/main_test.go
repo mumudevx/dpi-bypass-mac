@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/buildinfo"
 )
 
 func TestRunVersion(t *testing.T) {

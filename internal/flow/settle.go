@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // Settle reconsiders what the walk cached, once the relay for that connection

@@ -23,12 +23,12 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/ops"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/ops"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/resolve"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // TestMain installs the op set into the default registry. ops deliberately does

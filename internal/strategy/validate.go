@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // The two ops that cannot share a spec. zapret gates the pair to Linux because

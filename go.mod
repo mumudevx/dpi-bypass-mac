@@ -1,4 +1,4 @@
-module github.com/mumudevx/dpi-bypass-mac
+module github.com/mumudevx/dpb
 
 go 1.26.4
 

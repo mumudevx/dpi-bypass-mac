@@ -14,7 +14,7 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/httpmsg"
+	"github.com/mumudevx/dpb/internal/httpmsg"
 )
 
 type Proto uint8

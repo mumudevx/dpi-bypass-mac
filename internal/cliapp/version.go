@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/buildinfo"
 )
 
 func newVersionCmd(g *globals) *cobra.Command {

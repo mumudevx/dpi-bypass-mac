@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/front/proxyfe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/front/proxyfe"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // upgradeOrigin accepts a protocol upgrade and then echoes, which is the shape

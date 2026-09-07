@@ -5,9 +5,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // TestSettleDropsARungTheRelayProvedBroken is the measured Türk Telekom shape

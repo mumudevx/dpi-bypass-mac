@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // capsStream is what every byte-reframing and byte-scheduling op needs: a

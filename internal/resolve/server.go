@@ -13,7 +13,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
+	"github.com/mumudevx/dpb/internal/flow"
 )
 
 const (

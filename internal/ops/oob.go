@@ -3,7 +3,7 @@ package ops
 import (
 	"fmt"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // oobOp splits the first message and sends one out-of-band (MSG_OOB) junk byte

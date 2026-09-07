@@ -11,7 +11,7 @@
 #   Every release publishes a checksums.txt alongside the archives. The two
 #   values below are the sha256 lines for the darwin archives:
 #
-#     curl -sL https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/checksums.txt
+#     curl -sL https://github.com/mumudevx/dpb/releases/download/v0.1.0/checksums.txt
 #
 #   or compute them from the files themselves:
 #
@@ -44,17 +44,17 @@
 #   set. One supervisor only.
 class Dpb < Formula
   desc "macOS DPI bypass: connects plain first, desyncs only on evidence"
-  homepage "https://github.com/mumudevx/dpi-bypass-mac"
+  homepage "https://github.com/mumudevx/dpb"
   version "0.1.0"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/dpb_0.1.0_darwin_arm64.tar.gz"
+      url "https://github.com/mumudevx/dpb/releases/download/v0.1.0/dpb_0.1.0_darwin_arm64.tar.gz"
       sha256 "REPLACE_WITH_ARM64_SHA256" # from checksums.txt; see the header
     end
     on_intel do
-      url "https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/dpb_0.1.0_darwin_amd64.tar.gz"
+      url "https://github.com/mumudevx/dpb/releases/download/v0.1.0/dpb_0.1.0_darwin_amd64.tar.gz"
       sha256 "REPLACE_WITH_AMD64_SHA256" # from checksums.txt; see the header
     end
   end

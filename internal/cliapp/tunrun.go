@@ -9,12 +9,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/config"
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/front/tunfe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netwatch"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
+	"github.com/mumudevx/dpb/internal/config"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/front/tunfe"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netwatch"
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // TUN mode, wired to the command line.

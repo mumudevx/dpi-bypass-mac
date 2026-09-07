@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // TestHopLimitFallsBackToTheOtherFamily is the dual-stack case in miniature: an

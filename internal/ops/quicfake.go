@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/strategy"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // ErrNeedQUIC means the first message is not a QUIC Initial, so there is no

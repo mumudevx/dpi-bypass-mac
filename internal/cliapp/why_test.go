@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // The M12 acceptance clause: `dpb why www.isbank.com.tr` prints the matched

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // The UDP idle reaper, tested on a fake clock.

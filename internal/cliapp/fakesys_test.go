@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netstate"
 )
 
 // fakeMac is an in-memory macOS: it answers networksetup, scutil and launchctl

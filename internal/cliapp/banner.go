@@ -5,8 +5,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/config"
-	"github.com/mumudevx/dpi-bypass-mac/internal/front/proxyfe"
+	"github.com/mumudevx/dpb/internal/config"
+	"github.com/mumudevx/dpb/internal/front/proxyfe"
 )
 
 // banner is what `dpb run` prints once it is up.

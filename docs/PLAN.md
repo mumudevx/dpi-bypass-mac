@@ -76,7 +76,7 @@ and floors are now the reference, not this document.
 
 ## Decision: what won, what was grafted, what was cut
 
-**Winner: `safety-first` (Verdict — default-direct, learn-then-desync).** Unanimous across all three judges (41 / 43 / 42, first place on every scorecard). It is the only design whose *default connection policy* is, independently, the conclusion `MEASUREMENTS.md` §5.2 reaches: connect plain, escalate only on RST/EOF before any server byte reaches the client, cache both "this needs desync" and "plain works" per host. Given §5.1 — *"No emitter is both a bypass and universally safe"*, with 10 of 41 hosts (every Turkish bank and `.gov.tr` site tested) regressing under the winning emitter — that is not a safety nicety, it is the efficacy architecture. The shipped name stays `dpb` and the module stays `github.com/mumudevx/dpi-bypass-mac`.
+**Winner: `safety-first` (Verdict — default-direct, learn-then-desync).** Unanimous across all three judges (41 / 43 / 42, first place on every scorecard). It is the only design whose *default connection policy* is, independently, the conclusion `MEASUREMENTS.md` §5.2 reaches: connect plain, escalate only on RST/EOF before any server byte reaches the client, cache both "this needs desync" and "plain works" per host. Given §5.1 — *"No emitter is both a bypass and universally safe"*, with 10 of 41 hosts (every Turkish bank and `.gov.tr` site tested) regressing under the winning emitter — that is not a safety nicety, it is the efficacy architecture. The shipped name stays `dpb` and the module stays `github.com/mumudevx/dpb`.
 
 **The one thing no design had, which is now the centre of the plan.** All four judges flagged it: not one design encodes the measured mechanism. `MEASUREMENTS.md` §3.2 gives a *rule*, not a magic number — *"The DPI parses only the first TLS record of a connection as a ClientHello. If the SNI hostname is not complete within that first record, the flow is not matched and passes."* I checked this rule against all 14 measured data points and it explains every one, including the three that look like a different experiment:
 
@@ -386,7 +386,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 type Cap uint32
@@ -592,7 +592,7 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 var ErrCapUnavailable = errors.New("emit: transport lacks a required capability")
@@ -813,10 +813,10 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/emit"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/strategy"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 type MsgKind uint8
@@ -956,7 +956,7 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 type Resolver interface {
@@ -1218,9 +1218,9 @@ import (
 	"io"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/resolve"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 type TargetKind uint8

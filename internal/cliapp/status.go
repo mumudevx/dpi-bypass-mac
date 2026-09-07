@@ -13,12 +13,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
-	"github.com/mumudevx/dpi-bypass-mac/internal/config"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/config"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/paths"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // `dpb status` is the first thing a user types when "nothing works".

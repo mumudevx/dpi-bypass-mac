@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // TestTT2026BlocksPlainHello is the baseline row of MEASUREMENTS.md §3: a plain

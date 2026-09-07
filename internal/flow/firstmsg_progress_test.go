@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
+	"github.com/mumudevx/dpb/internal/flow"
 )
 
 // dribble writes src to c in pieces of the given size, pausing between them,

@@ -16,7 +16,7 @@ import (
 	"errors"
 	"net/netip"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // ErrCapUnavailable is returned when a plan asks a transport for something the

@@ -7,7 +7,7 @@ import (
 
 	wgtun "golang.zx2c4.com/wireguard/tun"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
+	"github.com/mumudevx/dpb/internal/flow"
 )
 
 // The real device. This is the one file in the package that needs root to

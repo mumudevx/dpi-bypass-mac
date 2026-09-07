@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // baselineRetries is how many times a target whose benign-SNI control was not

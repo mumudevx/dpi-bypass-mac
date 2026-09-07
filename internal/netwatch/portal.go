@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
+	"github.com/mumudevx/dpb/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/resolve"
 )
 
 // Portal is the verdict on one probe round.

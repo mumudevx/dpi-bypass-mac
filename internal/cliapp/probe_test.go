@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/probe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/probe"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 type result struct {

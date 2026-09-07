@@ -10,7 +10,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
+	"github.com/mumudevx/dpb/internal/flow"
 )
 
 // AltPort is a plaintext UDP resolver reachable on a port other than 53.

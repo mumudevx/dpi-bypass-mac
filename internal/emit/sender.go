@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // Sender executes a Plan against a Transport. It is stateless per connection and

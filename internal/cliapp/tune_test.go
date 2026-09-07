@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/config"
-	"github.com/mumudevx/dpi-bypass-mac/internal/probe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/config"
+	"github.com/mumudevx/dpb/internal/probe"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 // at pins a hostname to the lab's loopback listener, which is the form

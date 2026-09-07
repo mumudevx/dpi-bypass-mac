@@ -1,5 +1,5 @@
 BINARY  := dpb
-MODULE  := github.com/mumudevx/dpi-bypass-mac
+MODULE  := github.com/mumudevx/dpb
 CMD     := ./cmd/dpb
 DIST    := dist
 

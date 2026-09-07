@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // seedCache writes a store with one desync winner and one "plain works", which

@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/probe"
+	"github.com/mumudevx/dpb/internal/probe"
 )
 
 // TestWilsonRewardsMoreEvidence is the plan's stated reason for choosing this

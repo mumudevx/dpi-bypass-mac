@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // MsgKind is what the first-message reader found on a connection.

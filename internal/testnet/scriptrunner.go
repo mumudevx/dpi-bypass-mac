@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netstate"
 )
 
 //go:embed fixtures/*.txt

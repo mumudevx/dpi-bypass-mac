@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
+	"github.com/mumudevx/dpb/internal/resolve"
 )
 
 // The schema decodes with UNKNOWN-KEY REJECTION, and that is the point of the

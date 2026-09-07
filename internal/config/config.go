@@ -31,9 +31,9 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/resolve"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 //go:embed embed/*.toml

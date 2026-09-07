@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // Sweep depths. The depth changes how much of the measured space is swept and

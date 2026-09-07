@@ -19,12 +19,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
-	"github.com/mumudevx/dpi-bypass-mac/internal/front/tunfe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netwatch"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
+	"github.com/mumudevx/dpb/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/front/tunfe"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netwatch"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // Exit codes, as published in the CLI surface. They are part of the tool's

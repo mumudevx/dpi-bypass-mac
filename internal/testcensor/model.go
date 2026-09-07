@@ -21,7 +21,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // Action is what the modelled middlebox does to a flow it has matched.

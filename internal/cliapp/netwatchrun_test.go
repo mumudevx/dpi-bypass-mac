@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netwatch"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netwatch"
+	"github.com/mumudevx/dpb/internal/paths"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // loggingGlobals is a globals whose warnings land in a buffer.

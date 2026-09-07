@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/buildinfo"
 )
 
 const (
