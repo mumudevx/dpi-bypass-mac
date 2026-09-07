@@ -383,7 +383,7 @@ one day, which is precisely why this project measures instead of reasoning.
 
 ## 11. Module rename
 
-`github.com/mumudevx/dpb` → `github.com/mumudevx/dpb`.
+`github.com/mumudevx/dpi-bypass-mac` → `github.com/mumudevx/dpb`.
 
 The current name becomes false the moment Windows ships. The rename is
 mechanical (all imports are internal), GitHub redirects the old repository path,

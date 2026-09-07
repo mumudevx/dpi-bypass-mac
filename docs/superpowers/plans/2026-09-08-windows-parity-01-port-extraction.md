@@ -213,7 +213,7 @@ Expected: no output from `git status`; every package `ok` or `no test files`.
 - [ ] **Step 2: Rewrite the module path**
 
 ```bash
-OLD=github.com/mumudevx/dpb
+OLD=github.com/mumudevx/dpi-bypass-mac
 NEW=github.com/mumudevx/dpb
 grep -rl "$OLD" --include='*.go' --include='go.mod' --include='Makefile' \
   --include='*.yaml' --include='*.yml' --include='*.md' . \
@@ -262,8 +262,8 @@ EOF
 
 **Files:**
 - Create: `internal/sysport/doc.go`, `internal/sysport/runner.go`
-- Move: `internal/netstate/runner_test.go` → `internal/sysport/runner_test.go` (body unchanged)
-- Move: `internal/netstate/testdata/*.txt` → `internal/sysport/testdata/` (only the fixtures `runner_test.go` reads)
+- **Split** `internal/netstate/runner_test.go` by subject (see the ruling below); create `internal/sysport/runner_test.go`
+- **Copy** all ten `internal/netstate/testdata/*.txt` to `internal/sysport/testdata/`; leave `internal/netstate/testdata/` untouched
 - Modify: `internal/netstate/runner.go` (keeps `newExecRunner`, `newExecRunnerEnv`, `NewExecRunner`, `noRunner`), `internal/netstate/aliases.go` (create), `Makefile:22-38`
 
 **Interfaces:**
@@ -272,21 +272,38 @@ EOF
 
 **Note on the `liars` table.** It moves to `sysport` verbatim, keyed by command basename (`route`, `networksetup`, `ifconfig`, `launchctl`). On Windows those commands never run, so the table is inert — no risk, no test churn. Do **not** make it pluggable in this plan; that is speculative generality until a Windows tool is found that lies.
 
-- [ ] **Step 1: Move the test first, and watch it fail to compile**
+### Ruling: `runner_test.go` splits, it does not move
+
+An earlier draft of this task said to `git mv` the whole file. That is wrong, and the pre-flight scan measured why:
+
+- The file holds **eight tests over two subjects.** Five test `Result`/`liars` and follow them to `sysport`: `TestRouteExitZeroIsFailure`, `TestLiarTable`, `TestLiarTableAgainstCapturedOutputs`, `TestCleanCapturedOutputsAreNotFlagged`, `TestFirstLine`. Three test code this very task **keeps in `netstate`** — `TestExecRunner` and `TestExecRunnerContextCancel` call `NewExecRunner`, and `TestNoRunnerFailsLoudly` calls `noRunner`.
+- It reads **all ten** fixtures, not three.
+- Its `fixture()` helper is used by three other netstate test files that stay put: `ops_test.go`, `scutil_test.go`, `services_test.go`. Moving the file would leave them undefined.
+
+So: split by subject, and **copy** the fixtures rather than moving them. Both packages end up with a `fixture()` helper and a `testdata/` directory. That costs ~2 KB of duplicated text and one duplicated 8-line helper, and it is the price of not editing a test body — which is this plan's hardest gate.
+
+- [ ] **Step 1: Split the test file, and watch the new half fail to compile**
 
 ```bash
 mkdir -p internal/sysport/testdata
-git mv internal/netstate/runner_test.go internal/sysport/runner_test.go
-for f in route_exit0_fail networksetup_error ifconfig_missing; do
-  git mv internal/netstate/testdata/$f.txt internal/sysport/testdata/$f.txt
-done
-sed -i '' 's/^package netstate$/package sysport/' internal/sysport/runner_test.go
+cp internal/netstate/testdata/*.txt internal/sysport/testdata/
+```
+
+Create `internal/sysport/runner_test.go` with `package sysport`, containing — copied **verbatim, not retyped** — the `fixture()` helper and these five tests: `TestRouteExitZeroIsFailure`, `TestLiarTable`, `TestLiarTableAgainstCapturedOutputs`, `TestCleanCapturedOutputsAreNotFlagged`, `TestFirstLine`. Bring each test's doc comment with it; `TestRouteExitZeroIsFailure`'s comment records the Apple `route.c` evidence and is the reason the liar table exists.
+
+Delete exactly those five from `internal/netstate/runner_test.go`, leaving it with `package netstate`, its `fixture()` helper, and `TestExecRunner`, `TestExecRunnerContextCancel`, `TestNoRunnerFailsLoudly`.
+
+```bash
 go test ./internal/sysport/
 ```
 
-Expected: FAIL — `undefined: Result`, `undefined: liars`. That is the point: the test defines what `sysport` must provide.
+Expected: FAIL — `undefined: Result`, `undefined: liars`. That is the point: the test now defines what `sysport` must provide.
 
-If `runner_test.go` reads a fixture not in the three names above, move that one too and note it.
+```bash
+go test ./internal/netstate/ -run 'TestExecRunner|TestNoRunner'
+```
+
+Expected: PASS — the half that stayed still works.
 
 - [ ] **Step 2: Write the package comment**
 
@@ -881,22 +898,22 @@ EOF
 ## Task 7: Prove the Port is fakeable, and wire the composition root
 
 **Files:**
-- Create: `internal/sysport/fake/fake.go` (a recording fake Port for tests)
+- Create: `internal/testport/testport.go` (a recording fake Port for tests)
 - Create: `internal/netstate/op_route_port_test.go` (new test — the first that could not have been written before this plan)
 - Modify: `internal/cliapp/root.go` or wherever `Env` is assembled — set `Sys` explicitly
 
 **Interfaces:**
 - Consumes: everything above
-- Produces: `fake.Port` with recorded calls; `fake.New() *Port`
+- Produces: `testport.Port` with recorded calls; `testport.New() *Port`
 
 **This task is the payoff.** Until now the plan has only moved code. This proves the move bought something: an Op's logic testable with no machine to mutate, which is the only way Plan 3's Windows code gets coverage on a Mac.
 
 - [ ] **Step 1: Write the fake**
 
-Create `internal/sysport/fake/fake.go`. Each controller records what was asked of it and returns a scriptable error, so a test asserts *what the Op requested of the OS* rather than what a tool printed. The route controller — the one Step 2's test drives — is:
+Create `internal/testport/testport.go`. Each controller records what was asked of it and returns a scriptable error, so a test asserts *what the Op requested of the OS* rather than what a tool printed. The route controller — the one Step 2's test drives — is:
 
 ```go
-package fake
+package testport
 
 import (
 	"context"
@@ -970,7 +987,15 @@ A failed call is **not** recorded — that is what lets a test assert "nothing w
 
 - [ ] **Step 1b: Add the fake to the coverage gate exclusion**
 
-`internal/sysport/fake` is test scaffolding, not shipped code. Do **not** add it to `COVER_GATED` — but confirm it is not swept in by the `COVER_GATED_RE` alternation you edited in Task 2. If `sysport` in that regex matches `sysport/fake`, tighten it to `sysport)/` so the subpackage is excluded.
+`internal/testport` is test scaffolding, not shipped code, so it does **not** go in `COVER_GATED`.
+
+It is a *sibling* of `sysport`, not a subpackage, and that is deliberate. `COVER_GATED_RE` is a prefix match: had the fake lived at `internal/sysport/fake/`, the `sysport` alternative added in Task 2 would have matched it too, and the fake's unused methods would sit at 0.0% and fail the gate. A sibling never matches. It also follows the idiom already in this tree — `internal/testnet` and `internal/testcensor` are exactly this: sibling packages holding test doubles.
+
+Confirm it stayed outside the gate:
+
+```bash
+make cover-gate 2>&1 | grep testport || echo "testport not gated — correct"
+```
 
 - [ ] **Step 2: Write a test that was impossible before**
 
@@ -985,14 +1010,14 @@ import (
 	"testing"
 
 	"github.com/mumudevx/dpb/internal/sysport"
-	"github.com/mumudevx/dpb/internal/sysport/fake"
+	"github.com/mumudevx/dpb/internal/testport"
 )
 
 // A failed Add must leave nothing to roll back. The exit-0 "File exists" liar
 // is the common shape: the destination was already owned by somebody else, and
 // issuing the delete anyway would remove their route rather than ours.
 func TestRouteOpDoesNotRollBackAFailedAdd(t *testing.T) {
-	p := fake.New()
+	p := testport.New()
 	p.RouteC.AddErr = errAddFailed
 	op := NewRoute(nil, netip.MustParsePrefix("0.0.0.0/1"), netip.Addr{}, "utun9").(*routeOp)
 
