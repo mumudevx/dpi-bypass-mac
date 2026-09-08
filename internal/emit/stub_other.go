@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !windows
 
 package emit
 
@@ -10,18 +10,19 @@ import (
 	"github.com/mumudevx/dpb/internal/strategy"
 )
 
-// dpb ships for darwin only. This file exists so `GOOS=linux go build ./...` and
-// a cross-platform editor still work, and — more importantly — so the withheld
-// capabilities carry a REASON. A capability that is silently absent is how a
-// strategy gets downgraded without anyone noticing; every error below names the
-// technique, the platform and the fact that the two do not meet here.
+// dpb ships for darwin and windows. This file exists so `GOOS=linux go build
+// ./...` and a cross-platform editor still work, and — more importantly — so
+// the withheld capabilities carry a REASON. A capability that is silently
+// absent is how a strategy gets downgraded without anyone noticing; every
+// error below names the technique, the platform and the fact that the two do
+// not meet here.
 const (
 	sockTTLCaps strategy.Cap = 0
 	oobCaps     strategy.Cap = 0
 )
 
 func reason(what string) string {
-	return fmt.Sprintf("%s is implemented for darwin only; this binary is %s/%s",
+	return fmt.Sprintf("%s is implemented for darwin and windows only; this binary is %s/%s",
 		what, runtime.GOOS, runtime.GOARCH)
 }
 
