@@ -54,6 +54,12 @@ const oobCaps = strategy.CapOOB
 // WSASend's result — including WSAEWOULDBLOCK, on a blocking Winsock socket
 // a genuine and rare error rather than the routine flow-control signal
 // EAGAIN is on Unix — propagate to the caller as-is.
+//
+// This is the SECOND stub of this class this plan has found in Go's own
+// Windows runtime, after syscall.Sendto above: a Unix-shaped API that exists
+// on Windows in name only. Do not "fix" this back to RawConn.Write on the
+// assumption that it must be the more capable choice because it is on
+// darwin — on this platform it is the one with the gap, not the one without.
 func sendOOB(rc syscall.RawConn, b []byte) (int, error) {
 	if rc == nil {
 		return 0, fmt.Errorf("emit: send MSG_OOB: no raw conn")
