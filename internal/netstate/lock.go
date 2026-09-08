@@ -181,6 +181,46 @@ func ReadLock(path string) (LockInfo, error) {
 	return info, nil
 }
 
+// ownerVerdict is what a platform's process query concluded about a pid, with
+// the answer that gets forgotten spelled out as a value: it concluded nothing.
+//
+// Asking the kernel about a process has three outcomes, not two. It is there,
+// it is not there, and the kernel declined to say — the last being ordinary
+// rather than exotic, since a dpb running as SYSTEM or under another desktop
+// user is refused by a query that a same-user dpb is granted.
+//
+// The type exists because the two errors of resolving that third case are not
+// symmetric, and the asymmetry is the whole safety argument of this file:
+//
+//   - Guess "dead" about a LIVE run and OwnerAlive is false, PriorResidue is
+//     true, and Replay reverts that run's proxy, DNS and routes while its user
+//     is browsing through them.
+//   - Guess "alive" about a dead one and a lock record outlives its owner until
+//     `dpb doctor` reports it and the user clears it.
+//
+// So alive() resolves anything short of positive evidence of death in favour of
+// life. Only lock_windows.go builds these verdicts today; the type is here, in
+// the portable file beside OwnerAlive, because the rule belongs to OwnerAlive's
+// contract rather than to one platform's syscalls.
+type ownerVerdict int
+
+const (
+	// ownerUnknown is a query that failed for a reason which says nothing about
+	// whether the process exists: refused for want of rights, or answered with
+	// something unaccounted for.
+	ownerUnknown ownerVerdict = iota
+	// ownerGone is positive evidence of death — the pid names no process, or
+	// the process is known to have exited.
+	ownerGone
+	// ownerPresent is positive evidence of life.
+	ownerPresent
+)
+
+// alive resolves a verdict the way OwnerAlive needs it. Note what it is NOT:
+// `v == ownerPresent`. Writing it that way would fold ownerUnknown into death
+// and cost a live user their network configuration.
+func (v ownerVerdict) alive() bool { return v != ownerGone }
+
 // OwnerAlive reports whether the process that wrote a journal record is still
 // running. It is the default for Replay's ownerAlive argument.
 //

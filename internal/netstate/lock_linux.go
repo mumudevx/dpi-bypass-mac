@@ -41,8 +41,14 @@ func kernelProcessStart(pid int) (time.Time, bool) {
 	if len(fields) <= startTimeIndex {
 		return time.Time{}, false
 	}
+	// Zero is a legitimate value, not a missing one: field 22 counts clock
+	// ticks SINCE BOOT, so a process started in the first jiffy — init, and
+	// anything a very fast boot forks alongside it — records 0 and is as alive
+	// as any other. Rejecting it here would report that process dead, and a
+	// dead owner is what makes Replay revert a live run's networking. A
+	// NEGATIVE count is the only impossible one, and that is what is rejected.
 	ticks, err := strconv.ParseInt(fields[startTimeIndex], 10, 64)
-	if err != nil || ticks <= 0 {
+	if err != nil || ticks < 0 {
 		return time.Time{}, false
 	}
 	boot, ok := bootTime()
