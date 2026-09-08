@@ -14,4 +14,8 @@ type (
 	ProxyState = sysport.ProxyState
 	Facts      = sysport.Facts
 	VPNState   = sysport.VPNState
+	Port       = sysport.Port
+	RouteSpec  = sysport.RouteSpec
+	ProxyKind  = sysport.ProxyKind
+	Caps       = sysport.Caps
 )
