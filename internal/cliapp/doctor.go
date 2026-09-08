@@ -15,13 +15,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
-	"github.com/mumudevx/dpi-bypass-mac/internal/config"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/ops"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
+	"github.com/mumudevx/dpb/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/config"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/ops"
+	"github.com/mumudevx/dpb/internal/paths"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/resolve"
 )
 
 // `dpb doctor` audits the machine and, with --repair, puts it back.
@@ -442,7 +442,7 @@ func checkJournal(layout paths.Layout) check {
 // and is reported as a warning.
 func checkSystemProxy(ctx context.Context, g *globals, running bool) check {
 	c := check{Name: "system proxy", State: stateOK}
-	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf}
+	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf, Sys: g.sysOf()}
 	st, err := netstate.ReadProxyState(ctx, env)
 	if err != nil {
 		c.State = stateWarn
@@ -544,7 +544,7 @@ var proxyEnvVars = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy
 // the coverage story the proxy pane cannot show.
 func checkProxyEnv(ctx context.Context, g *globals, running bool) check {
 	c := check{Name: "proxy environment", State: stateOK}
-	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf}
+	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf, Sys: g.sysOf()}
 
 	var set []string
 	var stale []string
@@ -826,7 +826,7 @@ func runInstallAgent(ctx context.Context, g *globals) error {
 	// Modern verbs only. `launchctl load -w` is deprecated, mutates the user's
 	// overrides database as a side effect, and reports success for a plist it
 	// never actually loaded.
-	env := netstate.Env{Runner: g.runnerOf(), Logf: g.logf}
+	env := netstate.Env{Runner: g.runnerOf(), Logf: g.logf, Sys: g.sysOf()}
 	domain := fmt.Sprintf("gui/%d", layout.UID)
 	_ = env.Runner.Run(ctx, "launchctl", "bootout", domain+"/"+AgentLabel)
 	res := env.Runner.Run(ctx, "launchctl", "bootstrap", domain, path)
@@ -847,7 +847,7 @@ func runRemoveAgent(ctx context.Context, g *globals) error {
 		return err
 	}
 	path := agentPath(layout)
-	env := netstate.Env{Runner: g.runnerOf(), Logf: g.logf}
+	env := netstate.Env{Runner: g.runnerOf(), Logf: g.logf, Sys: g.sysOf()}
 	domain := fmt.Sprintf("gui/%d", layout.UID)
 	// bootout is best effort: the agent may already be gone, and the plist is
 	// the thing that actually has to disappear.

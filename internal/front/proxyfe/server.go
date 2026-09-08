@@ -26,11 +26,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/emit"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // Defaults for the bounds a caller did not set. Every one is a bound, not a
@@ -432,12 +432,14 @@ func judged(v policy.Verdict) bool {
 }
 
 // relay writes the bytes the ladder already read and then joins the two
-// connections.
+// connections. It returns the client-to-upstream byte count, which is what
+// flow.LadderRunner.Settle reads to decide whether the rung it committed to
+// actually carried a handshake.
 //
 // Writing Pre FIRST is not a detail: those are upstream bytes consumed while
 // judging the attempt, and starting the relay without them leaves a hole in the
 // client's stream that no later byte can fill.
-func (s *Server) relay(ctx context.Context, client, up net.Conn, pre []byte, ev *observ.ConnEvent) error {
+func (s *Server) relay(ctx context.Context, client, up net.Conn, pre []byte, ev *observ.ConnEvent) (int64, error) {
 	counted := &countConn{Conn: up}
 	defer func() {
 		if ev != nil {
@@ -448,7 +450,7 @@ func (s *Server) relay(ctx context.Context, client, up net.Conn, pre []byte, ev 
 
 	if len(pre) > 0 {
 		if _, err := client.Write(pre); err != nil {
-			return fmt.Errorf("proxyfe: write buffered upstream bytes: %w", err)
+			return counted.up.Load(), fmt.Errorf("proxyfe: write buffered upstream bytes: %w", err)
 		}
 		counted.down.Add(int64(len(pre)))
 	}
@@ -458,9 +460,9 @@ func (s *Server) relay(ctx context.Context, client, up net.Conn, pre []byte, ev 
 		Logf:      s.o.Logf,
 	})
 	if err != nil && !errors.Is(err, flow.ErrIdle) && ctx.Err() == nil {
-		return err
+		return counted.up.Load(), err
 	}
-	return nil
+	return counted.up.Load(), nil
 }
 
 // newEvent starts a ConnEvent for one client flow.

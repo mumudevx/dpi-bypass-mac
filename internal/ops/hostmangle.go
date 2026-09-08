@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/httpmsg"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/httpmsg"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // The host mutators are the port-80 half of the emitter set. They rewrite the

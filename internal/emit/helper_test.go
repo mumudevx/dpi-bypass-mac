@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // errFakeWrite is what fakeTransport returns when it is told to fail, so a test

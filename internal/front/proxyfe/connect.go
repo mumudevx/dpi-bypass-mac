@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // resolveBudget bounds the pre-flight resolution below. It is generous relative
@@ -108,7 +108,8 @@ func (s *Server) tunnel(ctx context.Context, client net.Conn, t flow.Target,
 			_ = up.Close()
 			return err
 		}
-		return s.relay(ctx, client, up, nil, ev)
+		_, rerr := s.relay(ctx, client, up, nil, ev)
+		return rerr
 	}
 
 	if err := s.precheck(ctx, t.Name); err != nil {
@@ -134,7 +135,8 @@ func (s *Server) tunnel(ctx context.Context, client net.Conn, t flow.Target,
 		if ev != nil {
 			ev.Strategy, ev.Attempts = "", 1
 		}
-		return s.relay(ctx, client, up, nil, ev)
+		_, rerr := s.relay(ctx, client, up, nil, ev)
+		return rerr
 	}
 
 	out, err := s.o.Ladder.Run(ctx, t, v, first, meta, nil)
@@ -147,7 +149,12 @@ func (s *Server) tunnel(ctx context.Context, client net.Conn, t flow.Target,
 	if err != nil {
 		return err
 	}
-	return s.relay(ctx, client, out.Conn, out.Pre, ev)
+	up, rerr := s.relay(ctx, client, out.Conn, out.Pre, ev)
+	// The walk committed on the origin's first byte and cached the rung that
+	// carried it. Only the relay knows whether the handshake behind that byte
+	// ever completed, so it reports back before the flow is forgotten.
+	s.o.Ladder.Settle(t, out.Spec, meta, up)
+	return rerr
 }
 
 // precheck resolves the name before the tunnel is acknowledged.

@@ -15,7 +15,7 @@ import (
 	"net/netip"
 	"strconv"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
+	"github.com/mumudevx/dpb/internal/flow"
 )
 
 // TargetKind is what a target is being probed for.

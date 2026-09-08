@@ -15,20 +15,20 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/config"
-	"github.com/mumudevx/dpi-bypass-mac/internal/emit"
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/front/proxyfe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/front/tunfe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/janitor"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netwatch"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/ops"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/config"
+	"github.com/mumudevx/dpb/internal/emit"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/front/proxyfe"
+	"github.com/mumudevx/dpb/internal/front/tunfe"
+	"github.com/mumudevx/dpb/internal/janitor"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netwatch"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/ops"
+	"github.com/mumudevx/dpb/internal/paths"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/resolve"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // proxyCaps is what an ordinary kernel socket grants in proxy mode. It is a
@@ -404,6 +404,7 @@ func runRun(ctx context.Context, g *globals, cmd *cobra.Command, f runFlags) (er
 		Logf:         g.logf,
 		DryRun:       f.dryRun,
 		PriorResidue: residue,
+		Sys:          g.sysOf(),
 	}
 	env.Facts = g.factsOf(ctx, env)
 

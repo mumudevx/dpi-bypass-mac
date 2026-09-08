@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // sysctlInt reads a sysctl through sysctl(8) — a different reader than the one

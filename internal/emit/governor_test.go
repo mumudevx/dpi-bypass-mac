@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 func TestGovernorGrantsFromTheBurstThenRefillsAtRate(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netstate"
 )
 
 func facts(v netstate.VPNState) *netstate.Facts {

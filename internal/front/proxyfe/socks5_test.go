@@ -7,8 +7,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 // socksConnect performs the SOCKS5 greeting and a CONNECT request for name.

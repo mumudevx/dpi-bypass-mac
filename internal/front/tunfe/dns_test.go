@@ -11,8 +11,8 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/resolve"
 )
 
 // resolverIP is where the machine thinks its DNS lives. In TUN mode that

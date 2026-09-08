@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 // The exit codes are a scripting contract. Two commands that return the same

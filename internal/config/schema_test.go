@@ -94,7 +94,7 @@ func schemaFields(t reflect.Type, prefix string) []schemaField {
 	return out
 }
 
-const configImport = `"github.com/mumudevx/dpi-bypass-mac/internal/config"`
+const configImport = `"github.com/mumudevx/dpb/internal/config"`
 
 func configAwareSources(t *testing.T) map[string]string {
 	t.Helper()

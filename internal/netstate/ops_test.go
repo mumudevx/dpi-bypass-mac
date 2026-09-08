@@ -465,15 +465,6 @@ func TestDNSOpNoServersIsAnError(t *testing.T) {
 	}
 }
 
-func TestParseDNSServersOutput(t *testing.T) {
-	if got := parseDNSServers(fixture(t, "networksetup_dns_none.txt")); len(got) != 0 {
-		t.Fatalf("parsed %v from the 'no servers' sentence", got)
-	}
-	if got := parseDNSServers("1.1.1.1\n8.8.8.8\n"); !reflect.DeepEqual(got, []string{"1.1.1.1", "8.8.8.8"}) {
-		t.Fatalf("parsed %v", got)
-	}
-}
-
 func TestRouteOpInterfaceRoute(t *testing.T) {
 	f := newFakeSystem()
 	f.ifaces["utun4"] = &fakeIface{index: 22, mtu: 1500, up: true}

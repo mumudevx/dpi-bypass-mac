@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/config"
+	"github.com/mumudevx/dpb/internal/config"
 )
 
 func good() config.Tuned {

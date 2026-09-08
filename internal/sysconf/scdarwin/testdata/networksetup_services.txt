@@ -1,0 +1,10 @@
+An asterisk (*) denotes that a network service is disabled.
+(1) Thunderbolt Bridge
+(Hardware Port: Thunderbolt Bridge, Device: bridge0)
+
+(2) Wi-Fi
+(Hardware Port: Wi-Fi, Device: en0)
+
+(3) iPhone USB
+(Hardware Port: iPhone USB, Device: en7)
+

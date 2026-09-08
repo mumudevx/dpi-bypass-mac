@@ -3,7 +3,7 @@ package config
 import (
 	"strings"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // The compiled-in bypass list: names this build will never desync, whatever a

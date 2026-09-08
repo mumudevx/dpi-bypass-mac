@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/buildinfo"
 )
 
 // The exit codes are a contract: scripts and the LaunchAgent branch on them, so

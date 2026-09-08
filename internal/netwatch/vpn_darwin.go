@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netstate"
 )
 
 // ErrFullTunnelVPN is the refuse-for-safety exit: a VPN owns the whole address

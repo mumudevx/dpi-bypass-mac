@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/janitor"
+	"github.com/mumudevx/dpb/internal/janitor"
 )
 
 // The hidden command is what janitor.Spawn actually runs. If its name or its

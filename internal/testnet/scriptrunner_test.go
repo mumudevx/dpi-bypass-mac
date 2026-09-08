@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netstate"
 )
 
 // TestRouteFixtureIsTheCapturedLiar is the load-bearing test of this package.

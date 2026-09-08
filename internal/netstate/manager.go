@@ -18,6 +18,16 @@ type Env struct {
 	Logf   func(string, ...any)
 	DryRun bool
 
+	// Sys is the operating system this run mutates. It is an interface so that
+	// an Op's logic — which routes to install, what to capture before
+	// overwriting, when adoption is allowed — is testable without a machine to
+	// mutate, and identical on every platform.
+	//
+	// It is an addition, not a replacement: Runner and RIB stay, because the
+	// platform default is built from them and because an Op's verifier still
+	// reads the RIB directly.
+	Sys Port
+
 	// SelfIface names the utun this run owns, once it has one. Our own capture
 	// routes are the same 0.0.0.0/1 + 128.0.0.0/1 pair a WireGuard-style VPN
 	// installs, so classifyVPN has to be told which tunnel is ours.
@@ -43,6 +53,17 @@ func (e Env) logf(format string, a ...any) {
 	if e.Logf != nil {
 		e.Logf(format, a...)
 	}
+}
+
+// sys returns the configured Port, or the platform's default built from this
+// Env. The default exists so that an Env assembled the old way — with only a
+// Runner and a RIB — keeps working; every existing caller and test does exactly
+// that, which is why the whole suite passes this refactor unchanged.
+func (e Env) sys() Port {
+	if e.Sys != nil {
+		return e.Sys
+	}
+	return newDefaultPort(e)
 }
 
 // noRunner makes a zero Env fail loudly instead of nil-panicking deep inside an

@@ -15,9 +15,9 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // handleTCP accepts one forwarded TCP connection from the netstack.
@@ -159,7 +159,12 @@ func (s *Server) flowTCP(ctx context.Context, client net.Conn, name string, dst 
 	if err != nil {
 		return err
 	}
-	return s.relay(ctx, client, out.Conn, out.Pre, ev)
+	up, rerr := s.relay(ctx, client, out.Conn, out.Pre, ev)
+	// The walk committed on the origin's first byte and cached the rung that
+	// carried it. Only the relay knows whether the handshake behind that byte
+	// ever completed, so it reports back before the flow is forgotten.
+	s.o.Ladder.Settle(t, out.Spec, meta, up)
+	return rerr
 }
 
 // direct dials and relays with nothing judged. pre is whatever was already read
@@ -179,7 +184,8 @@ func (s *Server) direct(ctx context.Context, client net.Conn, t flow.Target, pre
 			return fmt.Errorf("tunfe: write the buffered first message: %w", werr)
 		}
 	}
-	return s.relay(ctx, client, up, nil, ev)
+	_, rerr := s.relay(ctx, client, up, nil, ev)
+	return rerr
 }
 
 // relay writes the bytes the ladder already read and then joins the two
@@ -188,7 +194,7 @@ func (s *Server) direct(ctx context.Context, client net.Conn, t flow.Target, pre
 // Writing Pre FIRST is not a detail: those are upstream bytes consumed while
 // judging the attempt, and starting the relay without them leaves a hole in the
 // client's stream that no later byte can fill.
-func (s *Server) relay(ctx context.Context, client, up net.Conn, pre []byte, ev *observ.ConnEvent) error {
+func (s *Server) relay(ctx context.Context, client, up net.Conn, pre []byte, ev *observ.ConnEvent) (int64, error) {
 	counted := &countConn{Conn: up}
 	defer func() {
 		if ev != nil {
@@ -199,7 +205,7 @@ func (s *Server) relay(ctx context.Context, client, up net.Conn, pre []byte, ev 
 
 	if len(pre) > 0 {
 		if _, err := client.Write(pre); err != nil {
-			return fmt.Errorf("tunfe: write buffered upstream bytes: %w", err)
+			return counted.up.Load(), fmt.Errorf("tunfe: write buffered upstream bytes: %w", err)
 		}
 		counted.down.Add(int64(len(pre)))
 	}
@@ -209,9 +215,9 @@ func (s *Server) relay(ctx context.Context, client, up net.Conn, pre []byte, ev 
 		Logf:      s.o.Logf,
 	})
 	if err != nil && !errors.Is(err, flow.ErrIdle) && ctx.Err() == nil {
-		return err
+		return counted.up.Load(), err
 	}
-	return nil
+	return counted.up.Load(), nil
 }
 
 // lookupName names a flow from the DNS answers we ourselves served.

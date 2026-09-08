@@ -3,7 +3,7 @@ package strategy
 import (
 	"fmt"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // Builder is the scratch space a compiled Step mutates. It holds the bytes

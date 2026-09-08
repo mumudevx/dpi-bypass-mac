@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/probe"
-	"github.com/mumudevx/dpi-bypass-mac/internal/resolve"
+	"github.com/mumudevx/dpb/internal/probe"
+	"github.com/mumudevx/dpb/internal/resolve"
 )
 
 // TestDNSMatrixDistinguishesDroppedFromPoisoned is the rendering that decides

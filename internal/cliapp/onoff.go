@@ -7,10 +7,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/janitor"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
+	"github.com/mumudevx/dpb/internal/janitor"
+	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // `dpb off` and `dpb panic` are the two escape hatches.
@@ -170,6 +170,7 @@ func repairJournal(ctx context.Context, g *globals, layout paths.Layout) (netsta
 			// Op restores a captured loopback setting it cannot match exactly —
 			// a dead run's proxy — instead of clearing it.
 			PriorResidue: true,
+			Sys:          g.sysOf(),
 		},
 		Logf: g.logf,
 	})

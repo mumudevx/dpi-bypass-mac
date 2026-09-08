@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
+	"github.com/mumudevx/dpb/internal/flow"
 )
 
 // The lost wakeup between Pipe's cancellation and pipeDir's idle re-arm.

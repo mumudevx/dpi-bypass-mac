@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-// Set with -ldflags "-X github.com/mumudevx/dpi-bypass-mac/internal/buildinfo.Version=..."
+// Set with -ldflags "-X github.com/mumudevx/dpb/internal/buildinfo.Version=..."
 var (
 	Version = ""
 	Commit  = ""

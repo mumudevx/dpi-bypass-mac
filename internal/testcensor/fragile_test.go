@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // TestFragileRejectsSplitHandshake is MEASUREMENTS.md §5 restated as a test:

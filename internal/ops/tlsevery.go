@@ -3,8 +3,8 @@ package ops
 import (
 	"fmt"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/strategy"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // maxPeriod bounds tlsevery's record size. A period at or above 2^14 exceeds

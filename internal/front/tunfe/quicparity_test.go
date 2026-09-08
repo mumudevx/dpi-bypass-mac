@@ -3,7 +3,7 @@ package tunfe
 import (
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/front/proxyfe"
+	"github.com/mumudevx/dpb/internal/front/proxyfe"
 )
 
 // TestQUICPolicyIsTheSameInBothFrontEnds pins the two enums together.

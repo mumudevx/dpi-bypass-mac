@@ -3,7 +3,7 @@ package ops
 import (
 	"fmt"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // requiredPos reads a mandatory position parameter, so that a spec missing it

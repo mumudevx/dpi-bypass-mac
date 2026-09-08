@@ -57,9 +57,9 @@ builds:
     # sets the same three.
     ldflags:
       - -s -w
-      - -X github.com/mumudevx/dpi-bypass-mac/internal/buildinfo.Version={{.Version}}
-      - -X github.com/mumudevx/dpi-bypass-mac/internal/buildinfo.Commit={{.FullCommit}}
-      - -X github.com/mumudevx/dpi-bypass-mac/internal/buildinfo.Date={{.CommitDate}}
+      - -X github.com/mumudevx/dpb/internal/buildinfo.Version={{.Version}}
+      - -X github.com/mumudevx/dpb/internal/buildinfo.Commit={{.FullCommit}}
+      - -X github.com/mumudevx/dpb/internal/buildinfo.Date={{.CommitDate}}
     # Reproducible archives: without this the mtimes are the build time, so two
     # builds of one tag produce two different sha256 values and the formula
     # below cannot be checked by anyone but the person who cut the release.
@@ -116,7 +116,7 @@ brews:
     # release workflow sets this to false once it has seen the token.
     skip_upload: '{{ if index .Env "GORELEASER_SKIP_BREW" }}{{ .Env.GORELEASER_SKIP_BREW }}{{ else }}true{{ end }}'
     directory: Formula
-    homepage: "https://github.com/mumudevx/dpi-bypass-mac"
+    homepage: "https://github.com/mumudevx/dpb"
     description: "macOS DPI bypass: connects plain first, desyncs only on evidence"
     license: "MIT"
     commit_author:

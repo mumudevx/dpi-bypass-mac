@@ -1,4 +1,4 @@
-// Command dpb is the dpi-bypass-mac CLI.
+// Command dpb is the dpb CLI.
 //
 // This file owns three things and nothing else: the process exit codes, the
 // signal context, and the teardown stack that reverts system state on the way
@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/cliapp"
-	"github.com/mumudevx/dpi-bypass-mac/internal/paths"
+	"github.com/mumudevx/dpb/internal/cliapp"
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // Exit codes, as published in the CLI surface. They are part of the tool's

@@ -1,4 +1,6 @@
-package netstate
+//go:build darwin
+
+package scdarwin
 
 import (
 	"context"

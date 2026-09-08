@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // oobCaps: MSG_OOB (0x1) exists in the Darwin SDK and `oob:pos=1` scored 3/3 on

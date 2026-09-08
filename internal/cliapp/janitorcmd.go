@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/janitor"
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpb/internal/janitor"
+	"github.com/mumudevx/dpb/internal/netstate"
 )
 
 // `dpb _janitor` is the child `dpb run` spawns to survive its own SIGKILL.
@@ -67,6 +67,7 @@ func runJanitor(ctx context.Context, g *globals, parentPID int, journalPath stri
 			// captured loopback setting we cannot match exactly is its residue
 			// rather than the user's own local proxy.
 			PriorResidue: true,
+			Sys:          g.sysOf(),
 		},
 		Logf: g.logf,
 	})

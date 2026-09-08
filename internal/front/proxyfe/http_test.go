@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 func readBody(t *testing.T, br *bufio.Reader, req *http.Request) (*http.Response, string) {

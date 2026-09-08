@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/strategy"
+	"github.com/mumudevx/dpb/internal/strategy"
 )
 
 // Score is one candidate's two-axis result.

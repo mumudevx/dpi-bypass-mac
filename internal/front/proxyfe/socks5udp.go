@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/flow"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
-	"github.com/mumudevx/dpi-bypass-mac/internal/tlsmsg"
+	"github.com/mumudevx/dpb/internal/flow"
+	"github.com/mumudevx/dpb/internal/policy"
+	"github.com/mumudevx/dpb/internal/tlsmsg"
 )
 
 // SOCKS5 UDP ASSOCIATE, RFC 1928 §7 — the unprivileged datagram path.

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
+	"github.com/mumudevx/dpb/internal/buildinfo"
 )
 
 // The distribution files are three documents that have to agree with each
@@ -48,7 +48,7 @@ func findAll(t *testing.T, body, pattern string) [][]string {
 // buildinfo breaks this test's compilation.
 func TestReleaseConfigStampsTheVariablesVersionPrints(t *testing.T) {
 	t.Parallel()
-	const pkg = "github.com/mumudevx/dpi-bypass-mac/internal/buildinfo"
+	const pkg = "github.com/mumudevx/dpb/internal/buildinfo"
 
 	stamped := map[string]*string{
 		"Version": &buildinfo.Version,
@@ -149,6 +149,11 @@ func TestFormulaURLsMatchTheArchivesTheReleaseWillPublish(t *testing.T) {
 	}
 
 	for i, arch := range []string{"arm64", "amd64"} {
+		// The Go module path is github.com/mumudevx/dpb, but the GitHub repository
+		// slug is still github.com/mumudevx/dpi-bypass-mac — they diverged when we
+		// renamed the module as preparation for Windows support, but the repository
+		// itself was not renamed. The formula URL must follow .goreleaser.yaml's
+		// release.github.name, which points to the actual repository location.
 		want := fmt.Sprintf(
 			"https://github.com/mumudevx/dpi-bypass-mac/releases/download/v%s/%s.tar.gz",
 			version, renderArchiveName(tmpl, project, version, arch))

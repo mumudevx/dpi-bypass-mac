@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/netstate"
+	"github.com/mumudevx/dpb/internal/netstate"
 )
 
 // pacContent is what the fixture mutation writes. Its exact bytes do not

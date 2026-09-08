@@ -3,8 +3,8 @@ package observ_test
 import (
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/observ"
-	"github.com/mumudevx/dpi-bypass-mac/internal/policy"
+	"github.com/mumudevx/dpb/internal/observ"
+	"github.com/mumudevx/dpb/internal/policy"
 )
 
 // observ sits BELOW policy in the import graph — policy publishes to observ, so

@@ -3,8 +3,9 @@ package netstate
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
+
+	"github.com/mumudevx/dpb/internal/sysport"
 )
 
 func init() {
@@ -16,6 +17,14 @@ func init() {
 // proxyPrev is one service's proxy configuration as it stood before we touched
 // it. Everything here has already passed the notSelf guard, so restoring it can
 // never point the user back at a listener of ours that is no longer there.
+//
+// It stays as the journal's wire type rather than being replaced by
+// sysport.ProxySettings, which carries the same eleven values under different
+// names. A journal written by the previous version must still be revertible —
+// that is what Record's "self-sufficient" contract demands — and renaming
+// `pac_url` to `AutoURL` on disk would silently decode every stored capture as
+// zero, i.e. as "there was nothing here". The conversion happens at the Restore
+// call instead; see settings.
 type proxyPrev struct {
 	PACURL string `json:"pac_url,omitempty"`
 	PACOn  bool   `json:"pac_on,omitempty"`
@@ -42,10 +51,35 @@ type proxyRevert struct {
 	Prev     map[string]proxyPrev `json:"prev"`
 }
 
-// proxyOp applies system proxy settings with networksetup(8) and verifies them
-// with `scutil --proxy`, which reads the dynamic store the system actually
-// consults. networksetup writing the preference and scutil reading the live
-// configuration are genuinely different subsystems: a write that lands in the
+// settings turns the captured previous configuration into the value Restore
+// takes. Kinds names ONLY this Op's own kind, which is what keeps the revert
+// honest: capturePrev read the getters for one kind, so the other groups are
+// zero because they were never asked about. Without that marker a PAC revert
+// would emit `-setwebproxy <svc> "" 0` and switch off a web proxy this Op never
+// touched — undoing, in TestNotSelfKeepsTheUsersLoopbackServices' sequence, the
+// web-proxy revert that ran a moment earlier. It is also six networksetup
+// invocations the mutation never needed.
+func (p proxyPrev) settings(kind ProxyKind) ProxySettings {
+	return ProxySettings{
+		Kinds:      []ProxyKind{kind},
+		AutoURL:    p.PACURL,
+		AutoOn:     p.PACOn,
+		WebHost:    p.WebHost,
+		WebPort:    p.WebPort,
+		WebOn:      p.WebOn,
+		SecureHost: p.SecureHost,
+		SecurePort: p.SecurePort,
+		SecureOn:   p.SecureOn,
+		SOCKSHost:  p.SOCKSHost,
+		SOCKSPort:  p.SOCKSPort,
+		SOCKSOn:    p.SOCKSOn,
+	}
+}
+
+// proxyOp applies system proxy settings through the Port's writer and verifies
+// them through its live reader — on macOS, networksetup(8) writing the
+// preference and `scutil --proxy` reading the dynamic store the system actually
+// consults. Those are genuinely different subsystems: a write that lands in the
 // plist but never reaches the dynamic store looks identical to success from
 // networksetup's side, and looks like failure from scutil's.
 type proxyOp struct {
@@ -116,31 +150,54 @@ func (o *proxyOp) runner(e Env) Runner {
 	return e.runner()
 }
 
+// sys is the Port this Op mutates through, built from the Op's own Runner when
+// it has one. See routeOp.sys.
+func (o *proxyOp) sys(e Env) Port {
+	env := e
+	env.Runner = o.runner(e)
+	return env.sys()
+}
+
+// kindOf maps this Op's OpKind onto the Port's ProxyKind. They are separate
+// vocabularies on purpose: OpKind is what the journal records and what a user
+// sees, ProxyKind is what a platform is asked to set.
+func (o *proxyOp) kindOf() ProxyKind {
+	switch o.kind {
+	case OpProxyPAC:
+		return sysport.ProxyAuto
+	case OpProxyHTTP:
+		return sysport.ProxyWeb
+	default:
+		return sysport.ProxySOCKS
+	}
+}
+
 // prepare resolves the service list and captures each service's current proxy
 // configuration, so the revert payload is complete before the journal fsyncs.
 func (o *proxyOp) prepare(ctx context.Context, e Env) error {
 	if o.prepared {
 		return nil
 	}
-	env := e
-	env.Runner = o.runner(e)
+	sys := o.sys(e)
 	if len(o.services) == 0 {
-		svcs, err := ListServices(ctx, env)
+		svcs, err := sys.Proxy().Services(ctx)
 		if err != nil {
 			return err
 		}
-		o.services = serviceNames(svcs)
+		o.services = svcs
 		if len(o.services) == 0 {
 			return fmt.Errorf("netstate: no enabled network services to configure")
 		}
 	}
 	o.prev = make(map[string]proxyPrev, len(o.services))
 	for _, svc := range o.services {
-		p, err := o.capturePrev(ctx, env.Runner, svc, e.PriorResidue)
+		// Only this Op's own kind is read. A getter that fails for a setting
+		// this Op will never touch must not abort the apply.
+		st, err := sys.Proxy().Configured(ctx, svc, o.kindOf())
 		if err != nil {
 			return err
 		}
-		o.prev[svc] = p
+		o.prev[svc] = o.capturePrev(st, e.PriorResidue)
 	}
 	o.prepared = true
 	return nil
@@ -149,72 +206,43 @@ func (o *proxyOp) prepare(ctx context.Context, e Env) error {
 // capturePrev is a method so the notSelf guards can compare what they read
 // against the exact URL / host:port this Op is about to install. Deciding
 // "ours" from loopback alone destroys the user's own local proxy.
-func (o *proxyOp) capturePrev(ctx context.Context, r Runner, svc string, priorResidue bool) (proxyPrev, error) {
+//
+// Only this Op's own kind is kept out of the whole-service read. The rest stays
+// zero deliberately, and proxyPrev.settings marks it as "not described" so the
+// revert cannot mistake it for "there was nothing here".
+func (o *proxyOp) capturePrev(st ProxySettings, priorResidue bool) proxyPrev {
 	var p proxyPrev
 	switch o.kind {
 	case OpProxyPAC:
-		kv, err := networksetupKV(ctx, r, "-getautoproxyurl", svc)
-		if err != nil {
-			return p, err
-		}
-		p.PACURL = notSelfPAC(nullToEmpty(kv["URL"]), o.url, priorResidue)
-		p.PACOn = yes(kv["Enabled"]) && p.PACURL != ""
+		p.PACURL = notSelfPAC(st.AutoURL, o.url, priorResidue)
+		p.PACOn = st.AutoOn && p.PACURL != ""
 	case OpProxyHTTP:
-		kv, err := networksetupKV(ctx, r, "-getwebproxy", svc)
-		if err != nil {
-			return p, err
-		}
-		p.WebPort = atoi(kv["Port"])
-		p.WebHost = notSelfHost(nullToEmpty(kv["Server"]), p.WebPort, o.host, o.port, priorResidue)
-		p.WebOn = yes(kv["Enabled"]) && p.WebHost != ""
+		p.WebPort = st.WebPort
+		p.WebHost = notSelfHost(st.WebHost, p.WebPort, o.host, o.port, priorResidue)
+		p.WebOn = st.WebOn && p.WebHost != ""
 
-		kv, err = networksetupKV(ctx, r, "-getsecurewebproxy", svc)
-		if err != nil {
-			return p, err
-		}
-		p.SecurePort = atoi(kv["Port"])
-		p.SecureHost = notSelfHost(nullToEmpty(kv["Server"]), p.SecurePort, o.host, o.port, priorResidue)
-		p.SecureOn = yes(kv["Enabled"]) && p.SecureHost != ""
+		p.SecurePort = st.SecurePort
+		p.SecureHost = notSelfHost(st.SecureHost, p.SecurePort, o.host, o.port, priorResidue)
+		p.SecureOn = st.SecureOn && p.SecureHost != ""
 	case OpProxySOCKS:
-		kv, err := networksetupKV(ctx, r, "-getsocksfirewallproxy", svc)
-		if err != nil {
-			return p, err
-		}
-		p.SOCKSPort = atoi(kv["Port"])
-		p.SOCKSHost = notSelfHost(nullToEmpty(kv["Server"]), p.SOCKSPort, o.host, o.port, priorResidue)
-		p.SOCKSOn = yes(kv["Enabled"]) && p.SOCKSHost != ""
+		p.SOCKSPort = st.SOCKSPort
+		p.SOCKSHost = notSelfHost(st.SOCKSHost, p.SOCKSPort, o.host, o.port, priorResidue)
+		p.SOCKSOn = st.SOCKSOn && p.SOCKSHost != ""
 	}
-	return p, nil
+	return p
 }
 
 func (o *proxyOp) Apply(ctx context.Context, e Env) error {
-	r := o.runner(e)
+	pc := o.sys(e).Proxy()
 	for _, svc := range o.services {
-		var cmds [][]string
-		switch o.kind {
-		case OpProxyPAC:
-			cmds = [][]string{
-				{"-setautoproxyurl", svc, o.url},
-				{"-setautoproxystate", svc, "on"},
-			}
-		case OpProxyHTTP:
-			port := strconv.Itoa(o.port)
-			cmds = [][]string{
-				{"-setwebproxy", svc, o.host, port},
-				{"-setsecurewebproxy", svc, o.host, port},
-				{"-setwebproxystate", svc, "on"},
-				{"-setsecurewebproxystate", svc, "on"},
-			}
-		case OpProxySOCKS:
-			cmds = [][]string{
-				{"-setsocksfirewallproxy", svc, o.host, strconv.Itoa(o.port)},
-				{"-setsocksfirewallproxystate", svc, "on"},
-			}
+		var err error
+		if o.kind == OpProxyPAC {
+			err = pc.SetAuto(ctx, svc, o.url)
+		} else {
+			err = pc.SetManual(ctx, svc, o.kindOf(), o.host, o.port)
 		}
-		for _, args := range cmds {
-			if err := r.Run(ctx, "networksetup", args...).Error(); err != nil {
-				return err
-			}
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -224,9 +252,7 @@ func (o *proxyOp) Apply(ctx context.Context, e Env) error {
 // the primary one does not appear here, and that is the correct answer: traffic
 // would not be proxied either.
 func (o *proxyOp) Verify(ctx context.Context, e Env) error {
-	env := e
-	env.Runner = o.runner(e)
-	st, err := readProxyState(ctx, env)
+	st, err := o.sys(e).Proxy().Live(ctx)
 	if err != nil {
 		return err
 	}
@@ -270,103 +296,25 @@ func checkProxyPair(st ProxyState, prefix, host string, port int) error {
 // Revert restores each service's captured configuration. It is idempotent: the
 // commands it issues set an absolute state rather than toggling one.
 func (o *proxyOp) Revert(ctx context.Context, e Env) error {
-	r := o.runner(e)
+	pc := o.sys(e).Proxy()
 	var firstErr error
 	for _, svc := range o.services {
-		p := o.prev[svc]
-		for _, c := range revertCmds(o.kind, svc, p) {
-			err := r.Run(ctx, "networksetup", c.args...).Error()
-			if err == nil {
-				continue
-			}
-			if c.soft {
-				e.logf("netstate: %v (tidying only; the state command decides)", err)
-				continue
-			}
-			if firstErr == nil {
-				firstErr = err
-			}
+		// The soft/hard distinction lives inside Restore: clearing a stored
+		// field is tidying and must not fail the revert, while the state
+		// command is what the user actually needs.
+		if err := pc.Restore(ctx, svc, o.prev[svc].settings(o.kindOf())); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	return firstErr
-}
-
-// revertCmd is one networksetup invocation. soft marks a command whose failure
-// must not fail the revert: clearing a stored proxy field is tidying, and what
-// the user actually needs is the setting switched off. A networksetup that
-// refuses an empty server must not leave the journal entry pending forever.
-type revertCmd struct {
-	args []string
-	soft bool
-}
-
-// revertCmds builds the absolute state to restore. It is idempotent by
-// construction: every command sets a value rather than toggling one.
-//
-// The empty-previous case does NOT just switch the setting off. macOS keeps a
-// disabled proxy's Server and Port — confirmed live on this machine:
-// `networksetup -getwebproxy Wi-Fi` reports "Enabled: No, Server: 127.0.0.1,
-// Port: 8080" from an earlier run — so switching off alone abandons the fields
-// pointing at our dead port, and the next time the user ticks the box in System
-// Settings they get a total HTTP/HTTPS outage. Clearing the fields first
-// restores what was there before us.
-func revertCmds(kind OpKind, svc string, p proxyPrev) []revertCmd {
-	switch kind {
-	case OpProxyPAC:
-		if p.PACURL == "" {
-			// Either there was nothing here, or what was here was ours. Both mean
-			// "off": pinning the user to a dead PAC URL is worse than no PAC.
-			return []revertCmd{
-				{args: []string{"-setautoproxyurl", svc, ""}, soft: true},
-				{args: []string{"-setautoproxystate", svc, "off"}},
-			}
-		}
-		return []revertCmd{
-			{args: []string{"-setautoproxyurl", svc, p.PACURL}},
-			{args: []string{"-setautoproxystate", svc, onOff(p.PACOn)}},
-		}
-	case OpProxyHTTP:
-		var cmds []revertCmd
-		if p.WebHost == "" {
-			cmds = append(cmds,
-				revertCmd{args: []string{"-setwebproxy", svc, "", "0"}, soft: true},
-				revertCmd{args: []string{"-setwebproxystate", svc, "off"}})
-		} else {
-			cmds = append(cmds,
-				revertCmd{args: []string{"-setwebproxy", svc, p.WebHost, strconv.Itoa(p.WebPort)}},
-				revertCmd{args: []string{"-setwebproxystate", svc, onOff(p.WebOn)}})
-		}
-		if p.SecureHost == "" {
-			cmds = append(cmds,
-				revertCmd{args: []string{"-setsecurewebproxy", svc, "", "0"}, soft: true},
-				revertCmd{args: []string{"-setsecurewebproxystate", svc, "off"}})
-		} else {
-			cmds = append(cmds,
-				revertCmd{args: []string{"-setsecurewebproxy", svc, p.SecureHost, strconv.Itoa(p.SecurePort)}},
-				revertCmd{args: []string{"-setsecurewebproxystate", svc, onOff(p.SecureOn)}})
-		}
-		return cmds
-	default:
-		if p.SOCKSHost == "" {
-			return []revertCmd{
-				{args: []string{"-setsocksfirewallproxy", svc, "", "0"}, soft: true},
-				{args: []string{"-setsocksfirewallproxystate", svc, "off"}},
-			}
-		}
-		return []revertCmd{
-			{args: []string{"-setsocksfirewallproxy", svc, p.SOCKSHost, strconv.Itoa(p.SOCKSPort)}},
-			{args: []string{"-setsocksfirewallproxystate", svc, onOff(p.SOCKSOn)}},
-		}
-	}
 }
 
 // VerifyReverted only asserts that our own setting is gone. It deliberately
 // does not assert the previous value came back: the user may have changed it
 // themselves while we ran, and overriding that would be its own bug.
 func (o *proxyOp) VerifyReverted(ctx context.Context, e Env) error {
-	env := e
-	env.Runner = o.runner(e)
-	st, err := readProxyState(ctx, env)
+	sys := o.sys(e)
+	st, err := sys.Proxy().Live(ctx)
 	if err != nil {
 		return err
 	}
@@ -393,43 +341,43 @@ func (o *proxyOp) VerifyReverted(ctx context.Context, e Env) error {
 	// cover the rest. This is not a second subsystem — networksetup is what
 	// wrote — so the scutil assertion above stays as the independent one.
 	for _, svc := range o.services {
-		if err := o.verifyServiceReverted(ctx, env.Runner, svc); err != nil {
+		if err := o.verifyServiceReverted(ctx, sys, svc); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (o *proxyOp) verifyServiceReverted(ctx context.Context, r Runner, svc string) error {
-	switch o.kind {
-	case OpProxyPAC:
-		kv, err := networksetupKV(ctx, r, "-getautoproxyurl", svc)
-		if err != nil {
-			return err
-		}
-		if yes(kv["Enabled"]) && nullToEmpty(kv["URL"]) == o.url {
-			return fmt.Errorf("networksetup still reports our auto-proxy URL %s on %s", o.url, svc)
-		}
-	case OpProxyHTTP:
-		for _, verb := range []string{"-getwebproxy", "-getsecurewebproxy"} {
-			if err := o.checkServiceOff(ctx, r, verb, svc); err != nil {
-				return err
-			}
-		}
-	case OpProxySOCKS:
-		if err := o.checkServiceOff(ctx, r, "-getsocksfirewallproxy", svc); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (o *proxyOp) checkServiceOff(ctx context.Context, r Runner, verb, svc string) error {
-	kv, err := networksetupKV(ctx, r, verb, svc)
+func (o *proxyOp) verifyServiceReverted(ctx context.Context, sys Port, svc string) error {
+	st, err := sys.Proxy().Configured(ctx, svc, o.kindOf())
 	if err != nil {
 		return err
 	}
-	if yes(kv["Enabled"]) && nullToEmpty(kv["Server"]) == o.host && atoi(kv["Port"]) == o.port {
+	switch o.kind {
+	case OpProxyPAC:
+		if st.AutoOn && st.AutoURL == o.url {
+			return fmt.Errorf("networksetup still reports our auto-proxy URL %s on %s", o.url, svc)
+		}
+	case OpProxyHTTP:
+		if err := o.checkServiceOff("-getwebproxy", svc, st.WebOn, st.WebHost, st.WebPort); err != nil {
+			return err
+		}
+		if err := o.checkServiceOff("-getsecurewebproxy", svc, st.SecureOn, st.SecureHost, st.SecurePort); err != nil {
+			return err
+		}
+	case OpProxySOCKS:
+		if err := o.checkServiceOff("-getsocksfirewallproxy", svc, st.SOCKSOn, st.SOCKSHost, st.SOCKSPort); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkServiceOff keeps the networksetup verb in its message. The verb is what
+// a user retypes to see the same answer for themselves, and the message is the
+// only thing that tells them which of the two web proxies was still ours.
+func (o *proxyOp) checkServiceOff(verb, svc string, on bool, host string, port int) error {
+	if on && host == o.host && port == o.port {
 		return fmt.Errorf("networksetup %s %s still reports our proxy %s:%d", verb, svc, o.host, o.port)
 	}
 	return nil
@@ -468,49 +416,4 @@ func reviveProxy(r Record) (Op, error) {
 		prev:     p.Prev,
 		prepared: true,
 	}, nil
-}
-
-// networksetupKV runs a networksetup getter and parses its "Key: value" output.
-func networksetupKV(ctx context.Context, r Runner, args ...string) (map[string]string, error) {
-	res := r.Run(ctx, "networksetup", args...)
-	if err := res.Error(); err != nil {
-		return nil, err
-	}
-	return parseColonKV(res.Combined), nil
-}
-
-func parseColonKV(out string) map[string]string {
-	kv := map[string]string{}
-	for _, line := range strings.Split(out, "\n") {
-		k, v, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		kv[strings.TrimSpace(k)] = strings.TrimSpace(v)
-	}
-	return kv
-}
-
-func nullToEmpty(s string) string {
-	if s == "(null)" {
-		return ""
-	}
-	return s
-}
-
-func yes(s string) bool { return strings.EqualFold(strings.TrimSpace(s), "yes") }
-
-func onOff(b bool) string {
-	if b {
-		return "on"
-	}
-	return "off"
-}
-
-func atoi(s string) int {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil {
-		return 0
-	}
-	return n
 }

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/mumudevx/dpi-bypass-mac/internal/testcensor"
+	"github.com/mumudevx/dpb/internal/testcensor"
 )
 
 // censorLab is a censored line on loopback.
