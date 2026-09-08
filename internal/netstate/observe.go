@@ -1,6 +1,10 @@
 package netstate
 
-import "context"
+import (
+	"context"
+
+	"github.com/mumudevx/dpb/internal/sysport"
+)
 
 // The exported read-only observers.
 //
@@ -53,10 +57,14 @@ func LiveNameservers(ctx context.Context, e Env) ([]string, error) {
 // still an error, because answering "not set" there would report a fact we
 // never established.
 //
+// That tolerance is this reader's, not the Port's. EnvController.Get is the
+// capture read and refuses the ambiguity, because the value it returns is what
+// Revert restores from and a wrong "unset" there deletes the user's own
+// variable. sysport.EnvLookup is where the one is turned into the other.
+//
 // The deeper caveat, the same one launchEnvOp carries: what launchd holds
 // affects processes started AFTER it was set, so a value read here says nothing
 // about the Electron app that was already running.
 func ReadLaunchEnv(ctx context.Context, e Env, name string) (string, error) {
-	v, _, err := e.sys().Env().Get(ctx, name)
-	return v, err
+	return sysport.EnvLookup(ctx, e.sys().Env(), name)
 }

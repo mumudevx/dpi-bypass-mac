@@ -28,22 +28,27 @@ var _ sysport.EnvController = envCtl{}
 
 // Get reads one variable. ok is false when the variable is not set; launchctl
 // prints nothing and exits 0 for that case.
+//
+// A launchctl that FAILED is an error, including the silent kind. Some launchd
+// builds answer an unset variable by exiting non-zero with no output, which is
+// indistinguishable from a read that broke — and this is the capture read, so
+// guessing "unset" is destructive: launchEnvOp.prepare stores the guess in
+// prevSet and Revert then UNSETS a variable the user set themselves. The
+// pre-branch code refused the apply outright (46e30d6, op_launchenv.go:105);
+// this keeps that refusal and names the ambiguity for the one caller allowed to
+// tolerate it, sysport.EnvLookup.
 func (c envCtl) Get(ctx context.Context, name string) (string, bool, error) {
 	if name == "" {
 		return "", false, fmt.Errorf("netstate: launchctl getenv needs a variable name")
 	}
 	res := c.p.run.Run(ctx, "launchctl", "getenv", name)
 	if err := res.Error(); err != nil {
-		// An unset variable is not an error on every launchd build: some exit
-		// non-zero with no output at all. Report THAT as "unset", because the
-		// caller's question is "is it set" and a diagnostic that says "could
-		// not tell" where it could say "no" is one nobody can act on.
-		//
-		// res.Err is the exception. It means the command could not be run —
-		// launchctl missing, or the Runner nil — and answering "not set" there
-		// would report a fact we never established.
+		// res.Err means the command could not be run at all — launchctl
+		// missing, or the Runner nil — so it is not even the ambiguous case;
+		// nothing about the variable was established either way.
 		if res.Err == nil && strings.TrimSpace(res.Combined) == "" {
-			return "", false, nil
+			return "", false, fmt.Errorf("netstate: launchctl getenv %s: %w (%w)",
+				name, err, sysport.ErrEnvUnreadable)
 		}
 		return "", false, fmt.Errorf("netstate: launchctl getenv %s: %w", name, err)
 	}
@@ -60,31 +65,20 @@ func (c envCtl) Unset(ctx context.Context, name string) error {
 }
 
 // ReadLaunchEnv reads one variable out of the user's launchd session with
-// `launchctl getenv`.
+// `launchctl getenv`, tolerantly: a variable this machine's launchctl refuses
+// to answer for reads as "not set".
 //
 // launchd's own store is the only place a session environment variable lives,
 // so there is no second observer to consult here — the same carve-out
 // documented on launchEnvOp. The deeper caveat applies to this reader too: what
 // launchd holds affects processes started AFTER it was set, so a value read
 // here says nothing about the Electron app that was already running.
+//
+// It is a shim, deliberately. The launchctl call is expressed once in
+// envCtl.Get and the tolerance once in sysport.EnvLookup; this spelling exists
+// because scdarwin's own tests read the diagnostic path through it, and because
+// netstate.ReadLaunchEnv — the caller `dpb doctor` actually reaches — cannot
+// name a darwin-only package.
 func ReadLaunchEnv(ctx context.Context, e Env, name string) (string, error) {
-	if name == "" {
-		return "", fmt.Errorf("netstate: launchctl getenv needs a variable name")
-	}
-	res := e.runner().Run(ctx, "launchctl", "getenv", name)
-	if err := res.Error(); err != nil {
-		// An unset variable is not an error on every launchd build: some exit
-		// non-zero with no output at all. Report THAT as "unset", because the
-		// caller's question is "is it set" and a diagnostic that says "could
-		// not tell" where it could say "no" is one nobody can act on.
-		//
-		// res.Err is the exception. It means the command could not be run —
-		// launchctl missing, or Env.Runner nil — and answering "not set" there
-		// would report a fact we never established.
-		if res.Err == nil && strings.TrimSpace(res.Combined) == "" {
-			return "", nil
-		}
-		return "", fmt.Errorf("netstate: launchctl getenv %s: %w", name, err)
-	}
-	return strings.TrimSpace(res.Combined), nil
+	return sysport.EnvLookup(ctx, New(e).Env(), name)
 }

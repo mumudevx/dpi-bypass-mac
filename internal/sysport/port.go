@@ -2,6 +2,7 @@ package sysport
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 )
 
@@ -60,6 +61,15 @@ type ProxyController interface {
 	Configured(ctx context.Context, svc string, kinds ...ProxyKind) (ProxySettings, error)
 	SetAuto(ctx context.Context, svc, url string) error
 	SetManual(ctx context.Context, svc string, kind ProxyKind, host string, port int) error
+	// Restore puts svc back to prev. It MUST refuse a prev whose Kinds is
+	// empty — see ProxySettings.CheckRestorable — rather than reading it as
+	// "all", which is the reading Configured gives it.
+	//
+	// The asymmetry is the point. Configured with no kinds READS everything,
+	// and an over-wide read costs a few getters. Restore with no kinds would
+	// WRITE everything, so a zero-value ProxySettings — the value a caller
+	// gets from a struct it forgot to fill in — switches off every proxy on
+	// the service, including ones this tool never touched.
 	Restore(ctx context.Context, svc string, prev ProxySettings) error
 	// Live reads the system's RESOLVED proxy configuration through a DIFFERENT
 	// subsystem than the setters write to. This is the verifier.
@@ -108,9 +118,49 @@ type IfaceController interface {
 }
 
 type EnvController interface {
+	// Get is the CAPTURE read: it answers "what is this variable's value, and
+	// is it set at all", and a read that could not establish that is an ERROR,
+	// never a "no".
+	//
+	// The distinction is destructive, not academic. launchEnvOp records the
+	// answer in prevSet, and Revert UNSETS every name it recorded as unset — so
+	// a Get that reports "not set" when it merely failed to look deletes the
+	// user's own HTTPS_PROXY on the way out. Refusing the apply is what this
+	// tool shipped with (46e30d6, op_launchenv.go:105) and the only safe answer
+	// for a value a later write restores from.
+	//
+	// A failure that says nothing at all is still a failure here; it is
+	// reported wrapping ErrEnvUnreadable so that EnvLookup — and only
+	// EnvLookup — can choose to read it as "not set".
 	Get(ctx context.Context, name string) (string, bool, error)
 	Set(ctx context.Context, name, value string) error
 	Unset(ctx context.Context, name string) error
+}
+
+// ErrEnvUnreadable marks a variable whose value could not be established
+// because the read failed WITHOUT saying why: some launchd builds answer
+// `launchctl getenv NAME` for an unset variable by exiting non-zero and
+// printing nothing, which is byte-for-byte what a failed read looks like.
+//
+// An implementation reports it rather than deciding, because the two callers
+// want opposite answers to the same ambiguity. See EnvLookup.
+var ErrEnvUnreadable = errors.New("netstate: the variable could not be read")
+
+// EnvLookup is the DIAGNOSTIC read, and the one place ErrEnvUnreadable is
+// tolerated: `dpb doctor` and `dpb coverage` ask "is this variable set", and a
+// diagnostic line that says "could not tell" where it could say "no" is one
+// nobody can act on.
+//
+// The asymmetry with EnvController.Get is deliberate and is the whole point of
+// having two readers: a diagnostic only PRINTS its answer, while a capture
+// feeds a Revert that WRITES. Guessing costs a wrong word in one and the user's
+// pre-existing environment in the other.
+func EnvLookup(ctx context.Context, ec EnvController, name string) (string, error) {
+	v, _, err := ec.Get(ctx, name)
+	if errors.Is(err, ErrEnvUnreadable) {
+		return "", nil
+	}
+	return v, err
 }
 
 type FactsCollector interface {
