@@ -1131,7 +1131,19 @@ Before starting Plan 2, all of these must hold:
 - [ ] `make fuzz FUZZTIME=60s` green
 - [ ] `git diff --stat <plan-start>..HEAD -- '*_test.go'` shows only package-line changes, file moves, and the new files from Task 7 — **no edited assertion**
 - [ ] `go mod tidy` leaves `go.mod`/`go.sum` unchanged
-- [ ] `GOOS=windows go build ./internal/netstate/` succeeds
+- [ ] `GOOS=linux go build ./internal/netstate/` fails **only** on `lock.go`'s `unix.Flock` /
+      `unix.SysctlKinfoProc`
+
+  This replaces an earlier, wrong version of this line that demanded
+  `GOOS=windows go build ./internal/netstate/` succeed. That gate was unmeetable by this
+  plan and it was my error: spec §3.4 assigns the `lock_unix.go` / `lock_windows.go` split
+  to **Plan 2**, and no task here was ever scoped to touch `lock.go`. A `GOOS=windows`
+  build additionally wants `port_windows.go`, which is Plan 3's.
+
+  `GOOS=linux` is the honest test of what this plan actually claims, because it strips the
+  darwin build tags without needing a Windows implementation to exist. One remaining error,
+  confined to the run lock, is the evidence that every Op, observer and `port_other.go` is
+  genuinely platform-free — which is the whole point of Phase 1.
 - [ ] `dpb run` still works on the development machine against a real blocked host (`dpb probe discord.com` before and after gives the same verdict)
 
 The last one is the one a test cannot give you. Run it.
