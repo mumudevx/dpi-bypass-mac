@@ -7,6 +7,11 @@ import "github.com/mumudevx/dpb/internal/sysport"
 // references to these names live outside this package — 51 to Result alone —
 // and an alias moves the declaration without touching any of them.
 type (
-	Runner = sysport.Runner
-	Result = sysport.Result
+	Runner     = sysport.Runner
+	Result     = sysport.Result
+	RouteEntry = sysport.RouteEntry
+	RIBReader  = sysport.RIBReader
+	ProxyState = sysport.ProxyState
+	Facts      = sysport.Facts
+	VPNState   = sysport.VPNState
 )

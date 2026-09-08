@@ -13,30 +13,6 @@ import (
 // through scutil(8), which reads the dynamic store the system actually consults
 // rather than the preferences plist networksetup wrote.
 
-// ProxyState is `scutil --proxy` reduced to a lookup table. scutil prints a
-// flat CFDictionary with one nested array, so a map plus the exceptions list is
-// a complete representation.
-type ProxyState struct {
-	Keys       map[string]string
-	Exceptions []string
-}
-
-// Str returns the value for key, or "" if absent.
-func (p ProxyState) Str(key string) string { return p.Keys[key] }
-
-// On reports whether an scutil boolean key ("0"/"1") is set.
-func (p ProxyState) On(key string) bool { return p.Keys[key] == "1" }
-
-// Int returns the value for key as an integer; ok is false if absent or
-// unparseable.
-func (p ProxyState) Int(key string) (int, bool) {
-	v, err := strconv.Atoi(strings.TrimSpace(p.Keys[key]))
-	if err != nil {
-		return 0, false
-	}
-	return v, true
-}
-
 var scutilKV = regexp.MustCompile(`^\s*([A-Za-z0-9_]+)\s*:\s*(.*)$`)
 var scutilArrayEntry = regexp.MustCompile(`^\s*\d+\s*:\s*(.*)$`)
 

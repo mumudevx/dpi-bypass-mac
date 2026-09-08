@@ -9,40 +9,6 @@ import (
 	"time"
 )
 
-// VPNState describes whether a VPN is in the way. FullTunnel is the one that
-// changes behaviour: if something else owns the unscoped default route, our
-// capture routes and our scoped uplink default cannot be made to work, and the
-// honest answer is to stop rather than report success.
-type VPNState struct {
-	Present     bool
-	FullTunnel  bool
-	Iface       string
-	ServiceName string
-}
-
-// Facts is the snapshot of the machine's network identity that every mutation
-// is planned against. It is a value, collected once per network change, so a
-// mid-run reconfiguration cannot make two Ops disagree about which interface
-// the uplink is.
-type Facts struct {
-	Uplink  string
-	Gateway netip.Addr
-	// UplinkV6 and GatewayV6 are the machine's real IPv6 next hop, read the
-	// same way and kept separate because they are frequently a different
-	// interface — or absent entirely on a v4-only line. TUN mode needs them to
-	// scope an IPv6 default to the uplink before ::/1 and 8000::/1 point at the
-	// tunnel; without that route our own upstream v6 sockets would be pulled
-	// back into our own netstack and loop.
-	UplinkV6    string
-	GatewayV6   netip.Addr
-	UplinkMAC   string
-	V4Global    []netip.Addr
-	V6Global    []netip.Addr
-	Services    []string
-	VPN         VPNState
-	CollectedAt time.Time
-}
-
 // CollectFacts reads the machine's current network identity. The uplink comes
 // from the kernel routing table rather than from networksetup's service order,
 // because the service order says what macOS would prefer and the RIB says what

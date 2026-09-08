@@ -11,44 +11,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// RouteEntry is one kernel routing table entry, reduced to the fields we
-// actually make decisions on.
-type RouteEntry struct {
-	Dst     netip.Prefix
-	Gateway netip.Addr
-	Iface   string
-	Index   int
-	// Scoped is true for a route carrying RTF_IFSCOPE — macOS's per-interface
-	// scoping. A VPN's scoped default lives here, and recognising it is what
-	// stops us from deleting someone's VPN on Ctrl-C.
-	Scoped bool
-}
-
-func (r RouteEntry) String() string {
-	gw := "-"
-	if r.Gateway.IsValid() {
-		gw = r.Gateway.String()
-	}
-	s := fmt.Sprintf("%s via %s dev %s(%d)", r.Dst, gw, r.Iface, r.Index)
-	if r.Scoped {
-		s += " scoped"
-	}
-	return s
-}
-
-// RIBReader reads the kernel routing table directly through an AF_ROUTE socket.
-// It is the independent verifier for every route mutation: route(8) writes,
-// this reads, and the two never share a code path.
-//
-// Verified openable unprivileged on this machine: FetchRIB returned 19808 bytes
-// / 121 messages as uid 501.
-type RIBReader interface {
-	Routes() ([]RouteEntry, error)
-	Default() (RouteEntry, bool, error)
-	ScopedDefault(iface string) (RouteEntry, bool, error)
-	Exists(dst netip.Prefix, iface string) (bool, error)
-}
-
 // NewRIB returns the kernel-backed RIBReader.
 func NewRIB() RIBReader { return &kernelRIB{} }
 
