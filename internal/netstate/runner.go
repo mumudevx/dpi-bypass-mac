@@ -55,23 +55,15 @@ func newExecRunnerEnv(logf func(string, ...any), env []string) Runner {
 	return &execRunner{logf: logf, env: append([]string(nil), env...)}
 }
 
-// cmdline and firstLine duplicate the unexported helpers of the same name in
-// sysport. Result's move there exported only Failed, Reason and Error — the
-// three methods sysport.Runner's callers need — so this file's own log line
-// and services_darwin.go's error message keep small private copies instead of
-// growing sysport's surface for two call sites.
+// cmdline duplicates the unexported helper of the same name in sysport.
+// Result's move there exported only Failed, Reason and Error — the three
+// methods sysport.Runner's callers need — so this file's own log line keeps a
+// small private copy instead of growing sysport's surface for one call site.
+//
+// firstLine used to sit beside it for the same reason. Its one caller was
+// ListServices's error message, which left with the tool it was reading, so the
+// copy left too rather than staying behind as an unreachable helper.
 func cmdline(argv []string) string { return strings.Join(argv, " ") }
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "(no output)"
-	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
-}
 
 func (x *execRunner) Run(ctx context.Context, name string, args ...string) Result {
 	start := time.Now()

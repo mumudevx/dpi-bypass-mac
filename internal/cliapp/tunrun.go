@@ -471,14 +471,18 @@ func capturesV6(f *netstate.Facts) bool {
 // capture the user's own local resolver, and a run that died would leave the
 // services pointed at an address that answers nothing.
 func systemNameservers(ctx context.Context, env netstate.Env) []netip.Addr {
-	rs, err := netstate.ReadDNSResolvers(ctx, env)
+	// LiveNameservers is the unscoped resolver list a plain lookup uses, read
+	// and reduced in one call — the two-step read-then-pick-the-primary this
+	// used to do was the same pass with the macOS resolver blocks exposed
+	// halfway through it.
+	ns, err := netstate.LiveNameservers(ctx, env)
 	if err != nil {
 		env.Logf("run: --tun: read the system resolvers: %v", err)
 		return nil
 	}
 	var out []netip.Addr
 	seen := map[netip.Addr]bool{}
-	for _, s := range netstate.PrimaryNameservers(rs) {
+	for _, s := range ns {
 		a, err := netip.ParseAddr(strings.TrimSpace(s))
 		if err != nil || a.IsLoopback() || a.IsUnspecified() || seen[a] {
 			continue

@@ -26,7 +26,18 @@ var _ sysport.FactsCollector = factsCtl{}
 // selfIface names the tunnel this run owns, or "" before we have one; see
 // classifyVPN for why the classifier cannot work without being told.
 func (c factsCtl) Collect(ctx context.Context, selfIface string) (*sysport.Facts, error) {
-	e := c.p.env()
+	return collectFacts(ctx, c.p.env(), selfIface)
+}
+
+// CollectFacts is the reader form of the same pass, for a caller that has an
+// Env and no Port. It cannot be told which utun is ours — Collect is the only
+// way in that can — so it classifies with selfIface empty, which is correct for
+// every caller that asks before a tunnel exists.
+func CollectFacts(ctx context.Context, e Env) (*sysport.Facts, error) {
+	return collectFacts(ctx, e, "")
+}
+
+func collectFacts(ctx context.Context, e Env, selfIface string) (*sysport.Facts, error) {
 	if e.RIB == nil {
 		return nil, fmt.Errorf("netstate: cannot collect facts without a RIB reader")
 	}

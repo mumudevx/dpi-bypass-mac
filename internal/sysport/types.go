@@ -107,6 +107,19 @@ type Facts struct {
 // ProxySettings is one service's stored proxy configuration — the writer's own
 // view of it, used to capture what must be restored later.
 type ProxySettings struct {
+	// Kinds names the settings this value actually describes; nil means all of
+	// them, which is what Configured returns.
+	//
+	// It exists because a capture is not always whole-service. An Op that set a
+	// PAC URL read `networksetup -getautoproxyurl` and nothing else, so its
+	// captured web/secure/SOCKS fields are zero because they were never asked
+	// about — not because the user has no web proxy. A Restore that could not
+	// tell those apart would issue `-setwebproxy <svc> "" 0` on the way out and
+	// switch off a proxy this Op never touched, which is precisely what happens
+	// when a PAC Op and a web-proxy Op are reverted in sequence: the second
+	// revert undoes the first. It would also run six more networksetup
+	// invocations against the user's configuration than the mutation needed.
+	Kinds      []ProxyKind
 	AutoURL    string
 	AutoOn     bool
 	WebHost    string

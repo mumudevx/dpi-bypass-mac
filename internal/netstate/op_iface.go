@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/netip"
-	"strconv"
-	"strings"
+
+	"github.com/mumudevx/dpb/internal/sysport"
 )
 
 func init() { reviveByKind[OpIfconfig] = reviveIfconfig }
@@ -18,7 +17,7 @@ type ifconfigRevert struct {
 	MTU   int    `json:"mtu,omitempty"`
 }
 
-// ifconfigOp configures a utun's addresses and MTU with ifconfig(8) and
+// ifconfigOp configures a utun's addresses and MTU through the Port and
 // verifies the result through net.Interfaces(), which asks the kernel directly
 // rather than asking the tool that just claimed to have configured it.
 type ifconfigOp struct {
@@ -52,8 +51,22 @@ func (o *ifconfigOp) runner(e Env) Runner {
 	return e.runner()
 }
 
+// sys is the Port this Op mutates through, built from the Op's own Runner when
+// it has one. See routeOp.sys.
+func (o *ifconfigOp) sys(e Env) Port {
+	env := e
+	env.Runner = o.runner(e)
+	return env.sys()
+}
+
+// cfg is the state the device should be in. There is no family field: the
+// family follows from the address, and a flag beside it could disagree.
+func (o *ifconfigOp) cfg() sysport.IfaceConfig {
+	return sysport.IfaceConfig{Local: o.local, Peer: o.peer, MTU: o.mtu}
+}
+
 func (o *ifconfigOp) Apply(ctx context.Context, e Env) error {
-	return o.runner(e).Run(ctx, "ifconfig", o.applyArgs()...).Error()
+	return o.sys(e).Iface().Configure(ctx, o.iface, o.cfg())
 }
 
 func (o *ifconfigOp) Verify(_ context.Context, _ Env) error {
@@ -84,10 +97,10 @@ func (o *ifconfigOp) Verify(_ context.Context, _ Env) error {
 // attempted: the utun belongs to whoever opened its file descriptor, and it
 // disappears when they close it.
 func (o *ifconfigOp) Revert(ctx context.Context, e Env) error {
-	if res := o.runner(e).Run(ctx, "ifconfig", o.iface, o.family(), o.local, "-alias"); res.Failed() {
+	if err := o.sys(e).Iface().Unconfigure(ctx, o.iface, o.cfg()); err != nil {
 		// An already-gone utun makes ifconfig say "does not exist". That is the
 		// success case for a revert, so the kernel read below decides, not this.
-		e.logf("netstate: ifconfig -alias reported %q; the interface read decides", res.Reason())
+		e.logf("netstate: ifconfig -alias reported %q; the interface read decides", err)
 	}
 	return nil
 }

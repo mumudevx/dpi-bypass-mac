@@ -18,4 +18,8 @@ type (
 	RouteSpec  = sysport.RouteSpec
 	ProxyKind  = sysport.ProxyKind
 	Caps       = sysport.Caps
+
+	// ProxySettings is what a proxy Op captures and hands back to Restore.
+	// proxyPrev stays beside it as the JSON wire type; see proxyRevert.
+	ProxySettings = sysport.ProxySettings
 )

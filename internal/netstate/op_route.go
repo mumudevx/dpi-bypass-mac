@@ -14,8 +14,8 @@ type routeRevert struct {
 	Iface string `json:"iface,omitempty"`
 }
 
-// routeOp adds one kernel route with route(8) and verifies it by reading the
-// AF_ROUTE RIB.
+// routeOp adds one kernel route through the Port and verifies it by reading the
+// RIB, which is a different subsystem on every platform we implement.
 //
 // This is the Op the whole "do not believe your tools" rule was written for.
 // macOS route(8) cannot report failure through its exit status: Apple's
@@ -75,11 +75,26 @@ func (o *routeOp) runner(e Env) Runner {
 	return e.runner()
 }
 
+// sys is the Port this Op mutates through. An Op carries its own Runner —
+// NewRoute takes one — so the Port has to be built from that rather than from
+// the Env's, or a caller who passed a Runner to the constructor would find the
+// mutation going somewhere else.
+func (o *routeOp) sys(e Env) Port {
+	env := e
+	env.Runner = o.runner(e)
+	return env.sys()
+}
+
+// spec is what the route is, independent of how a platform installs it.
+func (o *routeOp) spec() RouteSpec {
+	return RouteSpec{Dst: o.dst, Gw: o.gw, Iface: o.iface}
+}
+
 func (o *routeOp) Apply(ctx context.Context, e Env) error {
-	// The Result is checked, but it is only the first line of defence: Verify
+	// The error is checked, but it is only the first line of defence: Verify
 	// reading the RIB is the one that decides.
 	o.added = false
-	if err := o.runner(e).Run(ctx, "route", o.args("add")...).Error(); err != nil {
+	if err := o.sys(e).Route().Add(ctx, o.spec()); err != nil {
 		return err
 	}
 	o.added = true
@@ -171,8 +186,8 @@ func (o *routeOp) Revert(ctx context.Context, e Env) error {
 		e.logf("netstate: cannot read the RIB before deleting %s (%v); issuing the delete and letting VerifyReverted decide",
 			o.ID(), err)
 	}
-	if res := o.runner(e).Run(ctx, "route", o.args("delete")...); res.Failed() {
-		e.logf("netstate: route delete reported %q; the RIB read decides", res.Reason())
+	if err := o.sys(e).Route().Delete(ctx, o.spec()); err != nil {
+		e.logf("netstate: route delete reported %q; the RIB read decides", err)
 	}
 	return nil
 }

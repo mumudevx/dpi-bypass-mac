@@ -65,6 +65,14 @@ func (o *dnsOp) runner(e Env) Runner {
 	return e.runner()
 }
 
+// sys is the Port this Op mutates through, built from the Op's own Runner when
+// it has one. See routeOp.sys.
+func (o *dnsOp) sys(e Env) Port {
+	env := e
+	env.Runner = o.runner(e)
+	return env.sys()
+}
+
 func (o *dnsOp) prepare(ctx context.Context, e Env) error {
 	if o.prepared {
 		return nil
@@ -72,22 +80,23 @@ func (o *dnsOp) prepare(ctx context.Context, e Env) error {
 	if len(o.servers) == 0 {
 		return fmt.Errorf("netstate: no DNS servers given")
 	}
-	env := e
-	env.Runner = o.runner(e)
+	sys := o.sys(e)
 	if len(o.services) == 0 {
-		svcs, err := ListServices(ctx, env)
+		// Proxy().Services is the Port's one enumeration of network services;
+		// it is not proxy-specific, and resolvers are set on the same list.
+		svcs, err := sys.Proxy().Services(ctx)
 		if err != nil {
 			return err
 		}
-		o.services = serviceNames(svcs)
+		o.services = svcs
 		if len(o.services) == 0 {
 			return fmt.Errorf("netstate: no enabled network services to configure")
 		}
 	}
 	o.prev = make(map[string][]string, len(o.services))
 	for _, svc := range o.services {
-		res := env.Runner.Run(ctx, "networksetup", "-getdnsservers", svc)
-		if err := res.Error(); err != nil {
+		got, err := sys.DNS().Configured(ctx, svc)
+		if err != nil {
 			return err
 		}
 		// notSelf: a captured resolver that is one of ours is the residue of a
@@ -95,17 +104,16 @@ func (o *dnsOp) prepare(ctx context.Context, e Env) error {
 		// leave the machine pointed at a resolver that is not listening. It is
 		// only OUR residue when a previous run is known to have died, though —
 		// otherwise 127.0.0.1 here is the user's own dnscrypt-proxy.
-		o.prev[svc] = notSelfServers(parseDNSServers(res.Combined), o.servers, e.PriorResidue)
+		o.prev[svc] = notSelfServers(got, o.servers, e.PriorResidue)
 	}
 	o.prepared = true
 	return nil
 }
 
 func (o *dnsOp) Apply(ctx context.Context, e Env) error {
-	r := o.runner(e)
+	dc := o.sys(e).DNS()
 	for _, svc := range o.services {
-		args := append([]string{"-setdnsservers", svc}, o.servers...)
-		if err := r.Run(ctx, "networksetup", args...).Error(); err != nil {
+		if err := dc.Set(ctx, svc, o.servers); err != nil {
 			return err
 		}
 	}
@@ -113,13 +121,10 @@ func (o *dnsOp) Apply(ctx context.Context, e Env) error {
 }
 
 func (o *dnsOp) Verify(ctx context.Context, e Env) error {
-	env := e
-	env.Runner = o.runner(e)
-	resolvers, err := readDNSResolvers(ctx, env)
+	got, err := o.sys(e).DNS().Live(ctx)
 	if err != nil {
 		return err
 	}
-	got := primaryNameservers(resolvers)
 	if !hasPrefixList(got, o.servers) {
 		return fmt.Errorf("scutil --dns reports nameservers %v, want them to start with %v", got, o.servers)
 	}
@@ -140,17 +145,17 @@ func hasPrefixList(got, want []string) bool {
 }
 
 func (o *dnsOp) Revert(ctx context.Context, e Env) error {
-	r := o.runner(e)
+	dc := o.sys(e).DNS()
 	var firstErr error
 	for _, svc := range o.services {
-		args := []string{"-setdnsservers", svc}
+		var err error
 		if prev := o.prev[svc]; len(prev) > 0 {
-			args = append(args, prev...)
+			err = dc.Set(ctx, svc, prev)
 		} else {
-			// networksetup's documented way of saying "back to DHCP".
-			args = append(args, "Empty")
+			// Clear is the platform's way of saying "back to DHCP".
+			err = dc.Clear(ctx, svc)
 		}
-		if err := r.Run(ctx, "networksetup", args...).Error(); err != nil && firstErr == nil {
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -158,24 +163,23 @@ func (o *dnsOp) Revert(ctx context.Context, e Env) error {
 }
 
 func (o *dnsOp) VerifyReverted(ctx context.Context, e Env) error {
-	env := e
-	env.Runner = o.runner(e)
-	resolvers, err := readDNSResolvers(ctx, env)
+	sys := o.sys(e)
+	got, err := sys.DNS().Live(ctx)
 	if err != nil {
 		return err
 	}
-	if got := primaryNameservers(resolvers); hasPrefixList(got, o.servers) {
+	if hasPrefixList(got, o.servers) {
 		return fmt.Errorf("scutil --dns still reports our nameservers %v", o.servers)
 	}
 	// scutil reports the primary service only, while Revert mutated every
 	// service in o.services. Read the rest back so the verifier covers every
 	// mutation instead of one of them.
 	for _, svc := range o.services {
-		res := env.Runner.Run(ctx, "networksetup", "-getdnsservers", svc)
-		if err := res.Error(); err != nil {
+		stored, err := sys.DNS().Configured(ctx, svc)
+		if err != nil {
 			return err
 		}
-		if hasPrefixList(parseDNSServers(res.Combined), o.servers) {
+		if hasPrefixList(stored, o.servers) {
 			return fmt.Errorf("networksetup still reports our nameservers %v on %s", o.servers, svc)
 		}
 	}

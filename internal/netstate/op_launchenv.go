@@ -93,20 +93,28 @@ func (o *launchEnvOp) runner(e Env) Runner {
 	return e.runner()
 }
 
+// sys is the Port this Op mutates through, built from the Op's own Runner when
+// it has one. See routeOp.sys.
+func (o *launchEnvOp) sys(e Env) Port {
+	env := e
+	env.Runner = o.runner(e)
+	return env.sys()
+}
+
 func (o *launchEnvOp) prepare(ctx context.Context, e Env) error {
 	if o.prepared {
 		return nil
 	}
-	r := o.runner(e)
+	ec := o.sys(e).Env()
 	o.prev = make(map[string]string, len(o.vars))
 	o.prevSet = make(map[string]bool, len(o.vars))
 	for _, name := range o.names() {
-		res := r.Run(ctx, "launchctl", "getenv", name)
-		if err := res.Error(); err != nil {
+		// An unset variable reads as ("", false, nil): launchctl prints nothing
+		// for one, and some builds exit non-zero while doing so.
+		val, _, err := ec.Get(ctx, name)
+		if err != nil {
 			return err
 		}
-		// launchctl prints nothing and exits 0 for an unset variable.
-		val := strings.TrimSpace(res.Combined)
 		// notSelf: a leftover value from a SIGKILLed run points at a port nobody
 		// is listening on. Record it as unset so Revert clears it. "Leftover" is
 		// an exact match against the value we are about to export — a user who
@@ -138,9 +146,9 @@ func (o *launchEnvOp) isSelfValue(name, val string, priorResidue bool) bool {
 }
 
 func (o *launchEnvOp) Apply(ctx context.Context, e Env) error {
-	r := o.runner(e)
+	ec := o.sys(e).Env()
 	for _, name := range o.names() {
-		if err := r.Run(ctx, "launchctl", "setenv", name, o.vars[name]).Error(); err != nil {
+		if err := ec.Set(ctx, name, o.vars[name]); err != nil {
 			return err
 		}
 	}
@@ -148,13 +156,13 @@ func (o *launchEnvOp) Apply(ctx context.Context, e Env) error {
 }
 
 func (o *launchEnvOp) Verify(ctx context.Context, e Env) error {
-	r := o.runner(e)
+	ec := o.sys(e).Env()
 	for _, name := range o.names() {
-		res := r.Run(ctx, "launchctl", "getenv", name)
-		if err := res.Error(); err != nil {
+		got, _, err := ec.Get(ctx, name)
+		if err != nil {
 			return err
 		}
-		if got := strings.TrimSpace(res.Combined); got != o.vars[name] {
+		if got != o.vars[name] {
 			return fmt.Errorf("launchctl getenv %s returned %q, want %q", name, got, o.vars[name])
 		}
 	}
@@ -162,16 +170,16 @@ func (o *launchEnvOp) Verify(ctx context.Context, e Env) error {
 }
 
 func (o *launchEnvOp) Revert(ctx context.Context, e Env) error {
-	r := o.runner(e)
+	ec := o.sys(e).Env()
 	var firstErr error
 	for _, name := range o.names() {
-		var res Result
+		var err error
 		if o.prevSet[name] {
-			res = r.Run(ctx, "launchctl", "setenv", name, o.prev[name])
+			err = ec.Set(ctx, name, o.prev[name])
 		} else {
-			res = r.Run(ctx, "launchctl", "unsetenv", name)
+			err = ec.Unset(ctx, name)
 		}
-		if err := res.Error(); err != nil && firstErr == nil {
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -179,13 +187,13 @@ func (o *launchEnvOp) Revert(ctx context.Context, e Env) error {
 }
 
 func (o *launchEnvOp) VerifyReverted(ctx context.Context, e Env) error {
-	r := o.runner(e)
+	ec := o.sys(e).Env()
 	for _, name := range o.names() {
-		res := r.Run(ctx, "launchctl", "getenv", name)
-		if err := res.Error(); err != nil {
+		got, _, err := ec.Get(ctx, name)
+		if err != nil {
 			return err
 		}
-		if got := strings.TrimSpace(res.Combined); got == o.vars[name] && got != "" {
+		if got == o.vars[name] && got != "" {
 			return fmt.Errorf("launchctl getenv %s still returns our value %q", name, got)
 		}
 	}

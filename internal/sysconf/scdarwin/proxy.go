@@ -42,6 +42,7 @@ func (c proxyCtl) Services(ctx context.Context) ([]string, error) {
 func (c proxyCtl) Configured(ctx context.Context, svc string) (sysport.ProxySettings, error) {
 	var p sysport.ProxySettings
 	r := c.p.run
+	p.Kinds = allProxyKinds
 
 	kv, err := networksetupKV(ctx, r, "-getautoproxyurl", svc)
 	if err != nil {
@@ -129,8 +130,11 @@ func (c proxyCtl) Restore(ctx context.Context, svc string, prev sysport.ProxySet
 		}
 		// soft: clearing a stored proxy field is tidying, and what the user
 		// actually needs is the setting switched off. A networksetup that
-		// refuses an empty server must not fail the whole restore.
+		// refuses an empty server must not fail the whole restore — but it is
+		// still said out loud, because a silently absent tidy-up is how a
+		// stale Server behind a disabled toggle survives a clean exit.
 		if cmd.soft {
+			c.p.env().logf("netstate: %v (tidying only; the state command decides)", err)
 			continue
 		}
 		if firstErr == nil {
@@ -149,6 +153,23 @@ type restoreCmd struct {
 	soft bool
 }
 
+// allProxyKinds is what a whole-service capture describes.
+var allProxyKinds = []sysport.ProxyKind{sysport.ProxyAuto, sysport.ProxyWeb, sysport.ProxySOCKS}
+
+// wants reports whether p describes kind. A nil Kinds means the capture was
+// whole-service, which is what Configured returns.
+func wants(p sysport.ProxySettings, kind sysport.ProxyKind) bool {
+	if p.Kinds == nil {
+		return true
+	}
+	for _, k := range p.Kinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
 // restoreCmds builds the absolute state to restore. It is idempotent by
 // construction: every command sets a value rather than toggling one.
 //
@@ -159,49 +180,61 @@ type restoreCmd struct {
 // pointing at our dead port, and the next time the user ticks the box in System
 // Settings they get a total HTTP/HTTPS outage. Clearing the fields first
 // restores what was there before us.
+//
+// Only the kinds p claims to describe are emitted. A zero field in a group the
+// capture never read is not "there was nothing here" — see ProxySettings.Kinds.
 func restoreCmds(svc string, p sysport.ProxySettings) []restoreCmd {
 	var cmds []restoreCmd
 
-	if p.AutoURL == "" {
-		// Either there was nothing here, or what was here was ours. Both mean
-		// "off": pinning the user to a dead PAC URL is worse than no PAC.
-		cmds = append(cmds,
-			restoreCmd{args: []string{"-setautoproxyurl", svc, ""}, soft: true},
-			restoreCmd{args: []string{"-setautoproxystate", svc, "off"}})
-	} else {
-		cmds = append(cmds,
-			restoreCmd{args: []string{"-setautoproxyurl", svc, p.AutoURL}},
-			restoreCmd{args: []string{"-setautoproxystate", svc, onOff(p.AutoOn)}})
+	if wants(p, sysport.ProxyAuto) {
+		if p.AutoURL == "" {
+			// Either there was nothing here, or what was here was ours. Both mean
+			// "off": pinning the user to a dead PAC URL is worse than no PAC.
+			cmds = append(cmds,
+				restoreCmd{args: []string{"-setautoproxyurl", svc, ""}, soft: true},
+				restoreCmd{args: []string{"-setautoproxystate", svc, "off"}})
+		} else {
+			cmds = append(cmds,
+				restoreCmd{args: []string{"-setautoproxyurl", svc, p.AutoURL}},
+				restoreCmd{args: []string{"-setautoproxystate", svc, onOff(p.AutoOn)}})
+		}
 	}
 
-	if p.WebHost == "" {
-		cmds = append(cmds,
-			restoreCmd{args: []string{"-setwebproxy", svc, "", "0"}, soft: true},
-			restoreCmd{args: []string{"-setwebproxystate", svc, "off"}})
-	} else {
-		cmds = append(cmds,
-			restoreCmd{args: []string{"-setwebproxy", svc, p.WebHost, strconv.Itoa(p.WebPort)}},
-			restoreCmd{args: []string{"-setwebproxystate", svc, onOff(p.WebOn)}})
+	// Web and secure are one kind: macOS treats them as separate settings but
+	// they are never useful apart, so a capture that named ProxyWeb captured
+	// both and a restore puts both back.
+	if wants(p, sysport.ProxyWeb) {
+		if p.WebHost == "" {
+			cmds = append(cmds,
+				restoreCmd{args: []string{"-setwebproxy", svc, "", "0"}, soft: true},
+				restoreCmd{args: []string{"-setwebproxystate", svc, "off"}})
+		} else {
+			cmds = append(cmds,
+				restoreCmd{args: []string{"-setwebproxy", svc, p.WebHost, strconv.Itoa(p.WebPort)}},
+				restoreCmd{args: []string{"-setwebproxystate", svc, onOff(p.WebOn)}})
+		}
+
+		if p.SecureHost == "" {
+			cmds = append(cmds,
+				restoreCmd{args: []string{"-setsecurewebproxy", svc, "", "0"}, soft: true},
+				restoreCmd{args: []string{"-setsecurewebproxystate", svc, "off"}})
+		} else {
+			cmds = append(cmds,
+				restoreCmd{args: []string{"-setsecurewebproxy", svc, p.SecureHost, strconv.Itoa(p.SecurePort)}},
+				restoreCmd{args: []string{"-setsecurewebproxystate", svc, onOff(p.SecureOn)}})
+		}
 	}
 
-	if p.SecureHost == "" {
-		cmds = append(cmds,
-			restoreCmd{args: []string{"-setsecurewebproxy", svc, "", "0"}, soft: true},
-			restoreCmd{args: []string{"-setsecurewebproxystate", svc, "off"}})
-	} else {
-		cmds = append(cmds,
-			restoreCmd{args: []string{"-setsecurewebproxy", svc, p.SecureHost, strconv.Itoa(p.SecurePort)}},
-			restoreCmd{args: []string{"-setsecurewebproxystate", svc, onOff(p.SecureOn)}})
-	}
-
-	if p.SOCKSHost == "" {
-		cmds = append(cmds,
-			restoreCmd{args: []string{"-setsocksfirewallproxy", svc, "", "0"}, soft: true},
-			restoreCmd{args: []string{"-setsocksfirewallproxystate", svc, "off"}})
-	} else {
-		cmds = append(cmds,
-			restoreCmd{args: []string{"-setsocksfirewallproxy", svc, p.SOCKSHost, strconv.Itoa(p.SOCKSPort)}},
-			restoreCmd{args: []string{"-setsocksfirewallproxystate", svc, onOff(p.SOCKSOn)}})
+	if wants(p, sysport.ProxySOCKS) {
+		if p.SOCKSHost == "" {
+			cmds = append(cmds,
+				restoreCmd{args: []string{"-setsocksfirewallproxy", svc, "", "0"}, soft: true},
+				restoreCmd{args: []string{"-setsocksfirewallproxystate", svc, "off"}})
+		} else {
+			cmds = append(cmds,
+				restoreCmd{args: []string{"-setsocksfirewallproxy", svc, p.SOCKSHost, strconv.Itoa(p.SOCKSPort)}},
+				restoreCmd{args: []string{"-setsocksfirewallproxystate", svc, onOff(p.SOCKSOn)}})
+		}
 	}
 
 	return cmds
@@ -284,6 +317,14 @@ func readProxyState(ctx context.Context, e Env) (sysport.ProxyState, error) {
 func ReadProxyState(ctx context.Context, e Env) (sysport.ProxyState, error) {
 	return readProxyState(ctx, e)
 }
+
+// ParseProxyState parses `scutil --proxy` output that a caller already has.
+//
+// It is exported for one reason: netstate decides whether a ProxyState
+// satisfies a request (checkProxyPair), that decision stayed behind when the
+// parser moved here, and the assertions that pin it need a real capture to run
+// against rather than a hand-built map. Parsing is the only thing it does.
+func ParseProxyState(out string) sysport.ProxyState { return parseProxyState(out) }
 
 // networksetupKV runs a networksetup getter and parses its "Key: value" output.
 func networksetupKV(ctx context.Context, r sysport.Runner, args ...string) (map[string]string, error) {
