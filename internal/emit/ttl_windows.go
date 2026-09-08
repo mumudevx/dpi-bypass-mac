@@ -80,10 +80,23 @@ func defaultHopLimit(v6 bool) (int, error) {
 // onto something we can ask about.
 func readSocketTTL(v6 bool) (int, error) {
 	network := "udp4"
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}
 	if v6 {
 		network = "udp6"
+		addr = &net.UDPAddr{IP: net.IPv6loopback}
 	}
-	conn, err := net.ListenUDP(network, nil)
+	// Loopback, not the wildcard a nil address would bind.
+	//
+	// Windows Defender Firewall prompts "Allow this app to communicate on
+	// these networks?" the first time an unsigned binary binds a UDP socket to
+	// a routable address. A nil address here binds 0.0.0.0, so dpb would raise
+	// that dialog LAZILY — not at install, not at start-up, but on the first
+	// connection that needs a desync, in the middle of a page load, twice
+	// (once for v4 and again for v6), for a socket that never sends a byte.
+	// The kernel stamps its default hop limit on a loopback-bound socket
+	// exactly as it does on a wildcard one, so the value read back is the same
+	// and the prompt does not happen.
+	conn, err := net.ListenUDP(network, addr)
 	if err != nil {
 		return 0, fmt.Errorf("emit: open throwaway %s socket for default TTL: %w", network, err)
 	}

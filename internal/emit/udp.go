@@ -41,8 +41,8 @@ var _ Transport = (*UDPTransport)(nil)
 // a sysctl read, so this is a measurement of this machine, not a constant.
 func UDPCaps(v6 bool) strategy.Cap {
 	caps := strategy.CapStreamWrite | strategy.CapNoDelay | strategy.CapDatagram
-	if ttl, err := defaultHopLimit(v6); err == nil && ttl > 0 {
-		caps |= sockTTLCaps
+	if _, granted := grantHopLimit(v6); granted != 0 {
+		caps |= granted
 	}
 	return caps
 }
@@ -83,12 +83,15 @@ func NewUDPTransport(c *net.UDPConn) (*UDPTransport, error) {
 	}
 	t.v6 = t.local.IsValid() && !t.local.Addr().Is4()
 
-	if ttl, err := defaultHopLimit(t.v6); err == nil && ttl > 0 {
+	if ttl, granted := grantHopLimit(t.v6); granted != 0 {
 		t.defTTL = ttl
 		// Both bits: the op declares CapUDPTTL, but strategy.Plan.Caps derives
 		// CapSockTTL from any segment carrying a TTL, so a transport that can do
 		// one must advertise the other or no TTL plan will ever validate.
-		t.caps |= sockTTLCaps
+		// grantHopLimit returns them together, and says on stderr when it
+		// cannot — a quicfake rung that vanishes without a word is a downgrade
+		// nobody can debug.
+		t.caps |= granted
 	}
 	return t, nil
 }
