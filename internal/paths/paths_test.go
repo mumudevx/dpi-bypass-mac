@@ -1,3 +1,9 @@
+//go:build !windows
+
+// This file exercises resolve()'s Unix-only behaviour — SUDO_USER, the uid==0
+// daemon path, /Library — which paths_unix.go now owns exclusively. It cannot
+// compile for windows (systemRoot etc. no longer exist there); windows'
+// equivalent lives in paths_windows_test.go. No assertion here changed.
 package paths
 
 import (
