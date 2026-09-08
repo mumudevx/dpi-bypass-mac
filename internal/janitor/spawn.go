@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -102,18 +101,26 @@ func (c *Child) PID() int {
 // empty journal and exit — but it would also leave a stray process behind for
 // every run, and a user who sees two dpb processes in Activity Monitor has no
 // way to know which one is the real one.
+//
+// HOW the child is asked to go is a platform leaf, requestStop: SIGTERM on
+// Unix, TerminateProcess on Windows. It has to be, because a shared
+// Process.Signal(SIGTERM) is not merely less graceful on Windows, it is an
+// immediate error there — os/exec_windows.go answers every signal but Kill
+// with syscall.EWINDOWS — so this, the NORMAL exit path, would report
+// "not supported by windows" on every clean Ctrl-C and stall the whole
+// stopBudget first because nothing had actually been asked to exit.
 func (c *Child) Stop() error {
 	if c == nil || c.cmd == nil || c.cmd.Process == nil {
 		return nil
 	}
 	c.once.Do(func() {
-		if err := c.cmd.Process.Signal(syscall.SIGTERM); err != nil &&
+		if err := requestStop(c.cmd.Process); err != nil &&
 			!errors.Is(err, os.ErrProcessDone) {
 			c.err = fmt.Errorf("janitor: stop child %d: %w", c.cmd.Process.Pid, err)
 		}
 		// Reap it, but never block the parent's teardown budget on it: a
-		// janitor that ignores SIGTERM is a bug worth reporting, not a reason
-		// to hold the user's network settings hostage.
+		// janitor that ignores the stop request is a bug worth reporting, not
+		// a reason to hold the user's network settings hostage.
 		done := make(chan struct{})
 		go func() {
 			defer close(done)

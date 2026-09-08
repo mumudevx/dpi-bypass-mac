@@ -17,7 +17,13 @@ import (
 // matters — the parent's own clean shutdown, which cancels ctx precisely so
 // its janitor stops watching once UndoAll has already run — would then have no
 // way to make this function return.
-const waitSlice = time.Second
+//
+// It is deliberately the SAME 250ms as wait_darwin.go's pollInterval. This
+// number is not a poll rate — the parent's death wakes the wait immediately on
+// both platforms — it is the worst-case delay between a cancelled context and
+// this function honouring it, and there is no reason for a Windows janitor to
+// take four times longer to notice than a macOS one.
+const waitSlice = 250 * time.Millisecond
 
 // WaitForExit blocks until pid has exited, and returns nil the moment it has.
 //
@@ -53,6 +59,14 @@ func WaitForExit(ctx context.Context, pid int) error {
 
 	ms := uint32(waitSlice / time.Millisecond)
 	for {
+		// Before the wait, not only after it. Checking only afterwards meant an
+		// ALREADY-cancelled context still bought a full slice of waiting for an
+		// answer nobody was going to use, which is time added to the teardown a
+		// user is watching. The wait itself is what the loop exists for, so the
+		// cheap question is asked first.
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		event, err := windows.WaitForSingleObject(h, ms)
 		if err != nil {
 			return fmt.Errorf("janitor: wait for pid %d to exit: %w", pid, err)
@@ -63,8 +77,5 @@ func WaitForExit(ctx context.Context, pid int) error {
 		// event is WAIT_TIMEOUT: this slice elapsed with the process still
 		// running. Go round again — the loop, not this call, is what makes the
 		// wait cancellable.
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
 	}
 }
