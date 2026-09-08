@@ -111,17 +111,17 @@ const (
 // ProxySettings is one service's stored proxy configuration — the writer's own
 // view of it, used to capture what must be restored later.
 type ProxySettings struct {
-	AutoURL     string
-	AutoOn      bool
-	WebHost     string
-	WebPort     int
-	WebOn       bool
-	SecureHost  string
-	SecurePort  int
-	SecureOn    bool
-	SOCKSHost   string
-	SOCKSPort   int
-	SOCKSOn     bool
+	AutoURL    string
+	AutoOn     bool
+	WebHost    string
+	WebPort    int
+	WebOn      bool
+	SecureHost string
+	SecurePort int
+	SecureOn   bool
+	SOCKSHost  string
+	SOCKSPort  int
+	SOCKSOn    bool
 }
 
 type ProxyController interface {
@@ -149,12 +149,31 @@ type DNSController interface {
 	Live(ctx context.Context) ([]string, error)
 }
 
+// IfaceConfig is the state a tunnel device should be in. It is one value
+// because macOS reaches it in one ifconfig invocation; a platform that needs
+// several calls makes them behind Configure.
+//
+// There is no family field: the family is derived from Local (an address with a
+// colon in it is v6), because a flag beside the address could disagree with the
+// address the kernel is actually given.
+type IfaceConfig struct {
+	Local string
+	Peer  string // v4 point-to-point peer; empty for v6, which takes a prefix length
+	MTU   int
+}
+
 type IfaceController interface {
-	SetAddr(ctx context.Context, iface, local, peer string) error
-	SetMTU(ctx context.Context, iface string, mtu int) error
-	Up(ctx context.Context, iface string) error
+	// Configure brings iface to cfg. macOS emits a single ifconfig carrying
+	// address, peer or prefixlen, MTU and up — splitting that into separate
+	// calls would change the argv the kernel sees, which ops_test.go asserts
+	// byte-for-byte.
+	Configure(ctx context.Context, iface string, cfg IfaceConfig) error
+	// Unconfigure removes the address Configure added. It deliberately does not
+	// bring the interface down: a utun belongs to whoever holds its file
+	// descriptor and vanishes when they close it.
+	Unconfigure(ctx context.Context, iface string, cfg IfaceConfig) error
 	// Addrs reads an interface's addresses back through a different subsystem
-	// than SetAddr wrote through (verify).
+	// than Configure wrote through (verify).
 	Addrs(ctx context.Context, iface string) ([]netip.Addr, error)
 }
 
@@ -165,7 +184,10 @@ type EnvController interface {
 }
 
 type FactsCollector interface {
-	Collect(ctx context.Context) (*Facts, error)
+	// Collect reads the machine's network identity. selfIface names the tunnel
+	// THIS run owns, or "" before we have one — classifyVPN needs it because our
+	// own capture routes are indistinguishable from a full-tunnel VPN's.
+	Collect(ctx context.Context, selfIface string) (*Facts, error)
 }
 
 // Caps is the system-mutation analogue of strategy.Cap. A capability a platform
@@ -174,13 +196,13 @@ type FactsCollector interface {
 type Caps uint32
 
 const (
-	CapProxyAuto Caps = 1 << iota // can point the system at a PAC URL
-	CapProxyManual                // can set an explicit host:port proxy
-	CapDNSOverride                // can replace the system resolvers
-	CapRouteWrite                 // can add and delete routes
-	CapIfaceConfig                // can address and MTU a tunnel device
-	CapSessionEnv                 // can set a login-session environment variable
-	CapPerService                 // system state is per network service, not global
+	CapProxyAuto   Caps = 1 << iota // can point the system at a PAC URL
+	CapProxyManual                  // can set an explicit host:port proxy
+	CapDNSOverride                  // can replace the system resolvers
+	CapRouteWrite                   // can add and delete routes
+	CapIfaceConfig                  // can address and MTU a tunnel device
+	CapSessionEnv                   // can set a login-session environment variable
+	CapPerService                   // system state is per network service, not global
 )
 
 func (c Caps) Has(want Caps) bool { return c&want == want }
