@@ -191,7 +191,9 @@ func (o *proxyOp) prepare(ctx context.Context, e Env) error {
 	}
 	o.prev = make(map[string]proxyPrev, len(o.services))
 	for _, svc := range o.services {
-		st, err := sys.Proxy().Configured(ctx, svc)
+		// Only this Op's own kind is read. A getter that fails for a setting
+		// this Op will never touch must not abort the apply.
+		st, err := sys.Proxy().Configured(ctx, svc, o.kindOf())
 		if err != nil {
 			return err
 		}
@@ -347,7 +349,7 @@ func (o *proxyOp) VerifyReverted(ctx context.Context, e Env) error {
 }
 
 func (o *proxyOp) verifyServiceReverted(ctx context.Context, sys Port, svc string) error {
-	st, err := sys.Proxy().Configured(ctx, svc)
+	st, err := sys.Proxy().Configured(ctx, svc, o.kindOf())
 	if err != nil {
 		return err
 	}

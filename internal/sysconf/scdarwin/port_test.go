@@ -3,6 +3,7 @@ package scdarwin
 import (
 	"context"
 	"net/netip"
+	"reflect"
 	"testing"
 
 	"github.com/mumudevx/dpb/internal/sysport"
@@ -110,4 +111,60 @@ func hasAddr(addrs []netip.Addr, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestConfiguredNarrowsToTheRequestedKinds pins the contract change: one getter
+// per requested kind and no more, because each getter fails independently and a
+// caller that reads a setting it will never restore inherits that setting's
+// failures. Passing no kinds still reads the whole service, for a caller that
+// genuinely wants it.
+func TestConfiguredNarrowsToTheRequestedKinds(t *testing.T) {
+	const (
+		auto   = "networksetup -getautoproxyurl Wi-Fi"
+		web    = "networksetup -getwebproxy Wi-Fi"
+		secure = "networksetup -getsecurewebproxy Wi-Fi"
+		socks  = "networksetup -getsocksfirewallproxy Wi-Fi"
+	)
+	cases := []struct {
+		name string
+		kind []sysport.ProxyKind
+		want []string
+	}{
+		{"auto", []sysport.ProxyKind{sysport.ProxyAuto}, []string{auto}},
+		// Web and secure are one kind: they are never useful apart.
+		{"web", []sysport.ProxyKind{sysport.ProxyWeb}, []string{web, secure}},
+		{"socks", []sysport.ProxyKind{sysport.ProxySOCKS}, []string{socks}},
+		{"no kinds reads the whole service", nil, []string{auto, web, secure, socks}},
+	}
+	all := []string{auto, web, secure, socks}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeSystem()
+			got, err := New(f.env0()).Proxy().Configured(context.Background(), "Wi-Fi", c.kind...)
+			if err != nil {
+				t.Fatalf("Configured: %v", err)
+			}
+			// Kinds records what was asked for, so Restore puts back exactly
+			// that and leaves the rest of the service alone.
+			wantKinds := c.kind
+			if wantKinds == nil {
+				wantKinds = allProxyKinds
+			}
+			if !reflect.DeepEqual(got.Kinds, wantKinds) {
+				t.Errorf("Kinds = %v, want %v", got.Kinds, wantKinds)
+			}
+			for _, cmd := range all {
+				ran := len(f.callsContaining(cmd)) > 0
+				wanted := false
+				for _, w := range c.want {
+					if w == cmd {
+						wanted = true
+					}
+				}
+				if ran != wanted {
+					t.Errorf("%q ran = %v, want %v", cmd, ran, wanted)
+				}
+			}
+		})
+	}
 }

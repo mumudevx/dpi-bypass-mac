@@ -31,49 +31,61 @@ func (c proxyCtl) Services(ctx context.Context) ([]string, error) {
 	return serviceNames(svcs), nil
 }
 
-// Configured reads one service's stored proxy configuration through
-// networksetup — the same subsystem the setters write to. It is for CAPTURE,
-// never for verification; Live is the verifier.
+// Configured reads svc's stored proxy configuration through networksetup — the
+// same subsystem the setters write to. It is for CAPTURE, never for
+// verification; Live is the verifier.
 //
-// Every setting is read, not just the one a caller is about to change, because
-// Restore takes the whole value back: a Port that captured only the auto-proxy
-// fields would have to restore the others from zero, which is how a revert
-// switches off a web proxy the user set themselves.
-func (c proxyCtl) Configured(ctx context.Context, svc string) (sysport.ProxySettings, error) {
-	var p sysport.ProxySettings
+// One networksetup getter runs per requested kind, and no more. Reading a kind
+// the caller does not need is not merely slow: each getter is a separate
+// invocation with its own failure, so a `-getsocksfirewallproxy` that errors on
+// a service would abort a PAC capture that has nothing to do with SOCKS. The
+// returned value records which kinds it describes, so Restore puts back exactly
+// what was read and leaves the rest of the service alone.
+func (c proxyCtl) Configured(ctx context.Context, svc string, kinds ...sysport.ProxyKind) (sysport.ProxySettings, error) {
+	if len(kinds) == 0 {
+		kinds = allProxyKinds
+	}
+	p := sysport.ProxySettings{Kinds: append([]sysport.ProxyKind(nil), kinds...)}
 	r := c.p.run
-	p.Kinds = allProxyKinds
 
-	kv, err := networksetupKV(ctx, r, "-getautoproxyurl", svc)
-	if err != nil {
-		return p, err
+	if wants(p, sysport.ProxyAuto) {
+		kv, err := networksetupKV(ctx, r, "-getautoproxyurl", svc)
+		if err != nil {
+			return p, err
+		}
+		p.AutoURL = nullToEmpty(kv["URL"])
+		p.AutoOn = yes(kv["Enabled"])
 	}
-	p.AutoURL = nullToEmpty(kv["URL"])
-	p.AutoOn = yes(kv["Enabled"])
 
-	kv, err = networksetupKV(ctx, r, "-getwebproxy", svc)
-	if err != nil {
-		return p, err
-	}
-	p.WebPort = atoi(kv["Port"])
-	p.WebHost = nullToEmpty(kv["Server"])
-	p.WebOn = yes(kv["Enabled"])
+	// Web and secure are one kind: macOS treats them as separate settings but
+	// they are never useful apart, and Restore puts both back together.
+	if wants(p, sysport.ProxyWeb) {
+		kv, err := networksetupKV(ctx, r, "-getwebproxy", svc)
+		if err != nil {
+			return p, err
+		}
+		p.WebPort = atoi(kv["Port"])
+		p.WebHost = nullToEmpty(kv["Server"])
+		p.WebOn = yes(kv["Enabled"])
 
-	kv, err = networksetupKV(ctx, r, "-getsecurewebproxy", svc)
-	if err != nil {
-		return p, err
+		kv, err = networksetupKV(ctx, r, "-getsecurewebproxy", svc)
+		if err != nil {
+			return p, err
+		}
+		p.SecurePort = atoi(kv["Port"])
+		p.SecureHost = nullToEmpty(kv["Server"])
+		p.SecureOn = yes(kv["Enabled"])
 	}
-	p.SecurePort = atoi(kv["Port"])
-	p.SecureHost = nullToEmpty(kv["Server"])
-	p.SecureOn = yes(kv["Enabled"])
 
-	kv, err = networksetupKV(ctx, r, "-getsocksfirewallproxy", svc)
-	if err != nil {
-		return p, err
+	if wants(p, sysport.ProxySOCKS) {
+		kv, err := networksetupKV(ctx, r, "-getsocksfirewallproxy", svc)
+		if err != nil {
+			return p, err
+		}
+		p.SOCKSPort = atoi(kv["Port"])
+		p.SOCKSHost = nullToEmpty(kv["Server"])
+		p.SOCKSOn = yes(kv["Enabled"])
 	}
-	p.SOCKSPort = atoi(kv["Port"])
-	p.SOCKSHost = nullToEmpty(kv["Server"])
-	p.SOCKSOn = yes(kv["Enabled"])
 
 	return p, nil
 }

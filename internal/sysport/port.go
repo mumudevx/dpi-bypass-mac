@@ -49,9 +49,15 @@ type ProxyController interface {
 	// Services lists the network services a proxy may be set on. On Windows
 	// this is a single pseudo-service; see scwindows.
 	Services(ctx context.Context) ([]string, error)
-	// Configured reads one service's stored settings through the same subsystem
-	// the setters write to. This is for CAPTURE, never for verification.
-	Configured(ctx context.Context, svc string) (ProxySettings, error)
+	// Configured reads svc's stored settings through the same subsystem the
+	// setters write to. This is for CAPTURE, never for verification.
+	//
+	// kinds narrows the read to the settings the caller actually intends to
+	// restore. That is not an optimisation: reading a kind the caller does not
+	// need means a getter that fails for an unrelated setting aborts the whole
+	// apply. Passing no kinds reads all of them, which only a caller that
+	// genuinely wants the whole service should do.
+	Configured(ctx context.Context, svc string, kinds ...ProxyKind) (ProxySettings, error)
 	SetAuto(ctx context.Context, svc, url string) error
 	SetManual(ctx context.Context, svc string, kind ProxyKind, host string, port int) error
 	Restore(ctx context.Context, svc string, prev ProxySettings) error

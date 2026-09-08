@@ -50,7 +50,7 @@ func (unsupportedProxy) Services(context.Context) ([]string, error) {
 	return nil, unsupported("listing network services")
 }
 
-func (unsupportedProxy) Configured(context.Context, string) (sysport.ProxySettings, error) {
+func (unsupportedProxy) Configured(context.Context, string, ...sysport.ProxyKind) (sysport.ProxySettings, error) {
 	return sysport.ProxySettings{}, unsupported("reading a service's proxy settings")
 }
 
