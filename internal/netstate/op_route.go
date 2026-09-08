@@ -79,6 +79,18 @@ func (o *routeOp) runner(e Env) Runner {
 // NewRoute takes one — so the Port has to be built from that rather than from
 // the Env's, or a caller who passed a Runner to the constructor would find the
 // mutation going somewhere else.
+//
+// The precedence, stated because the assignment below hides it: Env.sys()
+// returns e.Sys whenever the caller set one and NEVER consults Runner in that
+// case (manager.go:62). A Port beats a Runner. cliapp sets Sys on every Env it
+// hands an Op (root.go:222), so in the shipped configuration this assignment
+// decides nothing at all.
+//
+// It stays anyway, and not out of caution: it is what decides for an Env that
+// carries a Runner and no Port, which is how most of this package's tests and
+// any embedder written before Env.Sys existed construct one. Deleting it would
+// silently reroute those from the Op's Runner to the Env's — a change in which
+// runner wins, which is a semantic change rather than a cleanup.
 func (o *routeOp) sys(e Env) Port {
 	env := e
 	env.Runner = o.runner(e)
