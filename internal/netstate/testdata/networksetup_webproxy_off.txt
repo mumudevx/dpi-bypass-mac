@@ -1,4 +1,0 @@
-Enabled: No
-Server: 127.0.0.1
-Port: 8080
-Authenticated Proxy Enabled: 0
