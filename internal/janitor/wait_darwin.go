@@ -1,3 +1,14 @@
+//go:build darwin
+
+// This file stays darwin-only rather than becoming wait_unix.go under
+// //go:build !windows: unix.Kqueue, EVFILT_PROC and NOTE_EXIT are BSD kernel
+// primitives that darwin happens to expose through golang.org/x/sys/unix, not
+// a POSIX or portable-unix facility — Linux has no kqueue at all; it watches
+// process exit through epoll on a pidfd or by polling /proc. A //go:build
+// !windows tag here would be a lie: it would claim to build on every
+// non-Windows GOOS and then fail on Linux with "undefined: unix.Kqueue". See
+// wait_windows.go for the platform this task actually adds.
+
 package janitor
 
 import (

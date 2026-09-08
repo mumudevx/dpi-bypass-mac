@@ -49,10 +49,9 @@ type Child struct {
 
 // Spawn starts the janitor child.
 //
-// The child is put in its OWN session with setsid. Without it the janitor
-// shares the parent's process group, so the Ctrl-C that stops dpb is delivered
-// to the janitor too — and the one exit path it exists to cover, a `kill -9` of
-// the whole group, would kill the watcher along with the watched.
+// Detaching the child from its parent is platform-bound — see detachAttrs in
+// spawn_unix.go and spawn_windows.go — but everything else about starting it
+// is not, which is why this file carries no build tag.
 func Spawn(o SpawnOptions) (*Child, error) {
 	if o.JournalPath == "" {
 		return nil, errors.New("janitor: spawn needs the journal path")
@@ -79,7 +78,7 @@ func Spawn(o SpawnOptions) (*Child, error) {
 	if o.Stderr != nil {
 		cmd.Stderr = o.Stderr
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = detachAttrs()
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("janitor: start %s %s: %w", exe, JanitorCommand, err)
