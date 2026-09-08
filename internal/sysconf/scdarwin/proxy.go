@@ -134,6 +134,14 @@ func (c proxyCtl) runAll(ctx context.Context, cmds [][]string) error {
 // Restore puts a service's captured configuration back. It is idempotent: the
 // commands it issues set an absolute state rather than toggling one.
 func (c proxyCtl) Restore(ctx context.Context, svc string, prev sysport.ProxySettings) error {
+	// A capture that names no kinds is refused, never read as "all". wants()
+	// answers "all" for an empty Kinds — which is right for Configured, a read
+	// — so without this the zero-value ProxySettings walks into restoreCmds and
+	// comes out as eight networksetup writes that switch off every proxy on the
+	// service. See sysport.ProxySettings.CheckRestorable for the asymmetry.
+	if err := prev.CheckRestorable(); err != nil {
+		return err
+	}
 	var firstErr error
 	for _, cmd := range restoreCmds(svc, prev) {
 		err := c.p.run.Run(ctx, "networksetup", cmd.args...).Error()
@@ -311,13 +319,24 @@ func readProxyState(ctx context.Context, e Env) (sysport.ProxyState, error) {
 // The exported read-only observers.
 //
 // The scutil and launchctl readers in this package are the independent
-// verifiers Op.Verify uses, and they were unexported because nothing outside
-// netstate needed them. `dpb doctor` and `dpb coverage` do: both answer
-// questions about the state macOS is ACTUALLY in — is an auto-proxy URL still
-// pointing at a port nobody is listening on, did the environment variables
-// Discord's updater reads survive — and answering them with a second parser
-// written in the CLI would mean the tool verifies its own mutations with one
-// reader and diagnoses them with another.
+// verifiers Op.Verify uses. They were exported for `dpb doctor` and `dpb
+// coverage`, which answer questions about the state macOS is ACTUALLY in — is
+// an auto-proxy URL still pointing at a port nobody is listening on, did the
+// environment variables Discord's updater reads survive — and answering those
+// with a second parser written in the CLI would mean the tool verifies its own
+// mutations with one reader and diagnoses them with another.
+//
+// The export no longer earns its keep, and saying so is more useful than
+// leaving the comment claiming a caller. Both commands now go through
+// netstate's platform-free wrappers (netstate/observe.go), because a diagnostic
+// that names a darwin-only package cannot follow this tool to Windows. What is
+// left here — ReadProxyState, ReadDNSResolvers, PrimaryNameservers and
+// ServiceForDevice — has no caller outside this package's own tests, and those
+// tests would be just as happy with the unexported parsers underneath.
+// Unexporting them means renaming the call sites inside test bodies, which the
+// branch's standing "no test body may be edited" rule forbids; it is a job for
+// a commit that is allowed to touch tests. ParseProxyState is the exception and
+// stays: netstate/scutil_test.go genuinely calls it.
 //
 // These are wrappers, not new logic, and every one of them is read-only.
 // ReadDNSResolvers and PrimaryNameservers are in dns.go, ReadLaunchEnv in

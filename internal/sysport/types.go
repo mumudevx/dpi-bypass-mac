@@ -1,6 +1,7 @@
 package sysport
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -107,8 +108,10 @@ type Facts struct {
 // ProxySettings is one service's stored proxy configuration — the writer's own
 // view of it, used to capture what must be restored later.
 type ProxySettings struct {
-	// Kinds names the settings this value actually describes; nil means all of
-	// them, which is what Configured returns.
+	// Kinds names the settings this value actually describes. An empty Kinds
+	// reads as "all of them" — the answer Configured gives a caller that asked
+	// for no kinds in particular — and is REFUSED by Restore, which cannot
+	// safely guess; see CheckRestorable.
 	//
 	// It exists because a capture is not always whole-service. An Op that set a
 	// PAC URL read `networksetup -getautoproxyurl` and nothing else, so its
@@ -131,4 +134,23 @@ type ProxySettings struct {
 	SOCKSHost  string
 	SOCKSPort  int
 	SOCKSOn    bool
+}
+
+// CheckRestorable refuses a capture that names no kinds. Every implementation
+// of ProxyController.Restore calls it, so the refusal is written once and a
+// second platform inherits it rather than re-deriving it.
+//
+// Why a read may default to "all" and a write may not: reading a kind nobody
+// asked about costs an extra networksetup getter, while writing one issues
+// `-setwebproxy <svc> "" 0` against a setting this tool never captured. A
+// zero-value ProxySettings is exactly what a caller ends up holding when it
+// forgets to record what it captured, and treating that as "restore
+// everything" turns a forgotten field into the user's proxy configuration
+// being wiped. Naming the kinds is cheap; guessing them is not recoverable.
+func (p ProxySettings) CheckRestorable() error {
+	if len(p.Kinds) == 0 {
+		return errors.New("netstate: refusing to restore proxy settings that name no kinds; " +
+			"an empty Kinds would write every proxy setting on the service, including ones never captured")
+	}
+	return nil
 }
