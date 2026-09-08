@@ -45,27 +45,24 @@ COVER_MIN := 85
 # Per-package floors that differ from COVER_MIN. These are exceptions with a
 # reason, never a knob to turn when the gate goes red:
 #
-#   internal/front/tunfe, internal/netstate  their syscall leaves are only
-#     reachable from root-gated integration tests.
-#   internal/sysconf/scdarwin  is where netstate's syscall leaves now live: the
-#     AF_ROUTE reader, route(8), ifconfig, networksetup and launchctl moved
-#     here, and the reason they cannot be reached without root moved with them.
-#     It therefore inherits netstate's justification, and enters the gate at
-#     netstate's floor rather than below it. The 0.0%-per-function check still
-#     applies to it in full, which is the check that catches the defect class
-#     this project has actually suffered.
+#   internal/front/tunfe  its syscall leaves are only reachable from root-gated
+#     integration tests.
 #   internal/cliapp  the command tree is the largest package in the tree and
 #     most of it is wiring that only a whole `dpb run` exercises; it entered
 #     the gate at the floor it met on the day it was added. It is here rather
 #     than outside the gate because it is where most of the code now lives,
 #     and a gate that skips the largest package has stopped being a gate.
 #
+# internal/netstate had a floor of 70 for the syscall-leaf reason above until
+# those leaves moved to internal/sysconf/scdarwin, which is a package with no
+# such exception: measured, netstate is at 86.5% and scdarwin at 91.3%, so both
+# clear COVER_MIN on their own and a floor either would have to be lowered to
+# reach is not an exception, it is slack.
+#
 # A floor may be RAISED as coverage improves. Lowering one to make a red build
 # pass defeats the entire mechanism, so don't.
 COVER_FLOORS := \
 	internal/front/tunfe=70 \
-	internal/netstate=70 \
-	internal/sysconf/scdarwin=70 \
 	internal/cliapp=83
 
 .PHONY: all build install test race cover cover-gate fuzz vet fmt lint tidy clean deps
