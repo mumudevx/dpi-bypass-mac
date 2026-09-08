@@ -1,4 +1,6 @@
-package netstate
+//go:build darwin
+
+package scdarwin
 
 import (
 	"fmt"
@@ -9,10 +11,12 @@ import (
 
 	"golang.org/x/net/route"
 	"golang.org/x/sys/unix"
+
+	"github.com/mumudevx/dpb/internal/sysport"
 )
 
-// NewRIB returns the kernel-backed RIBReader.
-func NewRIB() RIBReader { return &kernelRIB{} }
+// newKernelRIB returns the kernel-backed RIBReader.
+func newKernelRIB() sysport.RIBReader { return &kernelRIB{} }
 
 type kernelRIB struct {
 	mu    sync.Mutex
@@ -44,7 +48,7 @@ func (k *kernelRIB) ifaceNames() (map[int]string, error) {
 	return m, nil
 }
 
-func (k *kernelRIB) Routes() ([]RouteEntry, error) {
+func (k *kernelRIB) Routes() ([]sysport.RouteEntry, error) {
 	names, err := k.ifaceNames()
 	if err != nil {
 		return nil, err
@@ -57,7 +61,7 @@ func (k *kernelRIB) Routes() ([]RouteEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netstate: parse routing table: %w", err)
 	}
-	out := make([]RouteEntry, 0, len(msgs))
+	out := make([]sysport.RouteEntry, 0, len(msgs))
 	for _, m := range msgs {
 		rm, ok := m.(*route.RouteMessage)
 		if !ok {
@@ -75,16 +79,16 @@ func (k *kernelRIB) Routes() ([]RouteEntry, error) {
 // routeEntryFrom converts one RTM message. It returns ok=false for entries we
 // cannot express as a prefix (link-layer/ARP cache entries, malformed
 // addresses), which are never the subject of a mutation we make.
-func routeEntryFrom(rm *route.RouteMessage, names map[int]string) (RouteEntry, bool) {
+func routeEntryFrom(rm *route.RouteMessage, names map[int]string) (sysport.RouteEntry, bool) {
 	if rm.Flags&unix.RTF_UP == 0 {
-		return RouteEntry{}, false
+		return sysport.RouteEntry{}, false
 	}
 	if len(rm.Addrs) <= 1 {
-		return RouteEntry{}, false
+		return sysport.RouteEntry{}, false
 	}
 	dst, ok := addrOf(rm.Addrs[0])
 	if !ok {
-		return RouteEntry{}, false
+		return sysport.RouteEntry{}, false
 	}
 	bits := dst.BitLen()
 	if rm.Flags&unix.RTF_HOST == 0 {
@@ -96,9 +100,9 @@ func routeEntryFrom(rm *route.RouteMessage, names map[int]string) (RouteEntry, b
 	}
 	pfx := netip.PrefixFrom(dst, bits)
 	if !pfx.IsValid() {
-		return RouteEntry{}, false
+		return sysport.RouteEntry{}, false
 	}
-	e := RouteEntry{
+	e := sysport.RouteEntry{
 		Dst:    pfx.Masked(),
 		Index:  rm.Index,
 		Iface:  names[rm.Index],
@@ -180,18 +184,18 @@ func maskBits(a route.Addr, want int) (int, bool) {
 	return n, true
 }
 
-func (k *kernelRIB) Default() (RouteEntry, bool, error) {
+func (k *kernelRIB) Default() (sysport.RouteEntry, bool, error) {
 	rs, err := k.Routes()
 	if err != nil {
-		return RouteEntry{}, false, err
+		return sysport.RouteEntry{}, false, err
 	}
 	return pickDefault(rs, "")
 }
 
-func (k *kernelRIB) ScopedDefault(iface string) (RouteEntry, bool, error) {
+func (k *kernelRIB) ScopedDefault(iface string) (sysport.RouteEntry, bool, error) {
 	rs, err := k.Routes()
 	if err != nil {
-		return RouteEntry{}, false, err
+		return sysport.RouteEntry{}, false, err
 	}
 	return pickDefault(rs, iface)
 }
@@ -200,8 +204,8 @@ func (k *kernelRIB) ScopedDefault(iface string) (RouteEntry, bool, error) {
 // interface-scoped default for iface when it is not. IPv4 wins over IPv6
 // because callers use it to identify the uplink, and on a dual-stack macOS box
 // the v4 default is the one that names the physical service.
-func pickDefault(rs []RouteEntry, iface string) (RouteEntry, bool, error) {
-	var v6 RouteEntry
+func pickDefault(rs []sysport.RouteEntry, iface string) (sysport.RouteEntry, bool, error) {
+	var v6 sysport.RouteEntry
 	var haveV6 bool
 	for _, r := range rs {
 		if r.Dst.Bits() != 0 {
@@ -231,7 +235,7 @@ func pickDefault(rs []RouteEntry, iface string) (RouteEntry, bool, error) {
 // v4 default is the one that names the physical service. The v6 next hop is a
 // different question with a different answer — frequently a different interface,
 // and often a link-local address carrying a zone.
-func pickDefaultV6(rs []RouteEntry) (RouteEntry, bool) {
+func pickDefaultV6(rs []sysport.RouteEntry) (sysport.RouteEntry, bool) {
 	for _, r := range rs {
 		if r.Dst.Bits() != 0 || r.Scoped || r.Dst.Addr().Is4() {
 			continue
@@ -243,7 +247,7 @@ func pickDefaultV6(rs []RouteEntry) (RouteEntry, bool) {
 		}
 		return r, true
 	}
-	return RouteEntry{}, false
+	return sysport.RouteEntry{}, false
 }
 
 func (k *kernelRIB) Exists(dst netip.Prefix, iface string) (bool, error) {
@@ -254,7 +258,7 @@ func (k *kernelRIB) Exists(dst netip.Prefix, iface string) (bool, error) {
 	return routeExists(rs, dst, iface), nil
 }
 
-func routeExists(rs []RouteEntry, dst netip.Prefix, iface string) bool {
+func routeExists(rs []sysport.RouteEntry, dst netip.Prefix, iface string) bool {
 	want := dst.Masked()
 	for _, r := range rs {
 		if r.Dst != want {

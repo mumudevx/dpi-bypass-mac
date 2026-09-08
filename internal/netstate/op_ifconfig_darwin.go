@@ -52,31 +52,6 @@ func (o *ifconfigOp) runner(e Env) Runner {
 	return e.runner()
 }
 
-func (o *ifconfigOp) isV6() bool { return strings.Contains(o.local, ":") }
-
-func (o *ifconfigOp) family() string {
-	if o.isV6() {
-		return "inet6"
-	}
-	return "inet"
-}
-
-func (o *ifconfigOp) applyArgs() []string {
-	args := []string{o.iface, o.family(), o.local}
-	switch {
-	case o.isV6():
-		args = append(args, "prefixlen", "64")
-	case o.peer != "":
-		// A utun is point-to-point: without a peer the kernel has no destination
-		// to attach the interface route to.
-		args = append(args, o.peer)
-	}
-	if o.mtu > 0 {
-		args = append(args, "mtu", strconv.Itoa(o.mtu))
-	}
-	return append(args, "up")
-}
-
 func (o *ifconfigOp) Apply(ctx context.Context, e Env) error {
 	return o.runner(e).Run(ctx, "ifconfig", o.applyArgs()...).Error()
 }
@@ -153,54 +128,4 @@ func reviveIfconfig(r Record) (Op, error) {
 		return nil, fmt.Errorf("netstate: ifconfig record is missing the interface or address")
 	}
 	return &ifconfigOp{iface: p.Iface, local: p.Local, peer: p.Peer, mtu: p.MTU}, nil
-}
-
-func findInterface(name string) (*net.Interface, bool, error) {
-	ifs, err := interfaceLister()
-	if err != nil {
-		return nil, false, fmt.Errorf("netstate: enumerate interfaces: %w", err)
-	}
-	for i := range ifs {
-		if ifs[i].Name == name {
-			return &ifs[i], true, nil
-		}
-	}
-	return nil, false, nil
-}
-
-func interfaceHasAddr(in *net.Interface, want string) (bool, error) {
-	wantAddr, err := netip.ParseAddr(want)
-	if err != nil {
-		return false, fmt.Errorf("netstate: %q is not an IP address: %w", want, err)
-	}
-	addrs, err := interfaceAddrser(in)
-	if err != nil {
-		return false, fmt.Errorf("netstate: read addresses of %s: %w", in.Name, err)
-	}
-	for _, a := range addrs {
-		got, ok := addrOfNetAddr(a)
-		if !ok {
-			continue
-		}
-		if got.WithZone("").Unmap() == wantAddr.WithZone("").Unmap() {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func addrOfNetAddr(a net.Addr) (netip.Addr, bool) {
-	switch v := a.(type) {
-	case *net.IPNet:
-		return netip.AddrFromSlice(v.IP)
-	case *net.IPAddr:
-		return netip.AddrFromSlice(v.IP)
-	default:
-		addr, err := netip.ParsePrefix(a.String())
-		if err == nil {
-			return addr.Addr(), true
-		}
-		got, err := netip.ParseAddr(a.String())
-		return got, err == nil
-	}
 }

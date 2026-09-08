@@ -1,4 +1,4 @@
-package netstate
+package scdarwin
 
 import (
 	"context"

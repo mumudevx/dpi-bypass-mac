@@ -101,20 +101,6 @@ func (o *dnsOp) prepare(ctx context.Context, e Env) error {
 	return nil
 }
 
-// parseDNSServers reads `networksetup -getdnsservers`, which prints one address
-// per line, or a sentence when there are none.
-func parseDNSServers(out string) []string {
-	var servers []string
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.Contains(line, "aren't any DNS Servers") {
-			continue
-		}
-		servers = append(servers, line)
-	}
-	return servers
-}
-
 func (o *dnsOp) Apply(ctx context.Context, e Env) error {
 	r := o.runner(e)
 	for _, svc := range o.services {

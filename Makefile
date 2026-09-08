@@ -33,10 +33,11 @@ COVER_GATED := \
 	internal/policy \
 	internal/resolve \
 	internal/probe \
-	internal/sysport
+	internal/sysport \
+	internal/sysconf/scdarwin
 
 # A regex matching a file inside any gated package.
-COVER_GATED_RE := $(MODULE)/(internal/(cliapp|flow|strategy|ops|emit|tlsmsg|front/proxyfe|front/tunfe|netstate|netwatch|policy|resolve|probe|sysport))/
+COVER_GATED_RE := $(MODULE)/(internal/(cliapp|flow|strategy|ops|emit|tlsmsg|front/proxyfe|front/tunfe|netstate|netwatch|policy|resolve|probe|sysport|sysconf/scdarwin))/
 
 # Statement-coverage floor.
 COVER_MIN := 85
@@ -46,6 +47,13 @@ COVER_MIN := 85
 #
 #   internal/front/tunfe, internal/netstate  their syscall leaves are only
 #     reachable from root-gated integration tests.
+#   internal/sysconf/scdarwin  is where netstate's syscall leaves now live: the
+#     AF_ROUTE reader, route(8), ifconfig, networksetup and launchctl moved
+#     here, and the reason they cannot be reached without root moved with them.
+#     It therefore inherits netstate's justification, and enters the gate at
+#     netstate's floor rather than below it. The 0.0%-per-function check still
+#     applies to it in full, which is the check that catches the defect class
+#     this project has actually suffered.
 #   internal/cliapp  the command tree is the largest package in the tree and
 #     most of it is wiring that only a whole `dpb run` exercises; it entered
 #     the gate at the floor it met on the day it was added. It is here rather
@@ -57,6 +65,7 @@ COVER_MIN := 85
 COVER_FLOORS := \
 	internal/front/tunfe=70 \
 	internal/netstate=70 \
+	internal/sysconf/scdarwin=70 \
 	internal/cliapp=83
 
 .PHONY: all build install test race cover cover-gate fuzz vet fmt lint tidy clean deps

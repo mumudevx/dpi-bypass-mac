@@ -1,19 +1,37 @@
-package netstate
+//go:build darwin
+
+package scdarwin
 
 import (
 	"context"
 	"fmt"
 	"net"
 	"net/netip"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/mumudevx/dpb/internal/sysport"
 )
+
+type factsCtl struct{ p *port }
+
+var _ sysport.FactsCollector = factsCtl{}
+
+// Collect reads the machine's network identity through this Port.
+//
+// The Port carries no SelfIface, so the tunnel this run owns is not excluded
+// from the half-tunnel classifier here. A caller that has opened a utun must
+// build its own Env and call CollectFacts directly; see Env.SelfIface.
+func (c factsCtl) Collect(ctx context.Context) (*sysport.Facts, error) {
+	return CollectFacts(ctx, c.p.env())
+}
 
 // CollectFacts reads the machine's current network identity. The uplink comes
 // from the kernel routing table rather than from networksetup's service order,
 // because the service order says what macOS would prefer and the RIB says what
 // is actually carrying traffic.
-func CollectFacts(ctx context.Context, e Env) (*Facts, error) {
+func CollectFacts(ctx context.Context, e Env) (*sysport.Facts, error) {
 	if e.RIB == nil {
 		return nil, fmt.Errorf("netstate: cannot collect facts without a RIB reader")
 	}
@@ -30,7 +48,7 @@ func CollectFacts(ctx context.Context, e Env) (*Facts, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netstate: read default route: %w", err)
 	}
-	f := &Facts{CollectedAt: time.Now()}
+	f := &sysport.Facts{CollectedAt: time.Now()}
 	if ok {
 		f.Uplink, f.Gateway = def.Iface, def.Gateway
 	}
@@ -121,8 +139,8 @@ var halfDefaultPairs = [][2]netip.Prefix{
 // half-default pair (docs/PLAN.md's mutated-state table, row 8), so without
 // excluding it a network-change re-collect would classify dpb as a full-tunnel
 // VPN and refuse to run alongside itself.
-func classifyVPN(rs []RouteEntry, def RouteEntry, haveDefault bool, ncs []NCService, selfIface string) VPNState {
-	var st VPNState
+func classifyVPN(rs []sysport.RouteEntry, def sysport.RouteEntry, haveDefault bool, ncs []NCService, selfIface string) sysport.VPNState {
+	var st sysport.VPNState
 	for _, s := range ncs {
 		if s.Connected() {
 			st.Present = true
@@ -149,7 +167,7 @@ func classifyVPN(rs []RouteEntry, def RouteEntry, haveDefault bool, ncs []NCServ
 // interface: a scoped half is Private-Relay-shaped, and one half on its own
 // covers only part of the address space, which is a split tunnel we can work
 // alongside.
-func halfTunnelIface(rs []RouteEntry, selfIface string) (string, bool) {
+func halfTunnelIface(rs []sysport.RouteEntry, selfIface string) (string, bool) {
 	for _, pair := range halfDefaultPairs {
 		lower := map[string]bool{}
 		for _, r := range rs {
@@ -184,4 +202,62 @@ func isTunnelIface(name string) bool {
 		}
 	}
 	return false
+}
+
+// NCService is one entry from `scutil --nc list`.
+type NCService struct {
+	Enabled bool
+	Status  string
+	ID      string
+	Type    string
+	Name    string
+}
+
+// Connected reports whether the VPN service is up.
+func (s NCService) Connected() bool { return strings.EqualFold(s.Status, "Connected") }
+
+// A `scutil --nc list` line is an optional "*" (the service is enabled), a
+// parenthesised status, a UUID, a type, a quoted name and a bracketed subtype:
+//
+//   - (Disconnected) 8F6A1B2C-... PPP (L2TP) "Work VPN" [PPP:L2TP]
+var ncLine = regexp.MustCompile(`^(\*?)\s*\(([^)]*)\)\s+(\S+)\s+(.*)$`)
+var ncName = regexp.MustCompile(`"([^"]*)"`)
+
+// parseNCList parses `scutil --nc list`.
+func parseNCList(out string) []NCService {
+	var svcs []NCService
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimRight(line, " \t")
+		if trimmed == "" || strings.HasPrefix(trimmed, "Available network connection") {
+			continue
+		}
+		m := ncLine.FindStringSubmatch(trimmed)
+		if m == nil {
+			continue
+		}
+		svc := NCService{
+			Enabled: m[1] == "*",
+			Status:  strings.TrimSpace(m[2]),
+			ID:      m[3],
+		}
+		rest := strings.TrimSpace(m[4])
+		if n := ncName.FindStringSubmatch(rest); n != nil {
+			svc.Name = n[1]
+			svc.Type = strings.TrimSpace(rest[:strings.Index(rest, n[0])])
+		} else {
+			svc.Type = rest
+		}
+		svcs = append(svcs, svc)
+	}
+	return svcs
+}
+
+// readNCList runs `scutil --nc list`. A machine with no VPN configurations
+// still exits 0 with an empty list, so an error here is a real failure.
+func readNCList(ctx context.Context, e Env) ([]NCService, error) {
+	res := e.runner().Run(ctx, "scutil", "--nc", "list")
+	if err := res.Error(); err != nil {
+		return nil, fmt.Errorf("netstate: read vpn list: %w", err)
+	}
+	return parseNCList(res.Combined), nil
 }

@@ -1,0 +1,123 @@
+//go:build darwin
+
+// Package scdarwin is sysport.Port for macOS.
+//
+// Every mutation goes through a command-line tool and every verification goes
+// through a different subsystem: networksetup writes proxies and `scutil
+// --proxy` reads them, route(8) writes routes and an AF_ROUTE socket reads
+// them, ifconfig addresses an interface and net.Interfaces() reads it back.
+// The one documented exception is launchctl setenv/getenv, which has no second
+// observer; see sysport.EnvController.
+//
+// Error strings in this package keep the "netstate:" prefix they were written
+// with. Moving a system call must not change what dpb prints, and that prefix
+// names the subsystem a user reads about in `dpb doctor`, not the Go package
+// the code happens to live in.
+package scdarwin
+
+import (
+	"context"
+	"errors"
+	"strings"
+
+	"github.com/mumudevx/dpb/internal/sysport"
+)
+
+type port struct {
+	run sysport.Runner
+	rib sysport.RIBReader
+}
+
+// New returns the macOS Port. r is the command runner every tool call goes
+// through; passing it in rather than constructing one is what lets a test drive
+// this implementation with recorded output (internal/testnet).
+func New(r sysport.Runner) sysport.Port {
+	return &port{run: r, rib: newKernelRIB()}
+}
+
+var _ sysport.Port = (*port)(nil)
+
+func (p *port) Proxy() sysport.ProxyController { return proxyCtl{p} }
+func (p *port) DNS() sysport.DNSController     { return dnsCtl{p} }
+func (p *port) Route() sysport.RouteController { return routeCtl{p} }
+func (p *port) Iface() sysport.IfaceController { return ifaceCtl{p} }
+func (p *port) Env() sysport.EnvController     { return envCtl{p} }
+func (p *port) Facts() sysport.FactsCollector  { return factsCtl{p} }
+
+// macOS grants every capability dpb has an Op for. The constant is spelled out
+// rather than left implicit so that the Windows implementation's shortfall, when
+// it lands, is a diff against something.
+func (p *port) Caps() sysport.Caps {
+	return sysport.CapProxyAuto | sysport.CapProxyManual | sysport.CapDNSOverride |
+		sysport.CapRouteWrite | sysport.CapIfaceConfig | sysport.CapSessionEnv |
+		sysport.CapPerService
+}
+
+// env is the readers' view of this Port. SelfIface is empty here: the Port
+// interface has no way to name the utun this run owns, so a caller that has one
+// must build its own Env. See CollectFacts.
+func (p *port) env() Env { return Env{Runner: p.run, RIB: p.rib} }
+
+// Env is what a macOS reader needs from the world: a Runner to issue the tool
+// call, a RIB to read the kernel's answer back, and somewhere to log what it
+// could not do. It is NOT netstate.Env — scdarwin cannot import netstate, which
+// is the import cycle sysport exists to prevent — but it carries the same
+// fields the readers used before the move, so every body here reads exactly as
+// it did.
+type Env struct {
+	Runner sysport.Runner
+	RIB    sysport.RIBReader
+	Logf   func(string, ...any)
+
+	// SelfIface names the utun this run owns, once it has one. Our own capture
+	// routes are the same 0.0.0.0/1 + 128.0.0.0/1 pair a WireGuard-style VPN
+	// installs, so classifyVPN has to be told which tunnel is ours.
+	SelfIface string
+}
+
+func (e Env) runner() sysport.Runner {
+	if e.Runner == nil {
+		return noRunner{}
+	}
+	return e.Runner
+}
+
+func (e Env) logf(format string, a ...any) {
+	if e.Logf != nil {
+		e.Logf(format, a...)
+	}
+}
+
+// Result is an alias, not a definition: scdarwin.Result and sysport.Result are
+// the same type. netstate/aliases.go carries the same one for the same reason —
+// the code that drives a tool reads better naming what a Runner hands back
+// without qualifying it every time.
+type Result = sysport.Result
+
+// noRunner makes a zero Env fail loudly instead of nil-panicking deep inside a
+// reader, which is the difference between a diagnosable bug report and a stack
+// trace from a user's laptop.
+type noRunner struct{}
+
+func (noRunner) Run(_ context.Context, name string, args ...string) Result {
+	return Result{
+		Argv: append([]string{name}, args...),
+		Err:  errors.New("netstate: Env.Runner is nil"),
+	}
+}
+
+// firstLine duplicates the unexported helper of the same name in sysport and
+// netstate. Result's move to sysport exported only Failed, Reason and Error, so
+// ListServices's error message keeps a small private copy rather than growing
+// sysport's surface for one call site — the trade netstate/runner.go already
+// documents for its own copy.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "(no output)"
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}

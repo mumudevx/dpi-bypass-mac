@@ -75,33 +75,6 @@ func (o *routeOp) runner(e Env) Runner {
 	return e.runner()
 }
 
-// args builds the route(8) argv for verb ("add" or "delete"). -n keeps route
-// from doing reverse DNS, which on a censored line can block for seconds.
-func (o *routeOp) args(verb string) []string {
-	args := []string{"-n", verb}
-	if o.dst.Addr().Is4() {
-		args = append(args, "-inet")
-	} else {
-		args = append(args, "-inet6")
-	}
-	if o.dst.Bits() == 0 {
-		// route(8) will not accept 0.0.0.0/0 as a -net argument.
-		args = append(args, "default")
-	} else {
-		args = append(args, "-net", o.dst.String())
-	}
-	switch {
-	case o.gw.IsValid():
-		args = append(args, o.gw.String())
-		if o.iface != "" {
-			args = append(args, "-ifscope", o.iface)
-		}
-	case o.iface != "":
-		args = append(args, "-interface", o.iface)
-	}
-	return args
-}
-
 func (o *routeOp) Apply(ctx context.Context, e Env) error {
 	// The Result is checked, but it is only the first line of defence: Verify
 	// reading the RIB is the one that decides.
