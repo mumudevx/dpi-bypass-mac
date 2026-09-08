@@ -170,6 +170,7 @@ func repairJournal(ctx context.Context, g *globals, layout paths.Layout) (netsta
 			// Op restores a captured loopback setting it cannot match exactly —
 			// a dead run's proxy — instead of clearing it.
 			PriorResidue: true,
+			Sys:          g.sysOf(),
 		},
 		Logf: g.logf,
 	})

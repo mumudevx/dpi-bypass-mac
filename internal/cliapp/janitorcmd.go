@@ -67,6 +67,7 @@ func runJanitor(ctx context.Context, g *globals, parentPID int, journalPath stri
 			// captured loopback setting we cannot match exactly is its residue
 			// rather than the user's own local proxy.
 			PriorResidue: true,
+			Sys:          g.sysOf(),
 		},
 		Logf: g.logf,
 	})

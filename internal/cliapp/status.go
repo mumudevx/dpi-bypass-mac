@@ -435,7 +435,7 @@ func (g *globals) networkIdentity(ctx context.Context, cfg *config.Loaded) (poli
 	if err != nil {
 		return policy.NetworkID{}, err
 	}
-	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf}
+	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf, Sys: g.sysOf()}
 	facts := g.factsOf(ctx, env)
 	if facts == nil {
 		// Still return an identity: the resolver-set half is known, and a

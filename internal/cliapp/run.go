@@ -404,6 +404,7 @@ func runRun(ctx context.Context, g *globals, cmd *cobra.Command, f runFlags) (er
 		Logf:         g.logf,
 		DryRun:       f.dryRun,
 		PriorResidue: residue,
+		Sys:          g.sysOf(),
 	}
 	env.Facts = g.factsOf(ctx, env)
 

@@ -135,6 +135,11 @@ type globals struct {
 	// runner and rib replace the command runner and the kernel routing table.
 	runner netstate.Runner
 	rib    netstate.RIBReader
+	// sys replaces the Port every netstate.Env is built with. Production
+	// leaves it nil and gets the explicit per-platform Port sysOf() builds
+	// from runner/rib below; a test sets it to inject a fake Port (see
+	// internal/testport) without also replacing runner and rib.
+	sys netstate.Port
 	// facts replaces CollectFacts, which reads the machine's real interfaces.
 	facts *netstate.Facts
 	// factsFn replaces CollectFacts with a function, so a test can move the
@@ -199,6 +204,26 @@ func (g *globals) ribOf() netstate.RIBReader {
 		return g.rib
 	}
 	return netstate.NewRIB()
+}
+
+// sysOf is the composition root for every netstate.Env this package builds:
+// every production call site sets Env.Sys from it explicitly, rather than
+// leaving Env.Sys unset and letting netstate.Env.sys() build the platform
+// default the first time an Op reaches for it. Wiring newSysPort here means
+// the platform Port constructor is resolved when THIS package builds, not
+// the first time some command actually calls through the Port — the same
+// difference sysOf and runnerOf/ribOf already make for the runner and the
+// RIB.
+//
+// newSysPort is build-tagged (sysport_darwin.go / sysport_other.go): the
+// fallback netstate.Env.sys() still builds in this direction internally, and
+// stays the safety net for every Env assembled the old way — every existing
+// test does exactly that, which is why none of them had to change.
+func (g *globals) sysOf() netstate.Port {
+	if g.sys != nil {
+		return g.sys
+	}
+	return newSysPort(netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf})
 }
 
 // factsOf collects the machine's network identity, best effort.

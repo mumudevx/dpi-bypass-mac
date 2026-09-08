@@ -145,7 +145,7 @@ func buildCoverage(ctx context.Context, g *globals, layout paths.Layout,
 	watch time.Duration) (coverageReport, error) {
 
 	rep := coverageReport{}
-	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf}
+	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf, Sys: g.sysOf()}
 
 	// Listener ports come from the running dpb when there is one, because it
 	// knows which ports it actually BOUND — `--port 0` is a real thing to ask
