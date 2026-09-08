@@ -20,26 +20,40 @@ type ifaceCtl struct{ p *port }
 
 var _ sysport.IfaceController = ifaceCtl{}
 
-// SetAddr assigns local (and peer, for IPv4 point-to-point) to iface.
-func (c ifaceCtl) SetAddr(ctx context.Context, iface, local, peer string) error {
-	args := []string{iface, addrFamily(local), local}
+// Configure emits one ifconfig invocation carrying the address, the peer or
+// prefix length, the MTU and "up". It is one call because that is what macOS
+// takes: issuing the same settings as three commands would show the kernel a
+// different argv, and an interface that is up with an address but no MTU
+// between two of them.
+func (c ifaceCtl) Configure(ctx context.Context, iface string, cfg sysport.IfaceConfig) error {
+	return c.p.run.Run(ctx, "ifconfig", configureArgs(iface, cfg)...).Error()
+}
+
+func configureArgs(iface string, cfg sysport.IfaceConfig) []string {
+	args := []string{iface, addrFamily(cfg.Local), cfg.Local}
 	switch {
-	case isV6Addr(local):
+	case isV6Addr(cfg.Local):
 		args = append(args, "prefixlen", "64")
-	case peer != "":
+	case cfg.Peer != "":
 		// A utun is point-to-point: without a peer the kernel has no destination
 		// to attach the interface route to.
-		args = append(args, peer)
+		args = append(args, cfg.Peer)
 	}
-	return c.p.run.Run(ctx, "ifconfig", args...).Error()
+	if cfg.MTU > 0 {
+		args = append(args, "mtu", strconv.Itoa(cfg.MTU))
+	}
+	return append(args, "up")
 }
 
-func (c ifaceCtl) SetMTU(ctx context.Context, iface string, mtu int) error {
-	return c.p.run.Run(ctx, "ifconfig", iface, "mtu", strconv.Itoa(mtu)).Error()
-}
-
-func (c ifaceCtl) Up(ctx context.Context, iface string) error {
-	return c.p.run.Run(ctx, "ifconfig", iface, "up").Error()
+// Unconfigure removes the address. Bringing the interface down is deliberately
+// not attempted: the utun belongs to whoever opened its file descriptor, and it
+// disappears when they close it.
+//
+// An already-gone utun makes ifconfig say "does not exist". That is the success
+// case for a revert, so the error is reported and the caller's kernel read is
+// what decides.
+func (c ifaceCtl) Unconfigure(ctx context.Context, iface string, cfg sysport.IfaceConfig) error {
+	return c.p.run.Run(ctx, "ifconfig", iface, addrFamily(cfg.Local), cfg.Local, "-alias").Error()
 }
 
 // Addrs reads an interface's addresses out of the kernel. An interface that
@@ -67,28 +81,6 @@ func (c ifaceCtl) Addrs(_ context.Context, iface string) ([]netip.Addr, error) {
 	}
 	return out, nil
 }
-
-// AddrRemover removes an address from an interface. sysport.IfaceController has
-// no such method — every mutation it declares has a counterpart on Windows and
-// this one does not yet — so the revert path reaches it by asserting for this
-// interface rather than by widening the contract before there is a second
-// implementation to widen it for.
-type AddrRemover interface {
-	RemoveAddr(ctx context.Context, iface, local string) error
-}
-
-// RemoveAddr removes an address from an interface. Bringing the interface down
-// is deliberately not attempted: the utun belongs to whoever opened its file
-// descriptor, and it disappears when they close it.
-//
-// An already-gone utun makes ifconfig say "does not exist". That is the success
-// case for a revert, so the error is reported and the caller's kernel read is
-// what decides.
-func (c ifaceCtl) RemoveAddr(ctx context.Context, iface, local string) error {
-	return c.p.run.Run(ctx, "ifconfig", iface, addrFamily(local), local, "-alias").Error()
-}
-
-var _ AddrRemover = ifaceCtl{}
 
 func isV6Addr(local string) bool { return strings.Contains(local, ":") }
 

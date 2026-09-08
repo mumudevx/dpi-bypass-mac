@@ -18,20 +18,15 @@ type factsCtl struct{ p *port }
 
 var _ sysport.FactsCollector = factsCtl{}
 
-// Collect reads the machine's network identity through this Port.
-//
-// The Port carries no SelfIface, so the tunnel this run owns is not excluded
-// from the half-tunnel classifier here. A caller that has opened a utun must
-// build its own Env and call CollectFacts directly; see Env.SelfIface.
-func (c factsCtl) Collect(ctx context.Context) (*sysport.Facts, error) {
-	return CollectFacts(ctx, c.p.env())
-}
-
-// CollectFacts reads the machine's current network identity. The uplink comes
-// from the kernel routing table rather than from networksetup's service order,
+// Collect reads the machine's current network identity. The uplink comes from
+// the kernel routing table rather than from networksetup's service order,
 // because the service order says what macOS would prefer and the RIB says what
 // is actually carrying traffic.
-func CollectFacts(ctx context.Context, e Env) (*sysport.Facts, error) {
+//
+// selfIface names the tunnel this run owns, or "" before we have one; see
+// classifyVPN for why the classifier cannot work without being told.
+func (c factsCtl) Collect(ctx context.Context, selfIface string) (*sysport.Facts, error) {
+	e := c.p.env()
 	if e.RIB == nil {
 		return nil, fmt.Errorf("netstate: cannot collect facts without a RIB reader")
 	}
@@ -84,7 +79,7 @@ func CollectFacts(ctx context.Context, e Env) (*sysport.Facts, error) {
 	if err != nil {
 		e.logf("netstate: %v", err)
 	}
-	f.VPN = classifyVPN(rs, def, ok, ncs, e.SelfIface)
+	f.VPN = classifyVPN(rs, def, ok, ncs, selfIface)
 	return f, nil
 }
 

@@ -53,9 +53,7 @@ func (p *port) Caps() sysport.Caps {
 		sysport.CapPerService
 }
 
-// env is the readers' view of this Port. SelfIface is empty here: the Port
-// interface has no way to name the utun this run owns, so a caller that has one
-// must build its own Env. See CollectFacts.
+// env is the readers' view of this Port.
 func (p *port) env() Env { return Env{Runner: p.run, RIB: p.rib} }
 
 // Env is what a macOS reader needs from the world: a Runner to issue the tool
@@ -68,11 +66,6 @@ type Env struct {
 	Runner sysport.Runner
 	RIB    sysport.RIBReader
 	Logf   func(string, ...any)
-
-	// SelfIface names the utun this run owns, once it has one. Our own capture
-	// routes are the same 0.0.0.0/1 + 128.0.0.0/1 pair a WireGuard-style VPN
-	// installs, so classifyVPN has to be told which tunnel is ours.
-	SelfIface string
 }
 
 func (e Env) runner() sysport.Runner {
