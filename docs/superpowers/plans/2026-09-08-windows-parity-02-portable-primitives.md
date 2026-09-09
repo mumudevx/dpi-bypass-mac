@@ -854,7 +854,13 @@ EOF
 - [ ] `make cover-gate` passes, no floor lowered
 - [ ] `go mod tidy` leaves `go.mod`/`go.sum` byte-identical
 - [ ] **`GOOS=linux go build ./internal/netstate/` succeeds** — Plan 1 could not reach this; `lock.go` was the only thing left
-- [ ] `GOOS=windows go build` succeeds for `flow`, `paths`, `janitor`, `emit`
+- [ ] `GOOS=windows go build` succeeds for `flow`, `paths`, `emit` — and for `janitor`
+      ONLY after Plan 3 lands
+
+  Corrected mid-plan, and it is the same mistake this project's Plan 1 gate made: `janitor`
+  imports `netstate`, so it cannot cross-compile until `port_windows.go` exists, which is
+  Plan 3's. Its own Windows code compiles — verified by building the package with a
+  stand-in Port. A gate that fails on a later plan's absence measures the wrong thing.
 - [ ] `emit` grants `CapSockTTL | CapUDPTTL | CapOOB` under `GOOS=windows`
 - [ ] `dpb probe --host discord.com --reps 3 --strategy tlsfrag:pos=snimid` still gives 3/3 PASS on the development machine
 
