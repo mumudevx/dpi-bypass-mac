@@ -286,7 +286,19 @@ go mod tidy && git diff --exit-code go.mod go.sum
 - [ ] `gofmt -l cmd internal tools` empty
 - [ ] `make cover-gate` passes, no floor lowered
 - [ ] `go mod tidy` byte-identical, no new dependencies
-- [ ] **`GOOS=windows go build ./...` succeeds for the whole tree** — the plan's headline
+- [ ] **`GOOS=windows go build` succeeds for the 21 packages this plan owns**, including
+      `scwindows`, `netstate` and `janitor` — the entire system-mutation layer
+
+  Corrected mid-plan. The gate originally said "the whole tree", which this plan cannot
+  reach and never could: `internal/netwatch` needs a Windows `Source`, and the plan
+  sequence in Plan 1 assigns `netwatch` to **Plan 4**. `internal/testnet/killfuzz.go` uses
+  `syscall.Kill` and belongs to no plan yet.
+
+  **This is the third gate I have written that demanded another plan's work** — Plan 1 asked
+  for `netstate` before its lock and Port existed, Plan 2 asked for `janitor` before this
+  plan's `port_windows.go`. The root cause is writing the gate from the goal rather than
+  from the plan's own file list. The rule for Plan 4 onward: **a phase gate may only name
+  packages that appear in that plan's own File Structure section.**
 - [ ] `GOOS=windows go vet ./...` compiles every Windows test file
 - [ ] `dpb probe --host discord.com --reps 3 --strategy tlsfrag:pos=snimid` still 3/3 PASS on the development machine
 
