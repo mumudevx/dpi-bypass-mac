@@ -87,18 +87,21 @@ func NewRIB() sysport.RIBReader { return newKernelRIB() }
 
 func (p *port) Route() sysport.RouteController { return routeCtl{p} }
 
+// Iface addresses and MTUs a tunnel device through IP Helper; see iface.go.
+func (p *port) Iface() sysport.IfaceController { return ifaceCtl{p} }
+
 // Caps names what this package can actually do TODAY, not what Windows can do.
-// A bit is added by the task that lands the code behind it — CapRouteWrite here,
-// the rest in Tasks 3-5 — and Task 6 checks the total against what shipped.
-// Granting a capability ahead of its implementation would make netstate plan a
-// mutation it then cannot perform, which is the failure mode
-// sysport.Caps exists to prevent: refuse BY NAME AND WITH A REASON, never
+// A bit is added by the task that lands the code behind it — CapRouteWrite and
+// CapIfaceConfig here, the rest in Tasks 4-5 — and Task 6 checks the total
+// against what shipped. Granting a capability ahead of its implementation would
+// make netstate plan a mutation it then cannot perform, which is the failure
+// mode sysport.Caps exists to prevent: refuse BY NAME AND WITH A REASON, never
 // promise and then skip quietly.
 //
 // CapPerService is withheld permanently, not pending: Windows has one proxy
 // configuration per user, not one per network service, so there is no
 // per-service state for a caller to iterate.
-func (p *port) Caps() sysport.Caps { return sysport.CapRouteWrite }
+func (p *port) Caps() sysport.Caps { return sysport.CapRouteWrite | sysport.CapIfaceConfig }
 
 // env is the readers' view of this Port.
 func (p *port) env() Env { return Env{Runner: p.run, RIB: p.rib, Logf: p.logf} }
