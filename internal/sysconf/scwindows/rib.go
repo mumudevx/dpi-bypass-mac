@@ -268,8 +268,13 @@ func (k *kernelRIB) ScopedDefault(iface string) (sysport.RouteEntry, bool, error
 // value that orders them is the sum of the row's Metric offset and the
 // interface metric from MIB_IPINTERFACE_ROW — neither of which survives into
 // RouteEntry. So this returns the first match and nothing more is claimed for
-// it; a caller that needs the FIB's actual choice must ask GetBestRoute2, which
-// is what facts.go does.
+// it; a caller that needs the FIB's actual choice has to ask GetBestRoute2.
+//
+// facts.go deliberately does NOT: Facts.Uplink and dnsCtl.Live's own default-
+// route read must name the SAME interface or a correctly configured adapter
+// fails its DNS verify, and agreement between the two is worth more than an
+// uplink that is independently more accurate. factsCtl.Collect writes that
+// trade-off down in full.
 func pickDefault(rs []sysport.RouteEntry, iface string) (sysport.RouteEntry, bool, error) {
 	var v6 sysport.RouteEntry
 	var haveV6 bool

@@ -70,15 +70,19 @@ type port struct {
 // failures go, and a Port with nowhere to log would drop the line without
 // dropping the failure.
 //
-// The return type is *port, not sysport.Port, and that is deliberate and
-// temporary. Four of the seven controllers (Proxy, DNS, Iface, Env, Facts) land
-// in Plan 3 Tasks 3-5; returning the interface today would require stubbing
-// them, and a stub that compiles, looks right and always fails is the exact
-// defect class Plan 2 found three of in Windows' own stdlib (syscall.Sendto,
-// internal/poll's RawWrite, os.Process.Signal). Task 6 widens this signature to
-// sysport.Port and lands `var _ sysport.Port = (*port)(nil)` beside it, at the
-// moment that assertion can be true rather than a promise.
-func New(e Env) *port { return &port{run: e.runner(), rib: e.RIB, logf: e.Logf} }
+// The return type was *port until Plan 3 Task 6, deliberately: returning
+// sysport.Port before every controller existed would have required stubbing
+// the missing ones, and a stub that compiles, looks right and always fails is
+// the exact defect class Plan 2 found three of in Windows' own stdlib
+// (syscall.Sendto, internal/poll's RawWrite, os.Process.Signal). All seven
+// controllers have now landed, so the signature is the interface and the
+// assertion below is a fact rather than a promise.
+func New(e Env) sysport.Port { return &port{run: e.runner(), rib: e.RIB, logf: e.Logf} }
+
+// The assertion Task 6 was waiting to be able to make. It is here rather than
+// on New's return type alone so that a controller removed or renamed later
+// fails to compile at the declaration, not at some caller.
+var _ sysport.Port = (*port)(nil)
 
 // NewRIB returns the IP-Helper-backed routing-table reader, for a caller that
 // wants the verifier without a Port around it — the same seam scdarwin.NewRIB
@@ -104,19 +108,30 @@ func (p *port) DNS() sysport.DNSController { return dnsCtl{p} }
 // WM_SETTINGCHANGE; see env.go.
 func (p *port) Env() sysport.EnvController { return envCtl{p} }
 
+// Facts reads the machine's network identity out of the routing table and
+// GetAdaptersAddresses; see facts.go. It carries no capability bit — a
+// collector reads and never mutates, so there is nothing for a caller to be
+// refused.
+func (p *port) Facts() sysport.FactsCollector { return factsCtl{p} }
+
 // Caps names what this package can actually do TODAY, not what Windows can do.
-// A bit is added by the task that lands the code behind it — CapRouteWrite,
-// CapIfaceConfig, CapProxyAuto and CapProxyManual behind proxy.go, and now
-// CapDNSOverride and CapSessionEnv behind dns.go and env.go — and Task 6
-// checks the total against what shipped. Granting a capability ahead of its
-// implementation would make netstate plan a mutation it then cannot perform,
-// which is the failure mode sysport.Caps exists to prevent: refuse BY NAME AND
-// WITH A REASON, never promise and then skip quietly.
+// A bit was added by the task that landed the code behind it — CapRouteWrite
+// and CapIfaceConfig behind route.go and iface.go, CapProxyAuto and
+// CapProxyManual behind proxy.go, CapDNSOverride and CapSessionEnv behind
+// dns.go and env.go — and Task 6 checked the total against what shipped: six
+// bits, six implemented controllers, and the seventh capability withheld
+// below. Granting a capability ahead of its implementation would make netstate
+// plan a mutation it then cannot perform, which is the failure mode
+// sysport.Caps exists to prevent: refuse BY NAME AND WITH A REASON, never
+// promise and then skip quietly.
 //
 // CapPerService is withheld permanently, not pending: Windows has one proxy
 // configuration per user, not one per network service, so there is no
-// per-service state for a caller to iterate. proxyCtl.Services returns a single
-// pseudo-service to say so out loud rather than returning nothing.
+// per-service state for a caller to iterate. Granting it would invite an Op to
+// iterate services that do not exist. proxyCtl.Services returns a single
+// pseudo-service to say so out loud rather than returning nothing — and
+// facts.go's uplinkServices explains why Facts.Services carries adapter names
+// instead, which is a different question with a different answer.
 func (p *port) Caps() sysport.Caps {
 	return sysport.CapRouteWrite | sysport.CapIfaceConfig |
 		sysport.CapProxyAuto | sysport.CapProxyManual |
