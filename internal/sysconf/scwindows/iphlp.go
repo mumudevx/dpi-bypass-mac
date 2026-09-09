@@ -8,34 +8,41 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// This file wraps the twelve Win32 procedures golang.org/x/sys/windows@v0.43.0
-// does not provide. Everything else scwindows needs — GetIpForwardTable2,
-// FreeMibTable, GetAdaptersAddresses, GetIfEntry2Ex, NotifyRouteChange2, and
-// the MibIpForwardRow2 / MibUnicastIpAddressRow / MibIpInterfaceRow /
-// IpAdapterAddresses struct layouts — already exists there and is used
+// This file wraps the thirteen Win32 procedures
+// golang.org/x/sys/windows@v0.43.0 does not provide. Everything else scwindows
+// needs — GetIpForwardTable2, FreeMibTable, GetAdaptersAddresses, GetIfEntry,
+// GetIfEntry2Ex, NotifyRouteChange2, and the MibIpForwardRow2 /
+// MibUnicastIpAddressRow / MibIpInterfaceRow / MibIfRow / IpAdapterAddresses
+// struct layouts — already exists there and is used
 // directly; it is not re-wrapped here, and none of those struct types are
 // redeclared, because a hand-copied layout is exactly how a field offset goes
 // silently wrong and corrupts the routing table. Verified against
 // golang.org/x/sys@v0.43.0 by reading zsyscall_windows.go and
 // types_windows.go before writing this file (see task-1-report.md).
 //
+// (The count was twelve until SetIfEntry was added for ifaceCtl.Configure's
+// explicit interface-up; x/sys carries GetIfEntry and the MibIfRow layout but
+// not the setter. proxy.go's GlobalFree is deliberately still not here — see
+// the comment beside it there.)
+//
 // Every LazyDLL below is built with NewLazySystemDLL, never NewLazyDLL.
 // windows/dll_windows.go says why in NewLazyDLL's own doc comment: "using
 // NewLazyDLL without an absolute path name is subject to DLL preloading
-// attacks. To safely load a system DLL, use NewLazySystemDLL." All twelve
+// attacks. To safely load a system DLL, use NewLazySystemDLL." All thirteen
 // procedures live in DLLs Windows ships in the system directory, so there is
 // no reason to accept that risk.
 //
-// The twelve procedures do NOT share one error convention, and treating them
+// The thirteen procedures do NOT share one error convention, and treating them
 // as if they did is the mistake this file is written to avoid:
 //
-//   - The nine iphlpapi.dll procedures are NETIOAPI_API: they return a Win32
-//     error code DIRECTLY as their return value. Zero (NO_ERROR) is success;
-//     anything else already IS the error, with nothing to fetch from
-//     GetLastError. This is the exact convention x/sys/windows' own generated
-//     wrappers use for the sibling procedures it does carry — see
-//     GetIpForwardTable2 and FreeMibTable in zsyscall_windows.go, both of
-//     which test their r0 the same way.
+//   - The ten iphlpapi.dll procedures return a Win32 error code DIRECTLY as
+//     their return value. Zero (NO_ERROR) is success; anything else already IS
+//     the error, with nothing to fetch from GetLastError. Nine of them are
+//     NETIOAPI_API and the tenth, SetIfEntry, is the older IP Helper API with
+//     the same DWORD-returning shape. This is the exact convention
+//     x/sys/windows' own generated wrappers use for the sibling procedures it
+//     does carry — see GetIpForwardTable2, FreeMibTable and GetIfEntry in
+//     zsyscall_windows.go, all of which test their r0 the same way.
 //   - InternetSetOptionW, WinHttpGetIEProxyConfigForCurrentUser and
 //     SendMessageTimeoutW return a BOOL or LRESULT where ZERO means failure
 //     and the real error comes from GetLastError — which LazyProc.Call
@@ -53,8 +60,10 @@ var (
 	modwinhttp  = windows.NewLazySystemDLL("winhttp.dll")
 	moduser32   = windows.NewLazySystemDLL("user32.dll")
 
-	// iphlpapi.dll — NETIOAPI_API convention: return value IS the Win32 error
-	// code (0 == NO_ERROR == success).
+	// iphlpapi.dll — return value IS the Win32 error code (0 == NO_ERROR ==
+	// success). NETIOAPI_API for all but SetIfEntry, which predates that
+	// family and returns a DWORD the same way.
+	procSetIfEntry                      = modiphlpapi.NewProc("SetIfEntry")
 	procCreateIpForwardEntry2           = modiphlpapi.NewProc("CreateIpForwardEntry2")
 	procDeleteIpForwardEntry2           = modiphlpapi.NewProc("DeleteIpForwardEntry2")
 	procGetBestRoute2                   = modiphlpapi.NewProc("GetBestRoute2")
@@ -200,6 +209,28 @@ func SetIpInterfaceEntry(row *windows.MibIpInterfaceRow) error {
 	return nil
 }
 
+// SetIfEntry sets the administrative status of an interface. See
+// https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-setifentry
+//
+// MSDN: "On input, the dwIndex member of the MIB_IFROW must be set to the
+// index of the interface to change and the dwAdminStatus member must be set to
+// the new administrative status ... The dwAdminStatus member is the only
+// member that can be changed", and "the SetIfEntry function requires local
+// Administrator privileges" — which dpb already has on Windows, since routing
+// table writes need them too.
+//
+// row's layout is windows.MibIfRow (x/sys), not redeclared here; x/sys carries
+// the struct and GetIfEntry but not this setter, which is the whole reason for
+// the wrapper. Callers populate row with GetIfEntry first, the same
+// read-modify-write MSDN prescribes for SetIpInterfaceEntry above.
+func SetIfEntry(row *windows.MibIfRow) error {
+	r0, _, _ := procSetIfEntry.Call(uintptr(unsafe.Pointer(row)))
+	if r0 != 0 {
+		return windows.Errno(r0)
+	}
+	return nil
+}
+
 // ConvertInterfaceLuidToIndex converts a locally unique interface identifier
 // (LUID) to its interface index. scwindows needs this because
 // sysport.IfaceConfig identifies an interface by NAME, while
@@ -276,12 +307,28 @@ func WinHttpGetIEProxyConfigForCurrentUser(pProxyConfig unsafe.Pointer) error {
 // If GetLastError returns ERROR_TIMEOUT, then the function timed out." Either
 // way the error is GetLastError, already surfaced as Call's third return
 // value.
-func SendMessageTimeoutW(hWnd uintptr, msg uint32, wParam, lParam uintptr, flags, timeout uint32, result *uintptr) error {
+//
+// # Why lParam is a *uint16 and not a uintptr
+//
+// It is the only pointer this message carries, and it must be converted to a
+// uintptr INSIDE the Call argument list — which is why the wrapper takes the
+// typed pointer rather than a uintptr the caller already converted.
+// LazyProc.Call carries //go:uintptrescapes, documented in
+// windows/dll_windows.go, and that pragma only keeps a pointer alive across
+// the call when the unsafe.Pointer→uintptr conversion happens in the argument
+// list of the annotated call itself. A caller that converts one frame up hands
+// Call a plain integer the garbage collector has no reason to associate with
+// the string, so the "Environment" buffer may be collected — or moved — before
+// user32 reads it, producing a broadcast that carries garbage on a schedule
+// nothing reproduces. Every other wrapper in this file already converts in the
+// argument list; this signature is what stops this one from being the
+// exception, as it was until Plan 3's review.
+func SendMessageTimeoutW(hWnd uintptr, msg uint32, wParam uintptr, lParam *uint16, flags, timeout uint32, result *uintptr) error {
 	r0, _, err := procSendMessageTimeoutW.Call(
 		hWnd,
 		uintptr(msg),
 		wParam,
-		lParam,
+		uintptr(unsafe.Pointer(lParam)),
 		uintptr(flags),
 		uintptr(timeout),
 		uintptr(unsafe.Pointer(result)),

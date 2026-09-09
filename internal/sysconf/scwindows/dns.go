@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 
 	"github.com/mumudevx/dpb/internal/sysport"
 )
@@ -45,6 +47,12 @@ import (
 // separation scdarwin's networksetup-writes/scutil-reads split gives DNS on
 // macOS, just with both of THIS package's readers landing on the API side of
 // it instead of splitting one CLI reader between two purposes.
+//
+// Configured consults ONE more thing Live does not: the registry value that
+// says whether a family's resolvers were configured statically or handed out
+// by DHCP. GetAdaptersAddresses cannot answer that and a capture is wrong
+// without it — see Configured and dnsIsStatic, including why a registry read
+// is not the localized-text read Contract 1 forbids.
 type dnsCtl struct{ p *port }
 
 var _ sysport.DNSController = dnsCtl{}
@@ -168,6 +176,30 @@ func (c dnsCtl) Clear(ctx context.Context, svc string) error {
 // networksetup's own "is not a recognized network service" failure via
 // runner.go's liar table; there is no netsh call here to fail on our behalf,
 // so this function fails the same way explicitly.
+//
+// # A DHCP adapter captures as EMPTY, and it has to
+//
+// GetAdaptersAddresses reports the EFFECTIVE resolver list, which is populated
+// for a DHCP adapter exactly as it is for a static one — there is no flag on
+// IP_ADAPTER_ADDRESSES saying where the list came from. Handing that list back
+// as "what has to be put back" is what turns a clean revert into permanent
+// damage: internal/netstate/op_dns.go's Revert branches on `len(prev) > 0`,
+// calling Set (source=static) for a non-empty capture and Clear (source=dhcp)
+// for an empty one. If Configured is never empty, Clear can never run, and one
+// dpb run on an ordinary DHCP laptop PINS the adapter to whatever resolvers it
+// happened to have — plus Windows' own fec0:0:0:ffff::1/2/3 site-local
+// defaults for v6. The user carries the laptop to another network and nothing
+// resolves, forever, after a teardown that verified clean.
+//
+// scdarwin cannot hit this because `networksetup -getdnsservers` answers
+// "There aren't any DNS Servers set" for a DHCP service, so prev is empty and
+// Clear runs. The platforms genuinely differ, and Windows is made to agree
+// here rather than in op_dns.go, because "is this list DHCP-sourced" is a
+// platform question with a platform answer.
+//
+// So each family's servers are kept only when that family is STATICALLY
+// configured; see dnsIsStatic for the registry value that says so and why
+// reading it does not violate this package's no-netsh-text contract.
 func (c dnsCtl) Configured(_ context.Context, svc string) ([]string, error) {
 	aas, err := dnsAdapterAddresses()
 	if err != nil {
@@ -177,7 +209,90 @@ func (c dnsCtl) Configured(_ context.Context, svc string) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("netstate: interface %q not found for a DNS capture", svc)
 	}
-	return dnsServerAddrsOf(aa), nil
+
+	// MSDN, IP_ADAPTER_ADDRESSES: AdapterName is "the name of the adapter",
+	// and it is the adapter's GUID in the {…} form the Tcpip Interfaces keys
+	// are named with — an ANSI string, unlike the wide FriendlyName beside it.
+	guid := windows.BytePtrToString(aa.AdapterName)
+	v4Static, err := dnsIsStatic(tcpip4InterfacesKey, guid)
+	if err != nil {
+		return nil, err
+	}
+	v6Static, err := dnsIsStatic(tcpip6InterfacesKey, guid)
+	if err != nil {
+		return nil, err
+	}
+	return dnsServerAddrsOfFamilies(aa, v4Static, v6Static), nil
+}
+
+// Where Windows records a STATICALLY configured resolver list, per address
+// family. Tcpip is IPv4 and Tcpip6 is IPv6; each has one subkey per adapter,
+// named with the adapter's GUID.
+//
+// # This is a registry read, not tool text, and that distinction is the point
+//
+// It LOOKS like the thing windows.go's Contract 1 forbids — asking the system
+// where a setting came from — and it is not. Contract 1 forbids PARSING THE
+// TEXT A LOCALIZED TOOL PRINTS: `netsh interface ipv4 show dnsservers` renders
+// "Statically Configured DNS Servers" in the system UI language, so a parser
+// written against the English wording reads a Turkish machine wrongly. A
+// registry value name is not localized. NameServer is NameServer on every
+// install of Windows in every language, and its CONTENT is a machine-readable
+// list of addresses, not a sentence. This is the same class of read as
+// proxy.go's Internet Settings values, which Contract 1 already blesses as the
+// capture side of the proxy controller.
+//
+// The contract on the value itself: NameServer holds the resolvers an
+// administrator set explicitly, and is absent or empty when the adapter takes
+// its resolvers from DHCP — which stores them separately, in DhcpNameServer.
+// `netsh ... set dnsservers source=static` writes NameServer and
+// `source=dhcp` clears it, which is precisely why dnsCtl.Clear restoring DHCP
+// makes this read answer "not static" again afterwards.
+const (
+	tcpip4InterfacesKey = `SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces`
+	tcpip6InterfacesKey = `SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces`
+	valNameServer       = "NameServer"
+)
+
+// dnsIsStatic reports whether the adapter with this GUID has statically
+// configured resolvers under hive.
+//
+// A missing key or a missing value is "not static" and NOT an error: an
+// adapter with no Tcpip6 subkey has no IPv6 stack bound, and a subkey with no
+// NameServer value has never had a static list written — both are the
+// registry's own POSITIVE statement that there is nothing here, the same
+// reading proxy.go's regString and env.go's Get give registry.ErrNotExist.
+//
+// Any OTHER failure is returned. A capture that cannot be read must fail
+// loudly rather than default to "DHCP": defaulting would make a genuinely
+// static machine take Revert's Clear branch and lose the administrator's
+// resolver list, which is the mirror image of the bug this function exists to
+// fix.
+func dnsIsStatic(hive, guid string) (bool, error) {
+	if guid == "" {
+		return false, fmt.Errorf("netstate: the adapter for a DNS capture reports no GUID")
+	}
+	path := hive + `\` + guid
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE)
+	if errors.Is(err, registry.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("netstate: open HKLM\\%s: %w", path, err)
+	}
+	defer key.Close()
+
+	v, _, err := key.GetStringValue(valNameServer)
+	if errors.Is(err, registry.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("netstate: read HKLM\\%s\\%s: %w", path, valNameServer, err)
+	}
+	// Some Windows versions leave an EMPTY NameServer behind when an adapter
+	// is switched back to DHCP rather than deleting the value, so emptiness
+	// has to mean the same thing as absence.
+	return strings.TrimSpace(v) != "", nil
 }
 
 // Live reads the resolvers the system's DEFAULT-ROUTE interface is
@@ -302,22 +417,46 @@ func dnsAdapterAddresses() ([]*windows.IpAdapterAddresses, error) {
 	return aas, nil
 }
 
-// dnsServerAddrsOf reads aa's DNS server list off FirstDnsServerAddress.
+// dnsServerAddrsOf reads aa's whole DNS server list off FirstDnsServerAddress
+// — the EFFECTIVE resolvers, whatever their origin. That is what Live wants:
+// a verify asks whether the machine is actually using our resolver, not how it
+// was told to.
 //
 // Each entry's Address field is a SocketAddress — the same
 // *syscall.RawSockaddrAny-backed wrapper iface.go's unicastAddrsOf decodes
 // for FirstUnicastAddress — so this reuses rib.go's sockaddrAddr rather than
 // inventing a second decoder with its own chance to get an offset wrong.
 func dnsServerAddrsOf(aa *windows.IpAdapterAddresses) []string {
+	return dnsServerAddrsOfFamilies(aa, true, true)
+}
+
+// dnsServerAddrsOfFamilies is the same walk, keeping only the families the
+// caller asks for. Configured uses it to drop a family whose resolvers came
+// from DHCP; see Configured for why a DHCP family must capture as nothing at
+// all rather than as its current addresses.
+//
+// A 4-in-6 address counts as v4, matching splitDNSServersByFamily's own
+// reading — Set would send it to `netsh interface ipv4`, so a capture must not
+// file it under v6 and strand it when only v6 is static.
+func dnsServerAddrsOfFamilies(aa *windows.IpAdapterAddresses, v4, v6 bool) []string {
 	var out []string
 	for d := aa.FirstDnsServerAddress; d != nil; d = d.Next {
 		if d.Address.Sockaddr == nil {
 			continue
 		}
 		sa := (*windows.RawSockaddrInet)(unsafe.Pointer(d.Address.Sockaddr))
-		if a, ok := sockaddrAddr(sa); ok {
-			out = append(out, a.String())
+		a, ok := sockaddrAddr(sa)
+		if !ok {
+			continue
 		}
+		if a.Is4() || a.Is4In6() {
+			if !v4 {
+				continue
+			}
+		} else if !v6 {
+			continue
+		}
+		out = append(out, a.String())
 	}
 	return out
 }

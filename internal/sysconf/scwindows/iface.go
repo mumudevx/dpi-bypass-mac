@@ -35,7 +35,9 @@ var _ sysport.IfaceController = ifaceCtl{}
 // InitializeUnicastIpAddressEntry to fill every field CreateUnicastIpAddressEntry
 // needs that this call does not set explicitly, then the address and prefix
 // length, then the create; then, only if a caller actually asked for an MTU,
-// GetIpInterfaceEntry followed by SetIpInterfaceEntry. Skipping
+// GetIpInterfaceEntry followed by SetIpInterfaceEntry — for BOTH address
+// families, see setOtherFamilyMTU; and finally the administrative up
+// scdarwin gets by passing `up` to ifconfig, see bringUp. Skipping
 // InitializeUnicastIpAddressEntry is not a shortcut — see its wrapper in
 // iphlp.go for why a zeroed row fails ERROR_INVALID_PARAMETER on fields this
 // call never touches.
@@ -72,9 +74,99 @@ func (c ifaceCtl) Configure(_ context.Context, iface string, cfg sysport.IfaceCo
 		if err := setInterfaceMTU(ifIndex, family, cfg.MTU); err != nil {
 			return err
 		}
+		c.setOtherFamilyMTU(ifIndex, iface, family, cfg.MTU)
 	}
+	c.bringUp(ifIndex, iface)
 	return nil
 }
+
+// setOtherFamilyMTU sets the SAME MTU on the address family cfg.Local is not,
+// and never fails the Configure over it.
+//
+// # Why the other family is set at all
+//
+// An interface has TWO MIB_IPINTERFACE_ROW rows, one per family, each with its
+// own NlMtu — so setting the MTU "for iface" the way scdarwin's single
+// `ifconfig ... mtu` call does takes two calls here, not one. What decides the
+// question is not tidiness, it is what the verifier reads:
+// internal/netstate/op_iface.go's Verify compares against net.Interface.MTU,
+// and $GOROOT/src/net/interface_windows.go fills that from
+// IP_ADAPTER_ADDRESSES.Mtu — ONE number for the whole adapter, with nothing in
+// its MSDN description saying which family's row it came from. A v6 config
+// that set only the v6 NlMtu could therefore be verified against a number
+// Windows took from the v4 row and fail for a reason no log would explain.
+// Setting both makes the two rows agree, so whichever one Mtu is drawn from is
+// the number Verify wants.
+//
+// # Why a failure here is logged, not returned
+//
+// The other family may simply not be there: an adapter with IPv6 unbound has
+// no v6 MIB_IPINTERFACE_ROW and GetIpInterfaceEntry answers ERROR_NOT_FOUND.
+// That is a normal machine, not a broken Configure, and refusing to bring the
+// tunnel up over it would be a regression invented by this fix. The family the
+// caller actually asked for is set above and its failure IS returned.
+func (c ifaceCtl) setOtherFamilyMTU(ifIndex uint32, iface string, family uint16, mtu int) {
+	other := uint16(windows.AF_INET6)
+	if family == windows.AF_INET6 {
+		other = windows.AF_INET
+	}
+	if err := setInterfaceMTU(ifIndex, other, mtu); err != nil {
+		c.p.env().logf("netstate: set MTU %d on %s for address family %d: %v "+
+			"(the configured family is set; this one may not be bound)", mtu, iface, other, err)
+	}
+}
+
+// bringUp asks for iface's administrative status to be UP, and never fails the
+// Configure over it.
+//
+// scdarwin passes `up` to ifconfig in the same call that sets the address, and
+// internal/netstate/op_iface.go's Verify requires net.FlagUp — which
+// $GOROOT/src/net/interface_windows.go derives from
+// IP_ADAPTER_ADDRESSES.OperStatus == IfOperStatusUp. Nothing above this file
+// brings the adapter up, so without this Configure has no step that
+// corresponds to the `up` macOS gets.
+//
+// BELT AND BRACES, PENDING A REAL MACHINE. A Wintun-class adapter is widely
+// expected to report media-connected — and therefore IfOperStatusUp — from the
+// moment its session is started by whoever opened it, which would make this a
+// no-op on every machine dpb actually runs on. That expectation could not be
+// established from documentation, and the cost of the two possible mistakes is
+// wildly asymmetric: a redundant call costs one syscall, while a missing one
+// costs a tunnel that fails Verify with "interface is not up" and no obvious
+// cause. So it is issued, and its failure is LOGGED rather than returned,
+// because op_iface.go's Verify is the honest judge of whether the adapter is
+// actually up — a judgement this call cannot improve on and must not
+// pre-empt. ADMIN status is also not the same thing as OPER status: MSDN
+// documents SetIfEntry as setting the former, and only the latter reaches
+// net.FlagUp, which is the other half of why this cannot be treated as
+// authoritative.
+//
+// Unconfigure has no matching "down", deliberately, for the reason its own
+// doc comment gives: the adapter belongs to whoever holds its handle.
+func (c ifaceCtl) bringUp(ifIndex uint32, iface string) {
+	// MSDN's read-modify-write for this API: GetIfEntry to fill the row,
+	// change dwAdminStatus, SetIfEntry. Only Index has to be set going in.
+	row := windows.MibIfRow{Index: ifIndex}
+	if err := windows.GetIfEntry(&row); err != nil {
+		c.p.env().logf("netstate: read interface %s to bring it up: %v "+
+			"(the interface read in Verify decides)", iface, err)
+		return
+	}
+	if row.AdminStatus == ifAdminStatusUp {
+		return
+	}
+	row.AdminStatus = ifAdminStatusUp
+	if err := SetIfEntry(&row); err != nil {
+		c.p.env().logf("netstate: bring %s up: %v (the interface read in Verify decides)", iface, err)
+	}
+}
+
+// ifAdminStatusUp is MIB_IF_ADMIN_STATUS_UP from ifmib.h, which
+// golang.org/x/sys/windows does not declare. It is the value MSDN names for
+// MIB_IFROW.dwAdminStatus in SetIfEntry's own documentation; the siblings are
+// MIB_IF_ADMIN_STATUS_DOWN (2) and MIB_IF_ADMIN_STATUS_TESTING (3), neither of
+// which this package has any reason to set.
+const ifAdminStatusUp = 1
 
 // Unconfigure removes the address Configure added, through
 // DeleteUnicastIpAddressEntry. It deliberately does NOT bring the interface

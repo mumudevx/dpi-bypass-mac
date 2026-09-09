@@ -25,6 +25,7 @@ func TestIphlpProceduresResolve(t *testing.T) {
 		name string
 		proc *windows.LazyProc
 	}{
+		{"SetIfEntry", procSetIfEntry},
 		{"CreateIpForwardEntry2", procCreateIpForwardEntry2},
 		{"DeleteIpForwardEntry2", procDeleteIpForwardEntry2},
 		{"GetBestRoute2", procGetBestRoute2},

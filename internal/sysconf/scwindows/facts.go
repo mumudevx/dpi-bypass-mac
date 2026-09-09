@@ -46,11 +46,9 @@ func (c factsCtl) Collect(_ context.Context, selfIface string) (*sysport.Facts, 
 	// the more accurate answer.
 	//
 	// GetBestRoute2 would name the interface the forwarding engine ACTUALLY
-	// selects, which is strictly better information: rib.go's pickDefault
-	// returns the first matching row and documents that it cannot rank several
-	// defaults, because the value that orders them (the row's metric offset
-	// plus the interface metric from MIB_IPINTERFACE_ROW) does not survive into
-	// RouteEntry.
+	// selects, which is still better information: rib.go's pickDefault ranks
+	// several defaults by interface metric, but the row's own metric offset
+	// does not survive into sysport.RouteEntry and so is not in the ranking.
 	//
 	// It is not used here because Facts.Uplink is not the only place this
 	// question gets asked. dnsCtl.Live (dns.go) independently re-asks "which
@@ -61,16 +59,22 @@ func (c factsCtl) Collect(_ context.Context, selfIface string) (*sysport.Facts, 
 	// more than one default route, and every DNS verify would then fail on an
 	// adapter that was correctly configured. An uplink that agrees with the
 	// verifier is worth more here than an uplink that is independently more
-	// accurate, so both sides use pickDefault and neither claims more than
-	// rib.go already claims for it.
-	def, ok, err := pickDefault(rs, "")
+	// accurate, so both sides call pickDefault WITH THE SAME METRIC LOOKUP and
+	// neither claims more than rib.go already claims for it.
+	//
+	// interfaceMetrics() is built once and shared by both picks below, so the
+	// v4 and v6 uplinks are chosen against one snapshot of the interface
+	// metrics — the same "everything that has to agree comes out of one read"
+	// rule this function applies to the routing table.
+	ifMetric := interfaceMetrics()
+	def, ok, err := pickDefault(rs, "", ifMetric)
 	if err != nil {
 		return nil, fmt.Errorf("netstate: read default route: %w", err)
 	}
 	if ok {
 		f.Uplink, f.Gateway = def.Iface, def.Gateway
 	}
-	if v6, ok6 := pickDefaultV6(rs); ok6 {
+	if v6, ok6 := pickDefaultV6(rs, ifMetric); ok6 {
 		f.UplinkV6, f.GatewayV6 = v6.Iface, v6.Gateway
 	}
 	f.Services = uplinkServices(f.Uplink, f.UplinkV6)
@@ -186,7 +190,16 @@ func uplinkServices(uplink, uplinkV6 string) []string {
 // match nothing at all, on every machine, forever. This asks only for what the
 // caller actually needs: a v6 default with a next hop that
 // sysport.RouteSpec{Dst, Gw, Iface} can be built from.
-func pickDefaultV6(rs []sysport.RouteEntry) (sysport.RouteEntry, bool) {
+//
+// It ranks by ifMetric for pickDefault's reason and no other: a dual-homed
+// machine has two ::/0 rows as routinely as it has two 0.0.0.0/0 rows, and
+// naming the idle adapter here puts Facts.GatewayV6 — and therefore the v6
+// scoped default cliapp builds from it — on the wrong NIC. A nil ifMetric
+// leaves the first-seen order deciding, exactly as before.
+func pickDefaultV6(rs []sysport.RouteEntry, ifMetric ifaceMetricFunc) (sysport.RouteEntry, bool) {
+	var best sysport.RouteEntry
+	var bestMetric uint32
+	found := false
 	for _, r := range rs {
 		if r.Dst.Bits() != 0 || r.Dst.Addr().Is4() {
 			continue
@@ -196,9 +209,11 @@ func pickDefaultV6(rs []sysport.RouteEntry) (sysport.RouteEntry, bool) {
 			// turned into the gateway route Facts.GatewayV6 exists to build.
 			continue
 		}
-		return r, true
+		if m := routeMetric(r, ifMetric); !found || m < bestMetric {
+			best, bestMetric, found = r, m, true
+		}
 	}
-	return sysport.RouteEntry{}, false
+	return best, found
 }
 
 // halfDefaultPairs are the prefix pairs that between them cover the whole

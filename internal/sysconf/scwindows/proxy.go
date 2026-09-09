@@ -43,6 +43,34 @@ var _ sysport.ProxyController = proxyCtl{}
 // https://learn.microsoft.com/en-us/troubleshoot/developer/browsers/connectivity-navigation/use-proxy-servers-with-ie
 // (the "Internet Settings" registry values) and WinHTTP's own description of
 // the same values under WINHTTP_CURRENT_USER_IE_PROXY_CONFIG.
+//
+// # KNOWN LIMITATION: HKCU here is the ELEVATED token's hive
+//
+// Every read and write below opens registry.CURRENT_USER, and CURRENT_USER is
+// resolved from the ACCESS TOKEN OF THE CALLING PROCESS — MSDN, "Predefined
+// Keys": HKEY_CURRENT_USER "maps to the current user's branch in
+// HKEY_USERS ... the user's [hive] is loaded when the user logs on". dpb needs
+// elevation on Windows to write routes, so on the enterprise-default machine —
+// a standard user account plus a SEPARATE administrator account, where the UAC
+// prompt asks for the admin's credentials rather than consent — the elevated
+// process runs as the ADMIN and HKCU is the ADMIN's hive.
+//
+// The consequence is exactly the failure class this package's verification
+// contract exists to catch, and it is not caught, because it is not a failed
+// write: SetManual writes the admin's Internet Settings, Live reads the same
+// token's configuration back through WinHTTP, Verify passes, and the
+// interactive user's browser is never proxied at all. dpb reports Ready while
+// changing nothing the user can see. The revert is symmetric and equally
+// invisible, so nothing is left broken — but nothing was ever done either.
+//
+// Fixing it properly means obtaining the INTERACTIVE user's token
+// (WTSQueryUserToken on the active session, or WTSGetActiveConsoleSessionId +
+// ImpersonateLoggedOnUser) and loading that user's hive, which is a
+// substantial piece of work with its own privilege and lifetime questions. It
+// is deliberately NOT attempted here; it is the top item for the first session
+// on a real Windows machine, where "did the browser actually get proxied" can
+// be observed rather than reasoned about. env.go carries the same limitation
+// for HKCU\Environment.
 const (
 	internetSettingsKey = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
@@ -395,28 +423,7 @@ func restoreAutoConfigURL(key registry.Key, prev sysport.ProxySettings) error {
 
 // restoreProxyServer rebuilds ProxyServer, touching only the schemes prev
 // actually describes, and then decides what to do with the single global
-// ProxyEnable switch.
-//
-// The ProxyEnable decision is the one place where Windows' shape and
-// sysport's disagree, so it is spelled out rather than guessed. ProxySettings
-// carries a PER-SCHEME "on" flag because macOS has per-scheme switches;
-// Windows has exactly one, shared. That gives three cases:
-//
-//   - any restored scheme was on  -> ProxyEnable = 1. Unambiguous.
-//   - none were on, and nothing survives in ProxyServer from a scheme this
-//     capture never described -> ProxyEnable = 0. Also unambiguous: everything
-//     the switch could still be gating is something we just restored as off.
-//   - none were on, but an undescribed scheme (a SOCKS proxy during a web
-//     revert, an ftp proxy at any time) is still in the string -> LEAVE THE
-//     SWITCH ALONE. Turning it off would disable a proxy this tool never
-//     touched, which is the exact failure ProxySettings.Kinds exists to
-//     prevent.
-//
-// The residual cost of the third case is honest and worth stating: if the user
-// had that undescribed proxy configured but DISABLED, our SetManual turned the
-// global switch on and this leaves it on. Fixing that properly needs
-// ProxyEnable itself in the capture, and ProxySettings has no field for a
-// global switch — a platform-free vocabulary change, not a scwindows one.
+// ProxyEnable switch. See decideProxyEnable for that decision.
 func (c proxyCtl) restoreProxyServer(key registry.Key, prev sysport.ProxySettings) error {
 	_, list, err := readProxyServer(key)
 	if err != nil {
@@ -424,17 +431,14 @@ func (c proxyCtl) restoreProxyServer(key registry.Key, prev sysport.ProxySetting
 	}
 
 	var described []string
-	enable := false
 	if proxyWants(prev, sysport.ProxyWeb) {
 		described = append(described, schemeHTTP, schemeHTTPS)
 		list = restoreScheme(list, schemeHTTP, prev.WebHost, prev.WebPort)
 		list = restoreScheme(list, schemeHTTPS, prev.SecureHost, prev.SecurePort)
-		enable = enable || prev.WebOn || prev.SecureOn
 	}
 	if proxyWants(prev, sysport.ProxySOCKS) {
 		described = append(described, schemeSOCKS)
 		list = restoreScheme(list, schemeSOCKS, prev.SOCKSHost, prev.SOCKSPort)
-		enable = enable || prev.SOCKSOn
 	}
 
 	if s := formatProxyServer(list); s != "" {
@@ -449,17 +453,103 @@ func (c proxyCtl) restoreProxyServer(key registry.Key, prev sysport.ProxySetting
 		c.p.env().logf("netstate: clear %s: %v (tidying only; %s decides)", valProxyServer, err, valProxyEnable)
 	}
 
-	switch {
-	case enable:
+	switch decideProxyEnable(prev, list, described) {
+	case proxyEnableOn:
 		if err := key.SetDWordValue(valProxyEnable, 1); err != nil {
 			return fmt.Errorf("netstate: restore %s: %w", valProxyEnable, err)
 		}
-	case !hasUndescribedProxy(list, described):
+	case proxyEnableOff:
 		if err := key.SetDWordValue(valProxyEnable, 0); err != nil {
 			return fmt.Errorf("netstate: clear %s: %w", valProxyEnable, err)
 		}
+	case proxyEnableLeaveAlone:
 	}
 	return nil
+}
+
+// proxyEnableDecision is what a restore does with the single global switch.
+// It is a named type rather than a *bool because "leave it alone" is a real,
+// frequently-correct answer here and a nil pointer says that far less clearly.
+type proxyEnableDecision int
+
+const (
+	proxyEnableLeaveAlone proxyEnableDecision = iota
+	proxyEnableOff
+	proxyEnableOn
+)
+
+// decideProxyEnable is the ProxyEnable half of a restore, split out of
+// restoreProxyServer so the decision can be pinned by a test without a
+// registry to open.
+//
+// This is the one place where Windows' shape and sysport's disagree, so it is
+// spelled out rather than guessed. ProxySettings carries a PER-SCHEME "on"
+// flag because macOS has per-scheme switches; Windows has exactly one, shared,
+// and ProxySettings has no field for it.
+//
+// # The switch IS recoverable from the capture, and must be restored exactly
+//
+// Configured records each scheme's On as `ProxyEnable && host != ""`. So for
+// any described scheme that captured a HOST, that scheme's On flag IS the
+// ProxyEnable DWORD, bit for bit — capturedProxyEnable below recovers it. When
+// the capture determines the switch that way, the switch is written back to
+// exactly that value and nothing else is consulted.
+//
+// Getting this wrong is not cosmetic. An ex-corporate laptop with
+// ProxyEnable = 0 and a stale bare ProxyServer ("proxy.corp:8080") is common,
+// and a revert that leaves the switch at the 1 SetManual set routes every
+// browser on the machine through a proxy the user had switched OFF, across
+// reboots, while VerifyReverted passes because the HOST no longer matches
+// ours. That is a stranger's laptop with no internet after a teardown this
+// tool called clean.
+//
+// # When the capture does NOT determine it
+//
+// A capture whose described schemes all had EMPTY hosts (a SOCKS-only capture
+// on a machine with no SOCKS proxy, say) says nothing about the switch: On is
+// false whether ProxyEnable was 0 or 1. Two cases remain, and they are the
+// original three-way decision minus the case above:
+//
+//   - nothing survives in ProxyServer from a scheme this capture never
+//     described -> ProxyEnable = 0. Everything the switch could still be
+//     gating is something we just restored as off or removed.
+//   - an undescribed proxy (the user's SOCKS proxy during a web revert, a bare
+//     token during a SOCKS revert) is still in the string -> LEAVE THE SWITCH
+//     ALONE. Turning it off would disable a proxy this tool never touched,
+//     which is the exact failure ProxySettings.Kinds exists to prevent, and
+//     turning it on would enable one. Neither is knowable from here.
+func decideProxyEnable(prev sysport.ProxySettings, list []proxyEntry, described []string) proxyEnableDecision {
+	on, known := capturedProxyEnable(prev)
+	switch {
+	case on:
+		return proxyEnableOn
+	case known:
+		return proxyEnableOff
+	case !hasUndescribedProxy(list, described):
+		return proxyEnableOff
+	default:
+		return proxyEnableLeaveAlone
+	}
+}
+
+// capturedProxyEnable recovers the ProxyEnable DWORD the capture was taken
+// under, and says whether it could.
+//
+// known is true when some scheme prev describes captured a non-empty host,
+// because Configured's `on && e.Host != ""` makes that scheme's On flag equal
+// to ProxyEnable exactly. `known || on` at the end covers the shape Configured
+// cannot produce but a hand-built or older-version ProxySettings could — On
+// set with no host — where the "on" answer is itself the knowledge.
+func capturedProxyEnable(prev sysport.ProxySettings) (on, known bool) {
+	if proxyWants(prev, sysport.ProxyWeb) {
+		on = on || prev.WebOn || prev.SecureOn
+		known = known || prev.WebHost != "" || prev.SecureHost != ""
+	}
+	if proxyWants(prev, sysport.ProxySOCKS) {
+		on = on || prev.SOCKSOn
+		known = known || prev.SOCKSHost != ""
+	}
+	return on, known || on
 }
 
 // restoreScheme writes one scheme back, or removes it when the capture holds
@@ -473,18 +563,44 @@ func restoreScheme(list []proxyEntry, scheme, host string, port int) []proxyEntr
 	return setProxyEntry(list, proxyEntry{Scheme: scheme, Host: host, Port: port})
 }
 
-// hasUndescribedProxy reports whether list still carries a scheme the capture
-// never described.
+// hasUndescribedProxy reports whether list still carries a proxy the capture
+// never described — the thing that must hold the global switch on.
+//
+// A SYNTHESIZED entry (proxyEntry.Bare; see parseProxyServer) needs its own
+// answer, and getting it wrong is how the ex-corporate-laptop failure in
+// decideProxyEnable used to happen. A bare ProxyServer token is ONE proxy that
+// this package expands into an http, an https and an ftp entry. The ftp entry
+// is not a second proxy the user configured separately: it is the same value
+// the capture already recorded as WebHost, seen through a scheme nobody asked
+// about. So a bare-derived entry counts as undescribed only when the capture
+// described NONE of the schemes the bare token covers — which is exactly the
+// SOCKS-only capture, where the user's bare http proxy really is untouched
+// configuration this restore knows nothing about and must not switch off.
 func hasUndescribedProxy(list []proxyEntry, described []string) bool {
-	for _, e := range list {
-		found := false
-		for _, d := range described {
-			if e.Scheme == d {
-				found = true
-				break
-			}
+	bareDescribed := false
+	for _, s := range bareProxySchemes {
+		if containsScheme(described, s) {
+			bareDescribed = true
+			break
 		}
-		if !found {
+	}
+	for _, e := range list {
+		if e.Bare {
+			if bareDescribed {
+				continue
+			}
+			return true
+		}
+		if !containsScheme(described, e.Scheme) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsScheme(schemes []string, scheme string) bool {
+	for _, s := range schemes {
+		if s == scheme {
 			return true
 		}
 	}
@@ -655,6 +771,25 @@ type proxyEntry struct {
 	Scheme string
 	Host   string
 	Port   int
+	// Bare records PROVENANCE: this entry was SYNTHESIZED by parseProxyServer
+	// from a scheme-less ("bare") ProxyServer token, not written by the user
+	// as "<scheme>=...". It is not decoration — two decisions read it, and
+	// both were wrong before it existed:
+	//
+	//   - hasUndescribedProxy must not mistake the invented ftp entry for a
+	//     second, untouched user proxy, because doing so leaves ProxyEnable
+	//     switched ON for a user who had it OFF. See decideProxyEnable.
+	//   - formatProxyServer must re-emit the bare token as a bare token. A
+	//     bare value means "this proxy, for every protocol"; writing it back
+	//     out as "http=X;https=X;ftp=X" silently NARROWS it to three, changes
+	//     what the IE dialog shows the user ("use the same proxy server for
+	//     all protocols" quietly unticks), and makes a restore that is meant
+	//     to be byte-identical not be.
+	//
+	// It is deliberately NOT read by Configured or proxyStateFromIE: a bare
+	// token really is the effective http and https proxy, which is precisely
+	// what a capture and a verify need to know.
+	Bare bool
 }
 
 // value renders the entry's host:port half.
@@ -683,6 +818,10 @@ func isProxyListSeparator(r rune) bool { return r == ';' || unicode.IsSpace(r) }
 // in the string. That is why this is two passes rather than one "last wins"
 // loop: "http=a:1;b:2" means http goes to a and everything else to b, and a
 // single loop would have b overwrite http on the way past.
+//
+// The entries the bare pass invents are marked proxyEntry.Bare — see that
+// field for the two decisions that must be able to tell an invented entry from
+// one the user wrote, and what it costs when they cannot.
 //
 // A host keeps its brackets ("[::1]"), so that a value read here and written
 // back by Restore is byte-identical to what the user had.
@@ -721,7 +860,7 @@ func parseProxyServer(s string) []proxyEntry {
 			if _, ok := findProxyEntry(out, scheme); ok {
 				continue
 			}
-			out = append(out, proxyEntry{Scheme: scheme, Host: host, Port: port})
+			out = append(out, proxyEntry{Scheme: scheme, Host: host, Port: port, Bare: true})
 		}
 	}
 	return out
@@ -772,27 +911,82 @@ func parseProxyPort(s string) (int, bool) {
 	return n, true
 }
 
-// formatProxyServer re-emits the list Windows will store. Every entry is
-// written in the explicit scheme= form, including a list that came in bare:
-// the explicit form says exactly what it means, round-trips through
-// parseProxyServer unchanged, and cannot be widened by accident the way a bare
-// entry can.
+// formatProxyServer re-emits the list Windows will store. Entries the USER
+// wrote are emitted in the explicit scheme= form, in proxySchemeOrder so the
+// result is deterministic and therefore assertable.
+//
+// Entries parseProxyServer SYNTHESIZED from a bare token (proxyEntry.Bare) are
+// emitted as the one bare token they came from, not as three explicit entries.
+// Expanding them would look harmless and is not: a bare value is the user's
+// "use the same proxy server for all protocols", it covers every scheme
+// INCLUDING ones this package does not model, and rewriting it as
+// "http=X;https=X;ftp=X" narrows it, permanently, on a machine we promised to
+// put back. Mixing the two forms in one string is MSDN's own grammar
+// ("([<scheme>=][<scheme>"://"]<server>[":"<port>][";"...])") and is exactly
+// what parseProxyServer's two-pass rule reads back: explicit entries win, and
+// the bare token covers whatever is left.
+//
+// The collapse case exists so a full apply/revert cycle gives the bytes back.
+// After Restore has written the captured host back onto http and https, a
+// machine that started with "proxy.corp:8080" holds explicit entries whose
+// value is identical to the surviving bare token's; emitting
+// "http=proxy.corp:8080;https=proxy.corp:8080;proxy.corp:8080" would say the
+// same thing in a shape the user never had and the IE dialog renders
+// differently. Collapsing is safe only when every explicit entry both matches
+// the bare value AND names a scheme the bare token already covers — a socks
+// entry never qualifies, because bareProxySchemes deliberately excludes socks.
 func formatProxyServer(list []proxyEntry) string {
+	bare, hasBare := findBareProxyEntry(list)
+	if hasBare && collapsesToBare(list, bare) {
+		return bare.value()
+	}
+
 	var parts []string
 	emitted := make(map[string]bool, len(list))
 	for _, scheme := range proxySchemeOrder {
-		if e, ok := findProxyEntry(list, scheme); ok {
+		if e, ok := findProxyEntry(list, scheme); ok && !e.Bare {
 			parts = append(parts, e.Scheme+"="+e.value())
 			emitted[scheme] = true
 		}
 	}
 	for _, e := range list {
-		if emitted[e.Scheme] {
+		if e.Bare || emitted[e.Scheme] {
 			continue
 		}
 		parts = append(parts, e.Scheme+"="+e.value())
 	}
+	if hasBare {
+		// Last, so the explicit entries read first; position carries no
+		// meaning in this grammar (see parseProxyServer's two-pass rule).
+		parts = append(parts, bare.value())
+	}
 	return strings.Join(parts, ";")
+}
+
+// findBareProxyEntry returns the first synthesized entry. Every synthesized
+// entry in a list comes from the SAME bare token and therefore carries the
+// same host and port, so the first one is the token.
+func findBareProxyEntry(list []proxyEntry) (proxyEntry, bool) {
+	for _, e := range list {
+		if e.Bare {
+			return e, true
+		}
+	}
+	return proxyEntry{}, false
+}
+
+// collapsesToBare reports whether list says exactly what the single bare token
+// says. See formatProxyServer for why that matters and what disqualifies it.
+func collapsesToBare(list []proxyEntry, bare proxyEntry) bool {
+	for _, e := range list {
+		if e.Bare {
+			continue
+		}
+		if !containsScheme(bareProxySchemes, e.Scheme) || e.value() != bare.value() {
+			return false
+		}
+	}
+	return true
 }
 
 func findProxyEntry(list []proxyEntry, scheme string) (proxyEntry, bool) {
@@ -817,11 +1011,30 @@ func setProxyEntry(list []proxyEntry, e proxyEntry) []proxyEntry {
 	return append(list, e)
 }
 
+// removeProxyEntry drops scheme's entry.
+//
+// Removing a SYNTHESIZED entry also materialises the rest of the bare group as
+// explicit entries. A bare token covers every scheme not named explicitly, so
+// re-emitting it while claiming to have removed one of the schemes it covers
+// would put the removed scheme straight back — formatProxyServer would write
+// the token, parseProxyServer would expand it again, and the entry this call
+// was asked to delete would be alive on the next read. Writing the survivors
+// out per-scheme is the only shape ProxyServer has that says "these protocols,
+// not that one", and narrowing the user's value is the lesser harm when the
+// alternative is not honouring a removal at all.
 func removeProxyEntry(list []proxyEntry, scheme string) []proxyEntry {
+	removedBare := false
 	out := list[:0]
 	for _, e := range list {
-		if e.Scheme != scheme {
-			out = append(out, e)
+		if e.Scheme == scheme {
+			removedBare = removedBare || e.Bare
+			continue
+		}
+		out = append(out, e)
+	}
+	if removedBare {
+		for i := range out {
+			out[i].Bare = false
 		}
 	}
 	return out

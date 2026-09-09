@@ -255,6 +255,65 @@ func TestDNSServerAddrsOfDecodesTheList(t *testing.T) {
 	}
 }
 
+// TestDNSServerAddrsOfFamiliesDropsADHCPFamily is the guard on the capture
+// that decides whether a laptop keeps working on the next network it joins.
+//
+// GetAdaptersAddresses reports a DHCP adapter's resolvers exactly as it
+// reports a static one's, so Configured gates each family on the registry (see
+// dnsIsStatic). What this pins is the half that has no Windows host in it: a
+// family that is NOT statically configured must contribute NOTHING, so that a
+// wholly-DHCP adapter captures as an empty list and
+// internal/netstate/op_dns.go's Revert takes its Clear (source=dhcp) branch
+// instead of pinning the machine to today's resolvers forever.
+func TestDNSServerAddrsOfFamiliesDropsADHCPFamily(t *testing.T) {
+	v4 := sockaddrIn(t, "10.0.0.1")
+	v6 := sockaddrIn6(t, "fec0:0:0:ffff::1", 0)
+	second := &windows.IpAdapterDnsServerAdapter{Address: windows.SocketAddress{Sockaddr: rawAny(&v6)}}
+	first := &windows.IpAdapterDnsServerAdapter{Address: windows.SocketAddress{Sockaddr: rawAny(&v4)}, Next: second}
+	aa := &windows.IpAdapterAddresses{FirstDnsServerAddress: first}
+
+	cases := []struct {
+		name   string
+		v4, v6 bool
+		want   []string
+	}{
+		{
+			// The ordinary laptop. Both families come from DHCP, so the
+			// capture is empty and Revert restores DHCP.
+			name: "a wholly DHCP adapter captures nothing",
+			want: nil,
+		},
+		{
+			// Windows hands every v6-enabled adapter the fec0:0:0:ffff::1/2/3
+			// site-local defaults. Capturing those and writing them back as
+			// static is how a v6 resolver list nobody chose becomes permanent.
+			name: "a static v4 family does not drag the DHCP v6 defaults along",
+			v4:   true,
+			want: []string{"10.0.0.1"},
+		},
+		{
+			name: "a static v6 family alone keeps only v6",
+			v6:   true,
+			want: []string{"fec0:0:0:ffff::1"},
+		},
+		{
+			name: "an adapter static on both families captures both",
+			v4:   true,
+			v6:   true,
+			want: []string{"10.0.0.1", "fec0:0:0:ffff::1"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dnsServerAddrsOfFamilies(aa, tc.v4, tc.v6)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("dnsServerAddrsOfFamilies(v4=%v, v6=%v) mismatch (-want +got):\n%s", tc.v4, tc.v6, diff)
+			}
+		})
+	}
+}
+
 // TestDNSServerAddrsOfSkipsANilSockaddr: GetAdaptersAddresses' own docs do
 // not promise every DNS server entry carries a non-nil Sockaddr, and
 // dereferencing one that is nil would panic rather than simply skip an

@@ -114,12 +114,16 @@ func TestParseProxyServer(t *testing.T) {
 			// The shape IE writes for "use the same proxy server for all
 			// protocols". socks is deliberately NOT covered; see
 			// bareProxySchemes for why claiming it would be a lie.
+			//
+			// Bare is set on all three: nothing downstream may mistake an
+			// entry this parser invented for one the user wrote. See
+			// proxyEntry.Bare.
 			name: "a bare entry is the default for every scheme but socks",
 			in:   "10.0.0.1:8080",
 			want: []proxyEntry{
-				{Scheme: "http", Host: "10.0.0.1", Port: 8080},
-				{Scheme: "https", Host: "10.0.0.1", Port: 8080},
-				{Scheme: "ftp", Host: "10.0.0.1", Port: 8080},
+				{Scheme: "http", Host: "10.0.0.1", Port: 8080, Bare: true},
+				{Scheme: "https", Host: "10.0.0.1", Port: 8080, Bare: true},
+				{Scheme: "ftp", Host: "10.0.0.1", Port: 8080, Bare: true},
 			},
 		},
 		{
@@ -138,8 +142,8 @@ func TestParseProxyServer(t *testing.T) {
 			in:   "http=a.example:1;b.example:2",
 			want: []proxyEntry{
 				{Scheme: "http", Host: "a.example", Port: 1},
-				{Scheme: "https", Host: "b.example", Port: 2},
-				{Scheme: "ftp", Host: "b.example", Port: 2},
+				{Scheme: "https", Host: "b.example", Port: 2, Bare: true},
+				{Scheme: "ftp", Host: "b.example", Port: 2, Bare: true},
 			},
 		},
 		{
@@ -147,8 +151,8 @@ func TestParseProxyServer(t *testing.T) {
 			in:   "b.example:2;http=a.example:1",
 			want: []proxyEntry{
 				{Scheme: "http", Host: "a.example", Port: 1},
-				{Scheme: "https", Host: "b.example", Port: 2},
-				{Scheme: "ftp", Host: "b.example", Port: 2},
+				{Scheme: "https", Host: "b.example", Port: 2, Bare: true},
+				{Scheme: "ftp", Host: "b.example", Port: 2, Bare: true},
 			},
 		},
 		{
@@ -267,6 +271,45 @@ func TestFormatProxyServer(t *testing.T) {
 			},
 			want: "http=a.example:1;gopher=g.example:70;wais=w.example:210",
 		},
+		{
+			// The user's "use the same proxy server for all protocols" value
+			// comes back as ITSELF. Expanding it into three explicit entries
+			// narrows a setting that covers every protocol down to three, on a
+			// machine this tool promised to put back. See proxyEntry.Bare.
+			name: "a bare list is re-emitted bare, not expanded",
+			in:   parseProxyServer("10.0.0.1:8080"),
+			want: "10.0.0.1:8080",
+		},
+		{
+			// What SetManual leaves behind: our http proxy named explicitly,
+			// the user's bare token still covering everything else.
+			name: "an explicit entry beside a bare token keeps both forms",
+			in:   parseProxyServer("http=ours.example:9;10.0.0.1:8080"),
+			want: "http=ours.example:9;10.0.0.1:8080",
+		},
+		{
+			// What a web Restore produces on a bare-proxy machine: http and
+			// https written back to exactly the value the surviving bare token
+			// already gives them. Emitting all three would say the same thing
+			// in a shape the user never had.
+			name: "explicit entries matching the bare token collapse back into it",
+			in: []proxyEntry{
+				{Scheme: "http", Host: "10.0.0.1", Port: 8080},
+				{Scheme: "https", Host: "10.0.0.1", Port: 8080},
+				{Scheme: "ftp", Host: "10.0.0.1", Port: 8080, Bare: true},
+			},
+			want: "10.0.0.1:8080",
+		},
+		{
+			// socks is not in bareProxySchemes, so an explicit socks entry can
+			// never be folded into a bare token however equal its value looks.
+			name: "a socks entry never collapses into a bare token",
+			in: []proxyEntry{
+				{Scheme: "socks", Host: "10.0.0.1", Port: 8080},
+				{Scheme: "http", Host: "10.0.0.1", Port: 8080, Bare: true},
+			},
+			want: "socks=10.0.0.1:8080;10.0.0.1:8080",
+		},
 	}
 
 	for _, tc := range cases {
@@ -289,6 +332,7 @@ func TestProxyServerRoundTrip(t *testing.T) {
 		"http=[2001:db8::1]:8080",
 		"http=proxy.example",
 		"http=a.example:1;gopher=g.example:70",
+		"http=ours.example:9;10.0.0.1:8080",
 	} {
 		first := parseProxyServer(in)
 		second := parseProxyServer(formatProxyServer(first))
@@ -605,11 +649,36 @@ func TestHasUndescribedProxy(t *testing.T) {
 			want:      true,
 		},
 		{
-			// ftp is never described by any ProxyKind, so it always holds the
-			// switch on.
-			name:      "an ftp proxy is undescribed by every kind",
+			// An ftp proxy the USER wrote is described by no ProxyKind, so it
+			// holds the switch on. Note "the user wrote": the case below is
+			// the same scheme with different provenance and the opposite
+			// answer.
+			name:      "an explicit ftp proxy is undescribed by every kind",
 			list:      "ftp=d.example:4",
 			described: []string{schemeHTTP, schemeHTTPS, schemeSOCKS},
+			want:      true,
+		},
+		{
+			// The ex-corporate laptop. A bare ProxyServer is ONE proxy that
+			// parseProxyServer expands into http, https and ftp; the ftp entry
+			// is not a second proxy the capture missed, it is the same value
+			// already recorded as WebHost. Reading it as undescribed is what
+			// left ProxyEnable switched ON for a user who had it OFF — every
+			// browser routed through a proxy they had disabled, across
+			// reboots, with VerifyReverted passing.
+			name:      "a bare entry's invented ftp is not an undescribed proxy",
+			list:      "proxy.corp:8080",
+			described: []string{schemeHTTP, schemeHTTPS},
+			want:      false,
+		},
+		{
+			// The same bare token during a SOCKS-only revert, where the
+			// capture described NONE of the schemes it covers. Now it really
+			// is untouched user configuration and the switch must be left
+			// alone: turning it off would disable the user's own http proxy.
+			name:      "a bare entry IS undescribed when no scheme it covers was captured",
+			list:      "proxy.corp:8080",
+			described: []string{schemeSOCKS},
 			want:      true,
 		},
 	}
@@ -620,6 +689,107 @@ func TestHasUndescribedProxy(t *testing.T) {
 				t.Errorf("hasUndescribedProxy(%q, %v) = %v, want %v", tc.list, tc.described, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDecideProxyEnable pins the whole global-switch decision, which is the
+// difference between a clean revert and a laptop that reaches nothing.
+//
+// The names below describe machines, not branches, because that is what the
+// decision is actually about: every case is a shape a real Windows install
+// arrives in, and the wrong answer to any of them is silent — VerifyReverted
+// only ever looks at the HOST.
+func TestDecideProxyEnable(t *testing.T) {
+	web := []sysport.ProxyKind{sysport.ProxyWeb}
+	socks := []sysport.ProxyKind{sysport.ProxySOCKS}
+
+	cases := []struct {
+		name      string
+		prev      sysport.ProxySettings
+		list      string
+		described []string
+		want      proxyEnableDecision
+	}{
+		{
+			// THE CRITICAL CASE. ProxyEnable was 0 with a stale bare
+			// ProxyServer; Configured recorded the host with On false, which
+			// IS the DWORD. The switch must go back to 0 even though our own
+			// SetManual left an ftp entry in the string.
+			name: "an ex-corporate laptop gets its disabled switch back",
+			prev: sysport.ProxySettings{
+				Kinds: web, WebHost: "proxy.corp", WebPort: 8080, WebOn: false,
+				SecureHost: "proxy.corp", SecurePort: 8080, SecureOn: false,
+			},
+			list:      "http=proxy.corp:8080;https=proxy.corp:8080;proxy.corp:8080",
+			described: []string{schemeHTTP, schemeHTTPS},
+			want:      proxyEnableOff,
+		},
+		{
+			name: "a machine whose proxy was on gets it back on",
+			prev: sysport.ProxySettings{
+				Kinds: web, WebHost: "proxy.corp", WebPort: 8080, WebOn: true,
+				SecureHost: "proxy.corp", SecurePort: 8080, SecureOn: true,
+			},
+			list:      "http=proxy.corp:8080;https=proxy.corp:8080",
+			described: []string{schemeHTTP, schemeHTTPS},
+			want:      proxyEnableOn,
+		},
+		{
+			// The residual cost the old three-way decision admitted in a
+			// comment: an explicit SOCKS proxy that was configured but OFF
+			// used to hold the switch at the 1 we set. The capture knows the
+			// DWORD from the http host, so it no longer does.
+			name: "a disabled web proxy beside a disabled SOCKS proxy still goes off",
+			prev: sysport.ProxySettings{
+				Kinds: web, WebHost: "a.example", WebPort: 1, WebOn: false,
+			},
+			list:      "http=a.example:1;socks=c.example:3",
+			described: []string{schemeHTTP, schemeHTTPS},
+			want:      proxyEnableOff,
+		},
+		{
+			// Nothing was configured at all, so nothing can still be relying
+			// on the switch.
+			name:      "a machine with no proxy at all ends with the switch off",
+			prev:      sysport.ProxySettings{Kinds: web},
+			list:      "",
+			described: []string{schemeHTTP, schemeHTTPS},
+			want:      proxyEnableOff,
+		},
+		{
+			// The capture determines nothing (no SOCKS proxy to record) and
+			// the user's own bare http proxy is still there. Switching it off
+			// would break a proxy this revert never touched.
+			name:      "a SOCKS revert leaves the user's bare http proxy's switch alone",
+			prev:      sysport.ProxySettings{Kinds: socks},
+			list:      "proxy.corp:8080",
+			described: []string{schemeSOCKS},
+			want:      proxyEnableLeaveAlone,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := decideProxyEnable(tc.prev, parseProxyServer(tc.list), tc.described)
+			if got != tc.want {
+				t.Errorf("decideProxyEnable(%q) = %s, want %s",
+					tc.list, proxyEnableName(got), proxyEnableName(tc.want))
+			}
+		})
+	}
+}
+
+// proxyEnableName spells a decision out in the failure message. It lives here
+// rather than as a String method on the type so that a decision nobody has to
+// print costs the production package nothing.
+func proxyEnableName(d proxyEnableDecision) string {
+	switch d {
+	case proxyEnableOn:
+		return "ProxyEnable=1"
+	case proxyEnableOff:
+		return "ProxyEnable=0"
+	default:
+		return "leave the switch alone"
 	}
 }
 

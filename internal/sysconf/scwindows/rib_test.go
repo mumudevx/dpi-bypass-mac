@@ -231,7 +231,7 @@ func TestPickDefaultDoesNotFilterOnScoped(t *testing.T) {
 		{Dst: netip.MustParsePrefix("::/0"), Gateway: netip.MustParseAddr("fe80::1"), Iface: "Wi-Fi", Index: 5, Scoped: true},
 		{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("192.168.1.1"), Iface: "Wi-Fi", Index: 5, Scoped: true},
 	}
-	got, ok, err := pickDefault(rs, "")
+	got, ok, err := pickDefault(rs, "", nil)
 	if err != nil || !ok {
 		t.Fatalf("pickDefault: ok=%v err=%v; the machine's default route was not found", ok, err)
 	}
@@ -249,7 +249,7 @@ func TestPickDefaultFallsBackToV6(t *testing.T) {
 	rs := []sysport.RouteEntry{
 		{Dst: netip.MustParsePrefix("::/0"), Gateway: netip.MustParseAddr("fe80::1"), Iface: "Wi-Fi", Scoped: true},
 	}
-	got, ok, err := pickDefault(rs, "")
+	got, ok, err := pickDefault(rs, "", nil)
 	if err != nil || !ok {
 		t.Fatalf("pickDefault: ok=%v err=%v", ok, err)
 	}
@@ -263,15 +263,77 @@ func TestPickDefaultOnAnInterface(t *testing.T) {
 		{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("192.168.1.1"), Iface: "Wi-Fi", Scoped: true},
 		{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("10.0.0.1"), Iface: "Ethernet", Scoped: true},
 	}
-	got, ok, err := pickDefault(rs, "Ethernet")
+	got, ok, err := pickDefault(rs, "Ethernet", nil)
 	if err != nil || !ok {
 		t.Fatalf("pickDefault(Ethernet): ok=%v err=%v", ok, err)
 	}
 	if got.Gateway != netip.MustParseAddr("10.0.0.1") {
 		t.Errorf("pickDefault(Ethernet) chose gateway %v, want 10.0.0.1", got.Gateway)
 	}
-	if _, ok, _ := pickDefault(rs, "dpb0"); ok {
+	if _, ok, _ := pickDefault(rs, "dpb0", nil); ok {
 		t.Error("pickDefault found a default on an interface that has none")
+	}
+}
+
+// TestPickDefaultRanksByInterfaceMetric is the docked-laptop case, which is
+// routine on Windows and not reachable on macOS: Ethernet plugged in with
+// Wi-Fi still associated leaves TWO default routes in the table, and MSDN says
+// so explicitly for MIB_IPFORWARD_ROW2. Taking the first would name whichever
+// adapter the table happened to list first — and everything follows the
+// uplink, so the scoped default and the DNS override would both land on the
+// NIC carrying no traffic while dpb reported Ready.
+//
+// The metric lookup is injected because GetIpInterfaceEntry cannot run here;
+// the numbers are Windows' own automatic metrics for a gigabit Ethernet (25)
+// and an 802.11 link (45).
+func TestPickDefaultRanksByInterfaceMetric(t *testing.T) {
+	const (
+		wifiIndex     = 5
+		ethernetIndex = 12
+	)
+	metrics := map[int]uint32{wifiIndex: 45, ethernetIndex: 25}
+	ifMetric := func(_ uint16, index int) uint32 { return metrics[index] }
+
+	// Wi-Fi first in the table, so a first-match reader gets it wrong.
+	rs := []sysport.RouteEntry{
+		{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("192.168.1.1"), Iface: "Wi-Fi", Index: wifiIndex, Scoped: true},
+		{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("10.0.0.1"), Iface: "Ethernet", Index: ethernetIndex, Scoped: true},
+		{Dst: netip.MustParsePrefix("::/0"), Gateway: netip.MustParseAddr("fe80::1"), Iface: "Wi-Fi", Index: wifiIndex, Scoped: true},
+		{Dst: netip.MustParsePrefix("::/0"), Gateway: netip.MustParseAddr("fe80::2"), Iface: "Ethernet", Index: ethernetIndex, Scoped: true},
+	}
+
+	got, ok, err := pickDefault(rs, "", ifMetric)
+	if err != nil || !ok {
+		t.Fatalf("pickDefault: ok=%v err=%v", ok, err)
+	}
+	if got.Iface != "Ethernet" {
+		t.Errorf("pickDefault chose %q, want the lower-metric Ethernet", got.Iface)
+	}
+
+	// The v6 half is ranked by the same lookup, through facts.go's own picker.
+	v6, ok := pickDefaultV6(rs, ifMetric)
+	if !ok {
+		t.Fatal("pickDefaultV6 found no v6 default")
+	}
+	if v6.Iface != "Ethernet" {
+		t.Errorf("pickDefaultV6 chose %q, want the lower-metric Ethernet", v6.Iface)
+	}
+
+	// A metric the IP Helper API cannot report must LOSE, not win: an
+	// interface it will not describe is not one to prefer. Here Wi-Fi is the
+	// only readable one, so it takes the default it would otherwise lose.
+	onlyWiFi := func(_ uint16, index int) uint32 {
+		if index == wifiIndex {
+			return 45
+		}
+		return unreadableInterfaceMetric
+	}
+	got, ok, err = pickDefault(rs, "", onlyWiFi)
+	if err != nil || !ok {
+		t.Fatalf("pickDefault (unreadable Ethernet): ok=%v err=%v", ok, err)
+	}
+	if got.Iface != "Wi-Fi" {
+		t.Errorf("pickDefault chose %q, want Wi-Fi; an unreadable interface metric must lose", got.Iface)
 	}
 }
 

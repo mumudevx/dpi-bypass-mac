@@ -81,7 +81,10 @@ func TestPickDefaultV6WantsAGateway(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := pickDefaultV6(tt.rs)
+			// nil ifMetric: these cases pin the FILTER, not the ranking, and a
+			// nil lookup leaves first-seen order deciding — see routeMetric.
+			// Ranking is pinned by rib_test.go's own metric cases.
+			got, ok := pickDefaultV6(tt.rs, nil)
 			if ok != tt.wantOK {
 				t.Fatalf("pickDefaultV6 ok = %v, want %v", ok, tt.wantOK)
 			}

@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -44,11 +43,32 @@ type envCtl struct{ p *port }
 
 var _ sysport.EnvController = envCtl{}
 
-// environmentKey is where a normal (non-elevated) user's session environment
-// variables live. HKLM\SYSTEM\CurrentControlSet\Control\Session
-// Manager\Environment holds the SYSTEM-wide set instead; this package never
-// touches that hive, because a proxy override dpb installs belongs to the
-// user account running dpb, not to every account on the machine.
+// environmentKey is where a user's session environment variables live, under
+// HKCU. HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment
+// holds the SYSTEM-wide set instead; this package never touches that hive,
+// because a proxy override dpb installs belongs to the user account running
+// dpb, not to every account on the machine.
+//
+// # KNOWN LIMITATION: HKCU here is the ELEVATED token's hive
+//
+// Every registry.CURRENT_USER open in this file resolves through the ACCESS
+// TOKEN OF THE CALLING PROCESS — MSDN, "Predefined Keys". dpb requires
+// elevation on Windows, so on the enterprise-default machine — a standard user
+// account plus a SEPARATE administrator account, where UAC asks for the
+// admin's credentials rather than consent — "the user account running dpb" in
+// the paragraph above is the ADMIN, and HTTP_PROXY / HTTPS_PROXY / NO_PROXY
+// are written into the ADMIN's environment.
+//
+// Get reads that same hive, so Verify passes; the interactive user's own
+// applications inherit nothing, because CreateProcess builds their environment
+// from the hive of the user who launched them. Nothing is left broken on the
+// way out — the revert is equally invisible — but nothing was ever done
+// either, and dpb says Ready throughout. proxy.go's internetSettingsKey
+// carries the identical limitation for Internet Settings, and the fix is the
+// same substantial piece of work described there (WTSQueryUserToken on the
+// active session, then that user's hive). It is deliberately NOT attempted
+// here, and it is the top item for the first session on a real Windows
+// machine.
 const environmentKey = `Environment`
 
 // Get reads one variable's value straight out of HKCU\Environment.
@@ -226,8 +246,12 @@ func broadcastEnvironmentChange(logf func(string, ...any)) {
 	}
 
 	var result uintptr
+	// param is passed as the *uint16 it is: the unsafe.Pointer→uintptr
+	// conversion has to happen inside LazyProc.Call's own argument list for
+	// //go:uintptrescapes to keep the string alive across the syscall, and
+	// converting it here — one frame up — would not. See SendMessageTimeoutW.
 	if err := SendMessageTimeoutW(
-		hwndBroadcast, wmSettingChange, 0, uintptr(unsafe.Pointer(param)),
+		hwndBroadcast, wmSettingChange, 0, param,
 		smtoAbortIfHung, settingsBroadcastTimeoutMS, &result,
 	); err != nil {
 		logf("netstate: broadcast WM_SETTINGCHANGE for HKCU\\Environment: %v "+

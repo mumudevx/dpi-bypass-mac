@@ -233,19 +233,95 @@ func sockaddrAddr(sa *windows.RawSockaddrInet) (netip.Addr, bool) {
 }
 
 func (k *kernelRIB) Default() (sysport.RouteEntry, bool, error) {
-	rs, err := k.Routes()
-	if err != nil {
-		return sysport.RouteEntry{}, false, err
-	}
-	return pickDefault(rs, "")
+	return k.defaultRoute("")
 }
 
 func (k *kernelRIB) ScopedDefault(iface string) (sysport.RouteEntry, bool, error) {
+	return k.defaultRoute(iface)
+}
+
+func (k *kernelRIB) defaultRoute(iface string) (sysport.RouteEntry, bool, error) {
 	rs, err := k.Routes()
 	if err != nil {
 		return sysport.RouteEntry{}, false, err
 	}
-	return pickDefault(rs, iface)
+	return pickDefault(rs, iface, interfaceMetrics())
+}
+
+// ifaceMetricFunc answers MIB_IPINTERFACE_ROW.Metric for one interface index
+// and address family. It is a function rather than a precomputed map so a
+// caller pays for a syscall only on the handful of rows that are actually
+// default routes, and so a test can rank routes without a Windows host to read
+// metrics from.
+type ifaceMetricFunc func(family uint16, index int) uint32
+
+// unreadableInterfaceMetric is what an interface whose MIB_IPINTERFACE_ROW
+// cannot be read contributes. It is the WORST possible metric on purpose: an
+// interface the IP Helper API will not describe is not one to prefer, and
+// making every such interface tie leaves the choice to the first-seen order
+// this reader had before it could rank at all.
+const unreadableInterfaceMetric = uint32(1<<32 - 1)
+
+// interfaceMetrics returns a lookup over GetIpInterfaceEntry that remembers
+// what it has already asked. The cache lives for one selection, which is the
+// whole window in which the answer has to be self-consistent; anything longer
+// would have to answer the staleness question ifaceNames' TTL exists for.
+func interfaceMetrics() ifaceMetricFunc {
+	type key struct {
+		family uint16
+		index  int
+	}
+	cache := map[key]uint32{}
+	return func(family uint16, index int) uint32 {
+		k := key{family, index}
+		if m, ok := cache[k]; ok {
+			return m
+		}
+		m := unreadableInterfaceMetric
+		row := windows.MibIpInterfaceRow{Family: family, InterfaceIndex: uint32(index)}
+		if err := GetIpInterfaceEntry(&row); err == nil {
+			m = row.Metric
+		}
+		cache[k] = m
+		return m
+	}
+}
+
+// routeMetric is the number two default routes are ranked by here.
+//
+// MSDN, MIB_IPFORWARD_ROW2: "The actual route metric used to compute the route
+// preferences is the summation of the route metric offset specified in the
+// Metric member of the MIB_IPFORWARD_ROW2 structure and the interface metric
+// specified in this Metric member of the MIB_IPINTERFACE_ROW structure."
+//
+// Only the second half is available here, and that is stated rather than
+// hidden: the row's metric OFFSET does not survive into sysport.RouteEntry,
+// and putting it there would be a platform-free vocabulary change (macOS ranks
+// routes by an unrelated mechanism and would have to leave the field
+// meaningless). What is lost is the offset, which is zero on both adapters for
+// every DHCP-installed default; what is kept is the interface metric, which is
+// the term that actually decides the case this ranking exists for — Windows'
+// automatic interface metric is what makes a docked laptop's Ethernet beat its
+// still-associated Wi-Fi.
+//
+// Using only this half is also what lets facts.go rank with the SAME selector
+// this reader uses. facts.go's Collect explains why that matters more than the
+// missing offset: Facts.Uplink and dnsCtl.Live's own default-route read must
+// name the same interface or a correctly configured adapter fails its DNS
+// verify, and Collect can only see []sysport.RouteEntry.
+//
+// A nil ifMetric ranks everything equally — the shape a test uses when it is
+// pinning something other than interface ranking, where first-seen order then
+// decides exactly as it used to.
+func routeMetric(r sysport.RouteEntry, ifMetric ifaceMetricFunc) uint32 {
+	if ifMetric == nil {
+		return 0
+	}
+	family := uint16(windows.AF_INET6)
+	if r.Dst.Addr().Is4() {
+		family = windows.AF_INET
+	}
+	return ifMetric(family, r.Index)
 }
 
 // pickDefault finds the machine's default route when iface is empty, or the
@@ -262,22 +338,34 @@ func (k *kernelRIB) ScopedDefault(iface string) (sysport.RouteEntry, bool, error
 // `if r.Scoped { continue }` across would make Default() return nothing at all
 // on a perfectly normal machine.
 //
-// What it cannot do: rank several defaults. MSDN says the table "may contain
-// multiple MIB_IPFORWARD_ROW2 entries with the Prefix and the PrefixLength ...
-// set to zero ... when there are multiple network adapters installed", and the
-// value that orders them is the sum of the row's Metric offset and the
-// interface metric from MIB_IPINTERFACE_ROW — neither of which survives into
-// RouteEntry. So this returns the first match and nothing more is claimed for
-// it; a caller that needs the FIB's actual choice has to ask GetBestRoute2.
+// Within a family it picks the LOWEST-METRIC row, not the first one. MSDN says
+// the table "may contain multiple MIB_IPFORWARD_ROW2 entries with the Prefix
+// and the PrefixLength ... set to zero ... when there are multiple network
+// adapters installed", and that is not an exotic machine on Windows: a docked
+// laptop with Ethernet up and Wi-Fi still associated has two default routes as
+// a matter of routine. Taking the first would let Uplink name the adapter
+// carrying no traffic, and everything downstream follows it — the scoped
+// default route and the DNS override both land on the wrong NIC while dpb
+// reports Ready having captured nothing. See routeMetric for what is ranked
+// and, just as importantly, what it cannot see.
 //
-// facts.go deliberately does NOT: Facts.Uplink and dnsCtl.Live's own default-
-// route read must name the SAME interface or a correctly configured adapter
-// fails its DNS verify, and agreement between the two is worth more than an
-// uplink that is independently more accurate. factsCtl.Collect writes that
-// trade-off down in full.
-func pickDefault(rs []sysport.RouteEntry, iface string) (sysport.RouteEntry, bool, error) {
-	var v6 sysport.RouteEntry
-	var haveV6 bool
+// Ties keep the first row seen, which is the behaviour this function had
+// before it could rank at all.
+//
+// This is still not the FIB's own answer — a caller that needs the next hop
+// Windows would actually choose for a specific destination has to ask
+// GetBestRoute2 — but it is now asking the same question the FIB answers
+// rather than a different one.
+//
+// facts.go deliberately does NOT go to GetBestRoute2, and now passes the same
+// ifMetric this reader does: Facts.Uplink and dnsCtl.Live's own default-route
+// read must name the SAME interface or a correctly configured adapter fails
+// its DNS verify. factsCtl.Collect writes that trade-off down in full.
+func pickDefault(rs []sysport.RouteEntry, iface string, ifMetric ifaceMetricFunc) (sysport.RouteEntry, bool, error) {
+	var v4, v6 sysport.RouteEntry
+	var v4Metric, v6Metric uint32
+	var haveV4, haveV6 bool
+
 	for _, r := range rs {
 		if r.Dst.Bits() != 0 {
 			continue
@@ -285,12 +373,20 @@ func pickDefault(rs []sysport.RouteEntry, iface string) (sysport.RouteEntry, boo
 		if iface != "" && r.Iface != iface {
 			continue
 		}
+		m := routeMetric(r, ifMetric)
 		if r.Dst.Addr().Is4() {
-			return r, true, nil
+			if !haveV4 || m < v4Metric {
+				v4, v4Metric, haveV4 = r, m, true
+			}
+			continue
 		}
-		if !haveV6 {
-			v6, haveV6 = r, true
+		if !haveV6 || m < v6Metric {
+			v6, v6Metric, haveV6 = r, m, true
 		}
+	}
+
+	if haveV4 {
+		return v4, true, nil
 	}
 	return v6, haveV6, nil
 }
