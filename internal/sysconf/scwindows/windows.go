@@ -96,14 +96,22 @@ func (p *port) Proxy() sysport.ProxyController { return proxyCtl{p} }
 // Iface addresses and MTUs a tunnel device through IP Helper; see iface.go.
 func (p *port) Iface() sysport.IfaceController { return ifaceCtl{p} }
 
+// DNS shells out to netsh(1) to write, and reads GetAdaptersAddresses to
+// capture and verify; see dns.go.
+func (p *port) DNS() sysport.DNSController { return dnsCtl{p} }
+
+// Env sets user-session variables in HKCU\Environment and broadcasts
+// WM_SETTINGCHANGE; see env.go.
+func (p *port) Env() sysport.EnvController { return envCtl{p} }
+
 // Caps names what this package can actually do TODAY, not what Windows can do.
 // A bit is added by the task that lands the code behind it — CapRouteWrite,
-// CapIfaceConfig, and now CapProxyAuto and CapProxyManual behind proxy.go; the
-// rest in Task 5 — and Task 6 checks the total against what shipped. Granting a
-// capability ahead of its implementation would make netstate plan a mutation it
-// then cannot perform, which is the failure mode sysport.Caps exists to
-// prevent: refuse BY NAME AND WITH A REASON, never promise and then skip
-// quietly.
+// CapIfaceConfig, CapProxyAuto and CapProxyManual behind proxy.go, and now
+// CapDNSOverride and CapSessionEnv behind dns.go and env.go — and Task 6
+// checks the total against what shipped. Granting a capability ahead of its
+// implementation would make netstate plan a mutation it then cannot perform,
+// which is the failure mode sysport.Caps exists to prevent: refuse BY NAME AND
+// WITH A REASON, never promise and then skip quietly.
 //
 // CapPerService is withheld permanently, not pending: Windows has one proxy
 // configuration per user, not one per network service, so there is no
@@ -111,7 +119,8 @@ func (p *port) Iface() sysport.IfaceController { return ifaceCtl{p} }
 // pseudo-service to say so out loud rather than returning nothing.
 func (p *port) Caps() sysport.Caps {
 	return sysport.CapRouteWrite | sysport.CapIfaceConfig |
-		sysport.CapProxyAuto | sysport.CapProxyManual
+		sysport.CapProxyAuto | sysport.CapProxyManual |
+		sysport.CapDNSOverride | sysport.CapSessionEnv
 }
 
 // env is the readers' view of this Port.
