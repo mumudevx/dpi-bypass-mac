@@ -1,3 +1,9 @@
+//go:build !windows
+
+// This file contains tests that depend on Unix process spawning for the janitor.
+// All tests here use startRun() which requires fakeDPBBinary, a Unix shell script
+// that stands in for the actual dpb binary.
+
 package cliapp
 
 import (
@@ -42,30 +48,6 @@ type runHarness struct {
 	// and spawnLog is the file it writes its pid and arguments to.
 	fakeDPB  string
 	spawnLog string
-}
-
-func freePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find a free port: %v", err)
-	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
-}
-
-func tempLayout(t *testing.T) paths.Layout {
-	t.Helper()
-	dir := t.TempDir()
-	return paths.Layout{
-		ConfigDir: filepath.Join(dir, "config"),
-		StateDir:  filepath.Join(dir, "state"),
-		CacheDir:  filepath.Join(dir, "cache"),
-		LogDir:    filepath.Join(dir, "log"),
-		UID:       os.Getuid(),
-		GID:       os.Getgid(),
-		Home:      dir,
-	}
 }
 
 func startRun(t *testing.T, mac *fakeMac, layout paths.Layout, args ...string) *runHarness {

@@ -3,13 +3,54 @@ package cliapp
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 
 	"github.com/mumudevx/dpb/internal/netstate"
+	"github.com/mumudevx/dpb/internal/paths"
 )
+
+// freePort and tempLayout live here rather than in run_test.go, which they
+// long predated architecturally: both are plain Go (a loopback listener, a
+// temp-dir struct literal) with nothing Unix-specific in either, but run_test.go
+// carries the `!windows` tag for a real reason — startRun spawns fakeDPBBinary,
+// a /bin/sh script — and that tag was blocking every OTHER file that only
+// wanted these two helpers from compiling on Windows at all. Homing them in
+// this untagged file is what lets tunrun_test.go, tunname_test.go and the rest
+// build there.
+
+// freePort finds a port nothing is listening on, for a flag that wants one.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find a free port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// tempLayout is a paths.Layout rooted in a fresh temp directory, so a test
+// never touches the real ~/.config or state directory.
+func tempLayout(t *testing.T) paths.Layout {
+	t.Helper()
+	dir := t.TempDir()
+	return paths.Layout{
+		ConfigDir: filepath.Join(dir, "config"),
+		StateDir:  filepath.Join(dir, "state"),
+		CacheDir:  filepath.Join(dir, "cache"),
+		LogDir:    filepath.Join(dir, "log"),
+		UID:       os.Getuid(),
+		GID:       os.Getgid(),
+		Home:      dir,
+	}
+}
 
 // fakeMac is an in-memory macOS: it answers networksetup, scutil and launchctl
 // from ONE piece of state, and implements netstate.RIBReader over an empty
