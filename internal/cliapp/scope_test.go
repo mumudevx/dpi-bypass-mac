@@ -1,3 +1,8 @@
+//go:build !windows
+
+// This file contains tests that use startRun() and tempLayout(), which require
+// Unix process spawning for the janitor.
+
 package cliapp
 
 import (

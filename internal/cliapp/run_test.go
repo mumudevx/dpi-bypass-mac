@@ -1,3 +1,9 @@
+//go:build !windows
+
+// This file contains tests that depend on Unix process spawning for the janitor.
+// All tests here use startRun() which requires fakeDPBBinary, a Unix shell script
+// that stands in for the actual dpb binary.
+
 package cliapp
 
 import (

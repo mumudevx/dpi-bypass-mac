@@ -1,3 +1,8 @@
+//go:build !windows
+
+// This file contains tests for network watching that use startRun(),
+// which requires Unix process spawning for the janitor.
+
 package cliapp
 
 import (
