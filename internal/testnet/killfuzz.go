@@ -113,7 +113,7 @@ func (k *KillFuzz) once(ctx context.Context, i int, delay time.Duration) (killed
 	case <-done:
 		return false, nil
 	case <-ctx.Done():
-		_ = syscall.Kill(pid, syscall.SIGKILL)
+		_ = killProcess(cmd.Process)
 		<-done
 		return true, ctx.Err()
 	case <-timer.C:
@@ -121,14 +121,25 @@ func (k *KillFuzz) once(ctx context.Context, i int, delay time.Duration) (killed
 
 	// Kill and then WAIT. Returning before the process is reaped would let the
 	// next iteration's assertions race a dying process that still holds the
-	// journal's flock.
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	// journal's flock. killProcess (killfuzz_unix.go / killfuzz_windows.go)
+	// already swallows the race where the process exited on its own before the
+	// kill landed, so any error reaching here is a real failure.
+	if err := killProcess(cmd.Process); err != nil {
 		return false, fmt.Errorf("testnet: killfuzz iteration %d: kill %d: %w", i, pid, err)
 	}
 	waitErr := <-done
 
 	var exit *exec.ExitError
 	if errors.As(waitErr, &exit) {
+		// st.Signaled() is hard-coded false on Windows — syscall.WaitStatus
+		// there carries only an exit code, because TerminateProcess has no
+		// signal-shaped result to report (see $GOROOT/src/syscall/
+		// syscall_windows.go). So on Windows this branch never fires and
+		// every kill falls through to the "finished on its own" return below
+		// even when killProcess is what ended it. That is a real gap in what
+		// this classification can tell apart on Windows, not a bug in
+		// killProcess: fixing it needs a Windows-specific classification
+		// here, which is out of scope for the leaf split this file did.
 		if st, ok := exit.Sys().(syscall.WaitStatus); ok && st.Signaled() && st.Signal() == syscall.SIGKILL {
 			return true, nil
 		}
