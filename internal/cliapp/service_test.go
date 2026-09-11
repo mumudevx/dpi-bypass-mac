@@ -1,8 +1,3 @@
-//go:build !windows
-
-// This file contains tests that use tempLayout(), which requires Unix process
-// spawning for the janitor.
-
 package cliapp
 
 import (

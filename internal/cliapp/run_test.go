@@ -50,30 +50,6 @@ type runHarness struct {
 	spawnLog string
 }
 
-func freePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find a free port: %v", err)
-	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
-}
-
-func tempLayout(t *testing.T) paths.Layout {
-	t.Helper()
-	dir := t.TempDir()
-	return paths.Layout{
-		ConfigDir: filepath.Join(dir, "config"),
-		StateDir:  filepath.Join(dir, "state"),
-		CacheDir:  filepath.Join(dir, "cache"),
-		LogDir:    filepath.Join(dir, "log"),
-		UID:       os.Getuid(),
-		GID:       os.Getgid(),
-		Home:      dir,
-	}
-}
-
 func startRun(t *testing.T, mac *fakeMac, layout paths.Layout, args ...string) *runHarness {
 	t.Helper()
 	return startRunTweak(t, mac, layout, nil, args...)

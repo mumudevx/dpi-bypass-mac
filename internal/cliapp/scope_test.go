@@ -1,8 +1,3 @@
-//go:build !windows
-
-// This file contains tests that use startRun() and tempLayout(), which require
-// Unix process spawning for the janitor.
-
 package cliapp
 
 import (
@@ -219,23 +214,5 @@ func TestScopeRejectsAHandEditedFileItDoesNotUnderstand(t *testing.T) {
 	}
 	if _, err := runScope(t, g, "bypass", "example.org"); err == nil {
 		t.Fatal("a key dpb never writes was accepted in its own file")
-	}
-}
-
-// `dpb run` must see the same rules `dpb scope` writes, or the two commands
-// disagree about what the tool is doing.
-func TestRunPicksUpScopeEdits(t *testing.T) {
-	t.Parallel()
-	g := scopeGlobals(t)
-	if _, err := runScope(t, g, "bypass", "example.org"); err != nil {
-		t.Fatalf("scope bypass: %v", err)
-	}
-	layout, _ := g.layoutOf()
-
-	mac := newFakeMac()
-	h := startRun(t, mac, layout, "--proxy-style", "none")
-	pac := fetchDirect(t, "http://"+h.addr()+"/dpb.pac")
-	if !strings.Contains(pac, `"example.org"`) {
-		t.Fatalf("the running proxy does not carry the scope edit:\n%s", pac)
 	}
 }

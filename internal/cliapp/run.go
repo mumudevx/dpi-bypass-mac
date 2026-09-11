@@ -130,8 +130,7 @@ func newRunCmd(g *globals) *cobra.Command {
 	fl.StringVar(&f.ipv6, "ipv6", "", "auto | allow | suppress")
 	fl.BoolVar(&f.tun, "tun", false,
 		"also start the TUN front-end: a utun and capture routes for the whole address space (requires root)")
-	fl.StringVar(&f.tunName, "tun-name", "utun",
-		"utun device to open; \"utun\" lets the kernel pick the unit")
+	fl.StringVar(&f.tunName, "tun-name", defaultTunName, tunNameHelp)
 	fl.IntVar(&f.mtu, "mtu", 0, "utun MTU (default 1500)")
 	fl.BoolVar(&f.allowVPN, "allow-vpn", false,
 		"proceed with --tun even when a full-tunnel VPN owns the default route")
