@@ -1,3 +1,5 @@
+//go:build !windows
+
 package janitor
 
 import (
@@ -108,6 +110,95 @@ func TestSpawnReportsAMissingBinary(t *testing.T) {
 	if !strings.Contains(err.Error(), JanitorCommand) {
 		t.Errorf("err = %v, want it to name the subcommand it tried to run", err)
 	}
+}
+
+// A failed Spawn must hand back a nil Child, not a half-constructed one: the
+// caller on the other end of this — Run's setup in cmd/dpb — only checks the
+// error, and a non-nil Child returned alongside one would be a Child whose
+// PID() and Stop() nobody has thought through for this path.
+func TestSpawnReturnsNoChildOnFailure(t *testing.T) {
+	child, err := Spawn(SpawnOptions{
+		Exe:         filepath.Join(t.TempDir(), "not-a-binary"),
+		JournalPath: "/tmp/journal.ndjson",
+	})
+	if err == nil {
+		t.Fatal("Spawn of a missing binary produced no error")
+	}
+	if child != nil {
+		t.Fatalf("Spawn returned a non-nil Child alongside an error: %+v", child)
+	}
+}
+
+// Stop's force-kill path is the safety valve the code comment names directly:
+// "a janitor that ignores SIGTERM is a bug worth reporting, not a reason to
+// hold the user's network settings hostage." This pins the whole contract on
+// a child that actually does ignore it: SIGTERM is sent, the child outlives
+// stopBudget anyway, Stop reports the timeout instead of returning nil, and
+// the child is verifiably dead — via SIGKILL — by the time Stop returns.
+func TestChildStopKillsAChildThatIgnoresSIGTERM(t *testing.T) {
+	dir, err := os.MkdirTemp("", "dpbstubborn")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "dpb")
+	ready := filepath.Join(dir, "ready")
+	// `trap '' TERM` sets SIGTERM's disposition to SIG_IGN. Unlike a caught
+	// signal (which reverts to SIG_DFL across exec), SIG_IGN survives exec, so
+	// the sleep this script execs into truly ignores every SIGTERM Stop sends
+	// — but only once the trap has actually run. The `touch` after it, still
+	// running in the same untouched shell process, is the signal to the test
+	// that the trap is in effect; polling for that file rather than sleeping a
+	// fixed duration is what keeps this deterministic under a loaded machine
+	// (a fixed sleep here was observed to be too short under `go test ./...`'s
+	// full parallel load, even at 300ms).
+	script := "#!/bin/sh\ntrap '' TERM\ntouch " + ready + "\nexec sleep 30\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	child, err := Spawn(SpawnOptions{
+		Exe:         path,
+		JournalPath: filepath.Join(t.TempDir(), "journal.ndjson"),
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	pid := child.PID()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the child never reached its trap; ready marker never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	start := time.Now()
+	stopErr := child.Stop()
+	elapsed := time.Since(start)
+
+	if stopErr == nil {
+		t.Fatal("Stop on a SIGTERM-ignoring child returned nil, want the timeout reported")
+	}
+	if !strings.Contains(stopErr.Error(), "did not exit") {
+		t.Fatalf("Stop err = %v, want it to name the timeout", stopErr)
+	}
+	if elapsed < stopBudget {
+		t.Fatalf("Stop returned after %s, before its own %s budget could have elapsed", elapsed, stopBudget)
+	}
+
+	killDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(killDeadline) {
+		if syscall.Kill(pid, 0) == syscall.ESRCH {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("pid %d is still alive after Stop's force-kill", pid)
 }
 
 // A nil Child is what a caller holds when Spawn failed, and the clean exit path

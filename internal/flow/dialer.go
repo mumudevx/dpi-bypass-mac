@@ -210,10 +210,6 @@ func (d *NetDialer) control(network, address string, c syscall.RawConn) error {
 	return errors.Join(errs...)
 }
 
-func setNoDelay(fd uintptr) error {
-	return syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-}
-
 func networkFor(a netip.Addr) string {
 	if a.Is4() || a.Is4In6() {
 		return "tcp4"

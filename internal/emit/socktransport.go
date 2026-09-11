@@ -35,7 +35,9 @@ var _ Transport = (*SockTransport)(nil)
 // never from what the platform is assumed to support. In particular CapSockTTL
 // is withheld unless the kernel's default hop limit could be read, because a
 // per-segment TTL that cannot be restored afterwards would black-hole the rest
-// of the connection.
+// of the connection. When it is withheld, grantHopLimit says so on stderr: a
+// capability that disappears silently is a strategy downgraded without anyone
+// noticing.
 //
 // inj may be nil; it is not closed by Close, because a raw-injection socket is a
 // process-wide resource shared by every transport.
@@ -67,9 +69,9 @@ func NewSockTransport(c *net.TCPConn, inj RawInjector) (*SockTransport, error) {
 	}
 	t.caps |= strategy.CapNoDelay
 
-	if ttl, err := defaultHopLimit(t.v6); err == nil && ttl > 0 {
+	if ttl, granted := grantHopLimit(t.v6); granted != 0 {
 		t.defTTL = ttl
-		t.caps |= sockTTLCaps
+		t.caps |= granted
 	}
 	t.caps |= oobCaps
 	if inj != nil {

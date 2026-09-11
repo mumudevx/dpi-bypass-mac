@@ -51,6 +51,18 @@ jobs:
       - name: vet
         run: go vet ./...
 
+      # Cross-compile check: 17 of 25 packages build for windows. The 8 that do
+      # not are blocked on later plans (netstate and imports need port_windows.go;
+      # scdarwin is darwin-tagged by design). The list widens as plans land.
+      - name: cross-compile check (windows)
+        run: |
+          GOOS=windows go build \
+            ./internal/buildinfo ./internal/config ./internal/emit ./internal/flow \
+            ./internal/front/proxyfe ./internal/httpmsg ./internal/observ ./internal/ops \
+            ./internal/paths ./internal/policy ./internal/probe ./internal/resolve \
+            ./internal/strategy ./internal/sysport ./internal/testcensor \
+            ./internal/testport ./internal/tlsmsg
+
       - name: test (race)
         run: go test ./... -race
 

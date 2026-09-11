@@ -87,21 +87,9 @@ var errJournalClosed = errors.New("netstate: journal is closed")
 
 // dirSyncer is the seam that makes "we fsynced the parent directory" testable;
 // fsync on a directory is invisible from inside the process by construction.
+// fsyncDir itself is a platform leaf: journal_unix.go really does the fsync,
+// journal_windows.go cannot and explains what stands in for it.
 var dirSyncer = fsyncDir
-
-// fsyncDir makes a directory entry durable. Creating a file and fsyncing its
-// contents does not persist the name that points at it.
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("netstate: open directory %s: %w", dir, err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("netstate: fsync directory %s: %w", dir, err)
-	}
-	return nil
-}
 
 type fileJournal struct {
 	mu   sync.Mutex

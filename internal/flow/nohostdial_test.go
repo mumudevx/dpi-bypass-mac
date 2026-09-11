@@ -72,11 +72,13 @@ var goStmtExemptFiles = map[string]string{
 		"immediate exit when teardown is wedged, and swallowing a panic in it would leave " +
 		"the user with a process that answers no signal at all.",
 
-	"internal/janitor/spawn_darwin.go": "the one goroutine is the child reaper inside Stop: " +
+	"internal/janitor/spawn.go": "the one goroutine is the child reaper inside Stop: " +
 		"`defer close(done); c.cmd.Wait()`. It touches no network input and calls one " +
 		"os/exec method, and janitor is deliberately a leaf package below internal/flow so " +
 		"that the SIGKILL-residue janitor can be spawned from anywhere in the tree without " +
-		"dragging the connection engine in.",
+		"dragging the connection engine in. Spawn moved here from spawn_darwin.go when " +
+		"detachAttrs (the actually platform-bound line) became the only thing that needed a " +
+		"per-OS home; Spawn/Child/Stop are portable and this file carries no build tag.",
 
 	"internal/observ/control.go": "the control socket's accept loop. The per-connection " +
 		"handler already carries a written-out recover barrier at the spawn site — a panic " +

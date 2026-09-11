@@ -1,3 +1,5 @@
+//go:build darwin
+
 package janitor
 
 import (
@@ -95,6 +97,25 @@ func TestWaitForExitHonoursCancellation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("WaitForExit ignored its cancelled context")
+	}
+}
+
+// A pid that was NEVER ALLOCATED at all is a different real-world case from
+// TestWaitForExitOnAnAlreadyDeadProcess's reaped-but-once-real process: a
+// caller can hand Run a --parent-pid that was mistyped, or that named a
+// process which has since wrapped around the kernel's pid counter entirely.
+// Either way the kernel has no such process to report on, and the janitor
+// must answer at once rather than blocking on a kevent that will never fire.
+func TestWaitForExitOnAPIDThatNeverExisted(t *testing.T) {
+	// Far above anything this machine's pid counter could plausibly reach.
+	const neverAllocated = 999999999
+
+	start := time.Now()
+	if err := WaitForExit(context.Background(), neverAllocated); err != nil {
+		t.Fatalf("WaitForExit(%d) = %v, want nil", neverAllocated, err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("WaitForExit took %s on a pid that never existed; it should return at once", d)
 	}
 }
 

@@ -314,6 +314,35 @@ func TestReplayReportsAnUnopenableJournal(t *testing.T) {
 	}
 }
 
+// Replay's own error return — as opposed to a report full of Failed records —
+// fires when the journal cannot be READ even though it opened cleanly. An
+// already-cancelled context is the deterministic way to hit that: Replay's own
+// comment warns that the journal must be opened on a FRESH context because a
+// cancelled one "would journal nothing and revert nothing" — this pins that a
+// cancelled context comes back as a real error rather than an empty report
+// that looks like a clean, fully-replayed machine.
+func TestReplayReportsWhenTheContextIsAlreadyCancelled(t *testing.T) {
+	dir := t.TempDir()
+	journalPath := filepath.Join(dir, "journal.ndjson")
+	// A journal that OPENS fine (unlike TestReplayReportsAnUnopenableJournal),
+	// so the failure under test is netstate.Replay's own read of it, not the
+	// open netstate.OpenJournal already guards.
+	if err := os.WriteFile(journalPath, nil, 0o600); err != nil {
+		t.Fatalf("seed empty journal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := Replay(ctx, Options{
+		JournalPath: journalPath,
+		Env:         netstate.Env{Logf: t.Logf},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Replay with a cancelled context = %v, want context.Canceled", err)
+	}
+}
+
 // Replay tolerates a nil context: the janitor's own Run passes one through, and
 // `dpb doctor --repair` builds one, but a caller may not.
 func TestReplayWithANilContext(t *testing.T) {
