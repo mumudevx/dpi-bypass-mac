@@ -34,10 +34,14 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+
+	wgtun "golang.zx2c4.com/wireguard/tun"
+
+	"github.com/mumudevx/dpb/internal/flow"
 )
 
 // Event is a link-state change reported by the device. It mirrors
-// wireguard/tun's Event set; link_darwin.go translates.
+// wireguard/tun's Event set; pumpEvents below translates.
 type Event uint8
 
 const (
@@ -95,6 +99,89 @@ const LinkOffset = 4
 
 // ErrLinkClosed is returned by a closed Link's Read, Write and Name.
 var ErrLinkClosed = errors.New("tunfe: link is closed")
+
+// deviceLink is written against the wgDevice interface rather than
+// *wgtun.NativeTun so that the translation itself — the part that could be
+// wrong — is testable with a fake device and no root at all. What is left
+// untested without root is exactly one syscall wrapper: OpenDevice's call to
+// CreateTUN, in link_darwin.go and link_windows.go.
+
+// wgDevice is the wireguard/tun contract, narrowed to what deviceLink uses.
+type wgDevice interface {
+	Read(bufs [][]byte, sizes []int, offset int) (int, error)
+	Write(bufs [][]byte, offset int) (int, error)
+	MTU() (int, error)
+	Name() (string, error)
+	Events() <-chan wgtun.Event
+	BatchSize() int
+	Close() error
+}
+
+var _ wgDevice = (wgtun.Device)(nil)
+
+// deviceLink adapts a wireguard/tun device to Link.
+type deviceLink struct {
+	dev    wgDevice
+	events chan Event
+}
+
+var _ Link = (*deviceLink)(nil)
+
+// newDeviceLink wraps dev and starts the event translator.
+func newDeviceLink(dev wgDevice, logf func(string, ...any)) *deviceLink {
+	l := &deviceLink{dev: dev, events: make(chan Event, 10)}
+	flow.Safe("tunfe/link.events", logf, l.pumpEvents)
+	return l
+}
+
+// pumpEvents translates the device's events onto our own channel.
+//
+// The device feeds its channel from a route-socket reader goroutine over a
+// buffer of ten, and that reader wedges permanently once nobody is listening —
+// after which no interface event is ever seen again. This loop is what makes
+// "Events() must be drained" true no matter what the supervisor does with our
+// channel: a full channel here drops the event rather than stalling the
+// device's reader.
+func (l *deviceLink) pumpEvents() {
+	defer close(l.events)
+	for ev := range l.dev.Events() {
+		var out Event
+		switch ev {
+		case wgtun.EventUp:
+			out = EventUp
+		case wgtun.EventDown:
+			out = EventDown
+		case wgtun.EventMTUUpdate:
+			out = EventMTUUpdate
+		default:
+			continue
+		}
+		select {
+		case l.events <- out:
+		default:
+		}
+	}
+}
+
+func (l *deviceLink) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	if err := checkOffset(offset); err != nil {
+		return 0, err
+	}
+	return l.dev.Read(bufs, sizes, offset)
+}
+
+func (l *deviceLink) Write(bufs [][]byte, offset int) (int, error) {
+	if err := checkOffset(offset); err != nil {
+		return 0, err
+	}
+	return l.dev.Write(bufs, offset)
+}
+
+func (l *deviceLink) MTU() (int, error)     { return l.dev.MTU() }
+func (l *deviceLink) Name() (string, error) { return l.dev.Name() }
+func (l *deviceLink) Events() <-chan Event  { return l.events }
+func (l *deviceLink) BatchSize() int        { return l.dev.BatchSize() }
+func (l *deviceLink) Close() error          { return l.dev.Close() }
 
 // PipeLink is an in-memory Link: two of them are connected back to back, so a
 // netstack on each end exchanges real IP packets with no device, no root and no

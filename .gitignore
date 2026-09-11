@@ -1,4 +1,5 @@
 /dpb
+/dpb.exe
 /dist/
 *.test
 *.out

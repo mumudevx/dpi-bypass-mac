@@ -36,10 +36,26 @@ COVER_GATED := \
 	internal/probe \
 	internal/sysport \
 	internal/sysconf/scdarwin \
+	internal/sysconf/scwindows \
 	internal/paths
 
+# internal/sysconf/scwindows is listed above and CANNOT BE ENFORCED FROM
+# DARWIN, which is stated rather than hidden. Every file in it is
+# `//go:build windows`, so a darwin coverage run emits no profile lines for it
+# at all: the zero-function scan below finds nothing to scan, and the
+# per-package floor takes the `SKIP (no code yet)` branch — the same branch a
+# package that has not been written yet takes. The entry arms itself the day
+# this gate runs on a Windows host; today it proves nothing.
+#
+# It is listed anyway, and deliberately WITHOUT a floor exception or a lowered
+# floor. The rule is that a floor is never lowered to make a red build pass,
+# and there is nothing red here to accommodate: a floor invented for a package
+# nobody has measured would be a claim about coverage that does not exist,
+# while a SKIP line is an honest "not measured on this platform", printed on
+# every run where someone can see it.
+
 # A regex matching a file inside any gated package.
-COVER_GATED_RE := $(MODULE)/(internal/(cliapp|flow|strategy|ops|emit|janitor|tlsmsg|front/proxyfe|front/tunfe|netstate|netwatch|policy|resolve|probe|sysport|sysconf/scdarwin|paths))/
+COVER_GATED_RE := $(MODULE)/(internal/(cliapp|flow|strategy|ops|emit|janitor|tlsmsg|front/proxyfe|front/tunfe|netstate|netwatch|policy|resolve|probe|sysport|sysconf/scdarwin|sysconf/scwindows|paths))/
 
 # Statement-coverage floor.
 COVER_MIN := 85
