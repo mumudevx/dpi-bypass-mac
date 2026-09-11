@@ -51,40 +51,29 @@ jobs:
       - name: vet
         run: go vet ./...
 
-      # Cross-compile check: 21 of 26 packages build for windows, up from 17.
-      # Plan 3 landed internal/sysconf/scwindows and
-      # internal/netstate/port_windows.go, so the list is no longer hand-written:
-      # it is every package `go list` reports for windows, minus five named
-      # exclusions. A package added later is therefore INCLUDED automatically and
+      # Cross-compile check: every package builds for windows except scdarwin.
+      # Plan 4 landed test-side constraints for internal/testnet (KillFuzz) and
+      # a real netwatch Source for windows, bringing all 25 packages into the
+      # cross-compile gate. A package added later is INCLUDED automatically and
       # fails this step if it does not cross-compile, which is the point.
       #
-      # The five exclusions, and who owns each:
+      # The single exclusion:
       #
-      #   internal/netwatch  has no Source on windows. route_other.go is tagged
-      #     `!darwin && !windows` ON PURPOSE — its own comment says a nil stub
-      #     here would leave the watcher running on the sleep ticker alone while
-      #     claiming to watch the network, and that leaving the build broken
-      #     keeps it an open task rather than a silent degradation. The plan that
-      #     owns netwatch ships a real source over the IP Helper notification
-      #     API; until then this stays excluded rather than stubbed.
-      #   internal/cliapp, cmd/dpb  import netwatch, so they fail for that one
-      #     reason and no other. They come back the moment netwatch does.
-      #   internal/testnet  KillFuzz is a SIGKILL harness built on syscall.Kill,
-      #     which windows does not have. It is imported only from _test.go files,
-      #     so nothing shipped depends on it. What a windows KillFuzz should do
-      #     instead of SIGKILL is a real decision (TerminateProcess has no signal
-      #     to report back, so "was it killed" stops being answerable the way it
-      #     is here) and belongs to the plan that puts a binary on a windows
-      #     machine, not to a build-tag applied to make this step green.
-      #   internal/sysconf/scdarwin  is darwin-tagged by design. `go build ./...`
-      #     silently skips a package with no files for the target, but naming one
-      #     explicitly is an error ("build constraints exclude all Go files"), so
-      #     an explicit list has to drop it.
+      #   internal/sysconf/scdarwin  is darwin-tagged by design and has no go
+      #     files for any other GOOS. `go build ./...` silently skips such a
+      #     package, but naming one explicitly is an error ("build constraints
+      #     exclude all Go files"), so an explicit list has to drop it.
       - name: cross-compile check (windows)
         run: |
           pkgs=$(GOOS=windows go list ./... \
-            | grep -v -E '/(internal/(netwatch|cliapp|testnet|sysconf/scdarwin)|cmd/dpb)$')
+            | grep -v -E '/internal/sysconf/scdarwin$')
           GOOS=windows go build $pkgs
+
+      - name: cross-compile vet (windows)
+        run: |
+          pkgs=$(GOOS=windows go list ./... \
+            | grep -v -E '/internal/sysconf/scdarwin$')
+          GOOS=windows go vet $pkgs
 
       - name: test (race)
         run: go test ./... -race
