@@ -83,8 +83,22 @@ func (c routeCtl) Add(ctx context.Context, s sysport.RouteSpec) error {
 			// IP route entry on the interface specified", i.e. SOMEBODY ELSE
 			// ALREADY OWNS THAT DESTINATION ON THAT INTERFACE. Reporting
 			// success here would set routeOp.added, and rollback would then
-			// issue a delete against a row we did not create — a coexisting
-			// VPN's default, most likely.
+			// issue a delete against a row we did not create.
+			//
+			// Plan 4 Task 4 narrowed WHICH row that is, and the distinction
+			// matters to anyone debugging this: "on the interface specified" is
+			// part of the contract, so a coexisting VPN's 0.0.0.0/1 on ITS OWN
+			// adapter does NOT collide with ours on the utun — unlike macOS,
+			// where route(8) resolves by destination and netmask alone and the
+			// same pair really does clash. Here the duplicate is on OUR
+			// interface: a stale row on a wintun adapter CreateAdapter reused
+			// from a killed run, or anything else bound to the device we were
+			// given. It is still not ours to delete.
+			//
+			// Note what does NOT arrive here: tunfe's uplink default. Windows
+			// has no RTF_IFSCOPE, so the row it asks for is the machine's own
+			// default — netstate adopts it before Apply runs, and this function
+			// is never called for it. See netstate's routeOp.canAdopt.
 			return fmt.Errorf("netstate: %s already carries a route to %s installed by something else "+
 				"(CreateIpForwardEntry2 refused it as a duplicate); leaving it alone: %w", s.Iface, s.Dst, err)
 		}

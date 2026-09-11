@@ -609,6 +609,45 @@ func (c Capture) BringUp(ctx context.Context, seq Sequencer, start func(context.
 	// The scoped defaults first, and before the datapath starts: they are the
 	// routes our own upstream sockets take, and installing the capture routes
 	// without them is how a tunnel eats its own resolver traffic.
+	//
+	// # Why this loop is NOT skipped on Windows, where there is no scope flag
+	//
+	// The tempting argument is that longest-prefix-match already protects us:
+	// CaptureRoutes are 0.0.0.0/1 and 128.0.0.0/1, the machine's default is
+	// 0.0.0.0/0, so surely our own sockets keep taking the default. That is
+	// BACKWARDS, on every platform. A /1 is MORE specific than a /0, so an
+	// ordinary route lookup prefers the capture route and sends the packet into
+	// our own tunnel. DOSSIER.md records the bug that proves it: the raw
+	// injector "sets only IP_HDRINCL, never IP_BOUND_IF; unix.Sendto does an
+	// unscoped route lookup; 0.0.0.0/1 -> utun is more specific than the
+	// -ifscope en0 default, so the decoy is written back into dpb's own tun
+	// device". Nothing about Windows changes that arithmetic.
+	//
+	// What actually keeps our upstream sockets out of the tunnel is the
+	// INTERFACE PIN, not the prefix length: flow.NetDialer.Interface is set to
+	// the uplink (cliapp/tunrun.go, tunUplink) and flow's bindToInterface pins
+	// every upstream socket to it. That restricts the route lookup to routes on
+	// the uplink, where the capture routes — which live on the utun — are not
+	// candidates and the default is. macOS then needs a row carrying
+	// RTF_IFSCOPE for that restricted lookup to resolve, which is the row this
+	// loop adds and the reason the comment above says "scoped".
+	//
+	// Windows has no RTF_IFSCOPE, so the row this loop asks for is the row the
+	// machine already has — and that is handled, deliberately, one layer down
+	// rather than by a build tag here. netstate.Manager.Do runs Verify BEFORE
+	// Apply and routeOp.canAdopt() is true, so on Windows this Op is ADOPTED:
+	// scwindows reads Facts.Uplink and Facts.Gateway out of the very default
+	// row matchRoute then finds (Scoped means "has a next hop" there), Apply is
+	// never reached, CreateIpForwardEntry2 is never called, and teardown leaves
+	// the machine's own default alone. See routeOp.canAdopt for the full
+	// argument, and netstate's route adoption tests for the pinned behaviour.
+	//
+	// Keeping the Op rather than skipping it is what buys the check: adoption
+	// is a POSITIVE reading of the kernel table saying the escape route is
+	// really there. Skip the Op and a machine whose default vanished between
+	// facts collection and bring-up gets its capture routes installed with
+	// nothing to escape through — the blackhole this ordering exists to
+	// prevent.
 	if c.Uplink != "" {
 		for _, gw := range []netip.Addr{c.Gateway, c.GatewayV6} {
 			if !gw.IsValid() {
