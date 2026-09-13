@@ -1,7 +1,8 @@
 # GoReleaser configuration for dpb.
 #
-# It builds darwin/arm64 and darwin/amd64, publishes a GitHub release with a
-# checksums file, and updates the Homebrew formula in mumudevx/homebrew-tap.
+# It builds darwin/arm64 (macOS only), and windows/arm64 + windows/amd64,
+# publishes a GitHub release with checksums, and updates the Homebrew formula
+# in mumudevx/homebrew-tap (darwin archives only).
 #
 # Three things are deliberately absent.
 #
@@ -46,9 +47,15 @@ builds:
       - CGO_ENABLED=0
     goos:
       - darwin
+      - windows
     goarch:
       - arm64
       - amd64
+    # darwin builds are arm64-only on purpose: this project ships for Apple
+    # Silicon only. Windows gets both arm64 (preview) and amd64. The ignore rule
+    # below preserves the darwin/arm64-only policy and is not an oversight.
+    ignore:
+      - { goos: darwin, goarch: amd64 }
     flags:
       - -trimpath
     # These are the variables internal/buildinfo reads; `dpb version` falls
@@ -70,6 +77,17 @@ archives:
     ids:
       - dpb
     formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+  - id: dpb-windows
+    ids:
+      - dpb
+    formats: [zip]
+    # Windows archives are zip; darwin are tar.gz (handled by first archive block
+    # via the ignore rule in builds). No wintun.dll is bundled; the README directs
+    # users to wintun.net.
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - README.md
