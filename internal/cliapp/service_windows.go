@@ -21,22 +21,25 @@ import (
 )
 
 // dpb installs itself as a Windows service so it survives logout and reboot.
-// This file is service_darwin.go's opposite number: the same five mechanism
-// calls service.go makes, implemented against the service control manager.
+// This file is service_darwin.go's opposite number for HALF of Windows: the
+// SCM (winService, --system, LocalSystem) mechanism. The other half —
+// winLogonTask, a Scheduled Task running as the interactive user, which is
+// what proxy mode needs — lives in service_task_windows.go, along with the
+// reasoning for why Windows needs two mechanisms where darwin needs one.
+// Read that file's header first; this one assumes it. service.go's five
+// mechanism calls (installMechanism, uninstallMechanism, startMechanism,
+// stopMechanism, statusMechanism) are defined once, here, and dispatch to
+// service_task_windows.go's functions when a scope's mech is winLogonTask —
+// they are not duplicated per mechanism.
 //
-// Three things about this mechanism are deliberate.
+// Two things about the SCM mechanism specifically are deliberate.
 //
-// First, the scope. Only --system is implemented, and --system here means a
-// LocalSystem service. That is the scope TUN mode needs anyway — creating the
-// wintun adapter and editing the route table both require administrator — and
-// it is the scope the SCM is actually for. The login-session mechanism
-// (winLogonTask: a Scheduled Task running as the interactive user, which is
-// what would carry proxy mode's environment variables into that session) is a
-// later task, and until it exists every verb refuses it BY NAME rather than
-// doing nothing quietly. That refusal is the discipline
-// internal/netwatch/route_other.go and internal/emit/stub_other.go already
-// state for this codebase: a capability that is silently absent is how a
-// mutation gets skipped without anyone noticing.
+// First, the scope. --system here means a LocalSystem service, which is the
+// scope TUN mode needs anyway — creating the wintun adapter and editing the
+// route table both require administrator — and it is the scope the SCM is
+// actually for. It is not the scope for proxy mode; see
+// service_task_windows.go for why that is a different mechanism rather than
+// a different flag to this one.
 //
 // Second, the verification. Every mutation in this tool is confirmed through a
 // different subsystem than it was applied with (see netstate's package
@@ -54,7 +57,9 @@ import (
 // queryWinService each distinguish "not there" from "I could not look", and
 // statusMechanism reports the second as the third return value rather than
 // folding it into "not installed". See service.go's serviceStatus for the two
-// real defects that rule comes from.
+// real defects that rule comes from. service_task_windows.go's statusLogonTask
+// makes the identical distinction for its own two observers plus the process
+// snapshot that answers "is it running".
 
 // serviceName is the name the SCM knows dpb by, and therefore the name of the
 // registry subkey under HKLM\SYSTEM\CurrentControlSet\Services. It is short and
@@ -115,17 +120,6 @@ const (
 // dpb gets it for free and must not throw it away by flipping the flag.
 const serviceRecoveryReset = 24 * 60 * 60
 
-// unsupportedLogonTask is the by-name refusal for the scope that does not exist
-// yet. It names the verb, says what the missing mechanism would have been, and
-// points at the one that works, so the user is never left with a command that
-// appeared to succeed.
-func unsupportedLogonTask(verb string) error {
-	return fmt.Errorf("service %s: dpb has no login-session mechanism on windows yet — "+
-		"the Scheduled Task that would carry proxy mode's environment variables into your "+
-		"session is a later task. Use --system, which installs the LocalSystem service "+
-		"TUN mode needs anyway", verb)
-}
-
 // serviceScopeFor resolves the scope for this invocation.
 //
 // The log directory for --system is NOT taken from the invoking user's layout,
@@ -150,9 +144,11 @@ func (g *globals) serviceScopeFor(system bool) (serviceScope, error) {
 		}
 		s.logDir = sys.LogDir
 	} else {
-		// The scope resolves even though its mechanism does not exist, so that
-		// the refusal comes from the verb — which can name itself — rather than
-		// from here, where every verb would get the same opaque message.
+		// The user scope: winLogonTask, implemented in service_task_windows.go.
+		// l.LogDir is already the invoking user's own %LOCALAPPDATA%\dpb\logs
+		// (paths_windows.go's resolve), which is exactly right here — unlike
+		// the --system branch above, this mechanism runs AS the invoking user,
+		// so there is no LocalSystem/interactive-session split to route around.
 		s.mech = winLogonTask
 		s.logDir = l.LogDir
 	}
@@ -168,8 +164,8 @@ func (g *globals) serviceScopeFor(system bool) (serviceScope, error) {
 // `dpb service install --system` does once service.go's generic checks (root,
 // run flags, the binary's own path) have passed.
 func installMechanism(ctx context.Context, g *globals, s serviceScope, args []string) error {
-	if s.mech != winService {
-		return unsupportedLogonTask("install")
+	if s.mech == winLogonTask {
+		return installLogonTask(ctx, g, s, args)
 	}
 	// service.go builds args as {exe, "run", ...extra}. CreateService takes the
 	// executable and its arguments separately and escapes each itself.
@@ -318,8 +314,8 @@ func waitForServiceGone(ctx context.Context, m *mgr.Mgr) error {
 
 // uninstallMechanism stops and deletes the service, then confirms it is gone.
 func uninstallMechanism(ctx context.Context, g *globals, s serviceScope) error {
-	if s.mech != winService {
-		return unsupportedLogonTask("uninstall")
+	if s.mech == winLogonTask {
+		return uninstallLogonTask(ctx, g, s)
 	}
 	m, err := mgr.Connect()
 	if err != nil {
@@ -384,8 +380,8 @@ func waitForRegistryGone(ctx context.Context) error {
 
 // startMechanism starts an installed service.
 func startMechanism(ctx context.Context, g *globals, s serviceScope) error {
-	if s.mech != winService {
-		return unsupportedLogonTask("start")
+	if s.mech == winLogonTask {
+		return startLogonTask(ctx, g, s)
 	}
 	m, err := mgr.Connect()
 	if err != nil {
@@ -434,8 +430,8 @@ func startMechanism(ctx context.Context, g *globals, s serviceScope) error {
 // will come back at the next boot — `dpb service uninstall --system` is what
 // removes it.
 func stopMechanism(ctx context.Context, g *globals, s serviceScope) error {
-	if s.mech != winService {
-		return unsupportedLogonTask("stop")
+	if s.mech == winLogonTask {
+		return stopLogonTask(ctx, g, s)
 	}
 	m, err := mgr.Connect()
 	if err != nil {
@@ -697,12 +693,8 @@ func queryWinService() (svc.Status, bool, error) {
 // refused by the SCM, so dpb can know the service exists and honestly not know
 // whether it is running.
 func statusMechanism(ctx context.Context, g *globals, s serviceScope) (found, running bool, cannotTell error) {
-	if s.mech != winService {
-		// Nothing can have been installed under a mechanism whose install
-		// refuses by name, so "not found" here is a fact rather than an
-		// inability, and there is no third answer to report. When the Scheduled
-		// Task lands this grows a real branch — and a real third answer with it.
-		return false, false, nil
+	if s.mech == winLogonTask {
+		return statusLogonTask(ctx, g, s)
 	}
 	w := g.env.Stdout
 

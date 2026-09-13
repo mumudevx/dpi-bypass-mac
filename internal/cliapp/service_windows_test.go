@@ -19,8 +19,6 @@
 package cliapp
 
 import (
-	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -114,50 +112,16 @@ func TestServiceRecoveryActionsShape(t *testing.T) {
 	}
 }
 
-// TestStatusMechanismRefusesTheUnsupportedLogonTaskMechanism exercises the one
-// branch of statusMechanism that needs neither the registry nor the SCM: a
-// scope bound to winLogonTask, the mechanism that does not exist yet. Nothing
-// can have been installed under it, so "not found, nothing to be unsure about"
-// has to be unconditional rather than the product of a lookup.
-func TestStatusMechanismRefusesTheUnsupportedLogonTaskMechanism(t *testing.T) {
-	t.Parallel()
-	g := &globals{}
-	s := serviceScope{system: false, mech: winLogonTask}
-
-	found, running, cannotTell := statusMechanism(context.Background(), g, s)
-	if found {
-		t.Error("found = true for a mechanism whose install refuses by name")
-	}
-	if running {
-		t.Error("running = true for a mechanism whose install refuses by name")
-	}
-	if cannotTell != nil {
-		t.Errorf("cannotTell = %v, want nil: there is no third answer when nothing can be "+
-			"installed in the first place", cannotTell)
-	}
-}
-
-// TestUnsupportedLogonTaskNamesTheVerbAndPointsAtSystem checks the refusal
-// every winLogonTask verb returns names the verb that was actually typed and
-// points at the mechanism that works, per the by-name-refusal discipline
-// service_windows.go's header states for internal/netwatch/route_other.go and
-// internal/emit/stub_other.go.
-func TestUnsupportedLogonTaskNamesTheVerbAndPointsAtSystem(t *testing.T) {
-	t.Parallel()
-	for _, verb := range []string{"install", "uninstall", "start", "stop"} {
-		err := unsupportedLogonTask(verb)
-		if err == nil {
-			t.Fatalf("unsupportedLogonTask(%q) = nil", verb)
-		}
-		msg := err.Error()
-		if !strings.Contains(msg, verb) {
-			t.Errorf("unsupportedLogonTask(%q) = %q, does not name the verb that was refused", verb, msg)
-		}
-		if !strings.Contains(msg, "--system") {
-			t.Errorf("unsupportedLogonTask(%q) = %q, does not point at the mechanism that works", verb, msg)
-		}
-	}
-}
+// The two placeholder-era tests that used to live here —
+// TestStatusMechanismRefusesTheUnsupportedLogonTaskMechanism and
+// TestUnsupportedLogonTaskNamesTheVerbAndPointsAtSystem — pinned
+// unsupportedLogonTask's by-name refusal, which service_task_windows.go's
+// installLogonTask/uninstallLogonTask/startLogonTask/stopLogonTask/
+// statusLogonTask now replace. Both the function and its refusal message are
+// gone; the real behaviour they refused to have is tested in
+// service_task_windows_test.go instead (XML generation, task naming and path
+// construction, decode/strip helpers, and the cannotTell paths that do not
+// need a live schtasks or filesystem).
 
 // TestWinStateNameMapsEveryKnownState locks winStateName's table down: `sc
 // query` and the event log print these numbers, so a state this tool has no
