@@ -21,15 +21,27 @@ import (
 //
 // # Contract 1, restated for this file
 //
-// The setters write REGISTRY VALUES under HKCU\...\Internet Settings through
-// advapi32's RegSetValueExW. Live reads through winhttp.dll's
-// WinHttpGetIEProxyConfigForCurrentUser, which does not hand back the bytes we
-// wrote: it returns the RESOLVED per-user configuration WinHTTP itself would
-// use, with lpszProxy already gated on ProxyEnable. That is a different DLL
+// The setters write REGISTRY VALUES under the interactive user's
+// ...\Internet Settings through advapi32's RegSetValueExW. Live reads through
+// winhttp.dll's WinHttpGetIEProxyConfigForCurrentUser, which does not hand back
+// the bytes we wrote: it returns the RESOLVED configuration WinHTTP itself
+// would use for the current active connection. That is a different DLL
 // answering a different question, which is what makes it the independent
 // verifier here — the Windows analogue of scdarwin's networksetup-writes /
 // scutil-reads split, and a genuinely stronger separation than the one
 // windows.go's Contract 2 has to admit for routes.
+//
+// Two admissions, both stated in windows.go's Contract 2b and both re-derived
+// in Live below: WinHTTP answers for the CALLING token only, so it cannot be
+// the verifier at all when the hive being written is another user's; and the
+// ProxyEnable DWORD comes out of the hive on every path, because WinHTTP does
+// not document whether lpszProxy reflects it.
+//
+// WHICH user's settings these are is userhive.go's question, not this file's.
+// Every read and write below goes through (*port).userHive, which is HKCU
+// whenever HKCU is the logged-on user's hive and HKEY_USERS\<SID> when an
+// elevated dpb belongs to a different account — and which REFUSES rather than
+// guessing when it cannot tell the two apart.
 //
 // Configured is the CAPTURE read and deliberately goes back through the
 // registry, for the reason scdarwin.proxyCtl.Configured gives: a capture must
@@ -44,39 +56,40 @@ var _ sysport.ProxyController = proxyCtl{}
 // (the "Internet Settings" registry values) and WinHTTP's own description of
 // the same values under WINHTTP_CURRENT_USER_IE_PROXY_CONFIG.
 //
-// # KNOWN LIMITATION: HKCU here is the ELEVATED token's hive
+// # Whose hive: not necessarily HKCU
 //
-// Every read and write below opens registry.CURRENT_USER, and CURRENT_USER is
-// resolved from the ACCESS TOKEN OF THE CALLING PROCESS — MSDN, "Predefined
-// Keys": HKEY_CURRENT_USER "maps to the current user's branch in
-// HKEY_USERS ... the user's [hive] is loaded when the user logs on". dpb needs
-// elevation on Windows to write routes, so on the enterprise-default machine —
-// a standard user account plus a SEPARATE administrator account, where the UAC
-// prompt asks for the admin's credentials rather than consent — the elevated
-// process runs as the ADMIN and HKCU is the ADMIN's hive.
+// This key path is HIVE-RELATIVE. It is never opened under
+// registry.CURRENT_USER directly, because CURRENT_USER is resolved from the
+// ACCESS TOKEN OF THE CALLING PROCESS and dpb needs elevation on Windows: on
+// the enterprise-default machine — a standard user account plus a SEPARATE
+// administrator account, where the UAC prompt asks for the admin's credentials
+// rather than consent — the elevated process runs as the ADMIN and HKCU is the
+// ADMIN's hive. Writing there and then reading the same token's configuration
+// back is not a failed write, it is a successful write to the wrong person's
+// settings, with Verify agreeing all the way. userhive.go is where that is
+// decided and where the whole argument lives; env.go asks it the same question
+// for the Environment key.
 //
-// The consequence is exactly the failure class this package's verification
-// contract exists to catch, and it is not caught, because it is not a failed
-// write: SetManual writes the admin's Internet Settings, Live reads the same
-// token's configuration back through WinHTTP, Verify passes, and the
-// interactive user's browser is never proxied at all. dpb reports Ready while
-// changing nothing the user can see. The revert is symmetric and equally
-// invisible, so nothing is left broken — but nothing was ever done either.
+// # What still does not reach the user, and is not pretended otherwise
 //
-// Fixing it properly means obtaining the INTERACTIVE user's token
-// (WTSQueryUserToken on the active session, or WTSGetActiveConsoleSessionId +
-// ImpersonateLoggedOnUser) and loading that user's hive, which is a
-// substantial piece of work with its own privilege and lifetime questions. It
-// is deliberately NOT attempted here; it is the top item for the first session
-// on a real Windows machine, where "did the browser actually get proxied" can
-// be observed rather than reasoned about. env.go carries the same limitation
-// for HKCU\Environment.
+// The hive is now right. notifyProxyChanged is still issued from THIS process,
+// so INTERNET_OPTION_SETTINGS_CHANGED / INTERNET_OPTION_REFRESH tell wininet
+// in this process, plus whatever picks up the resulting broadcast, that the
+// settings moved. An already-running browser in the other user's session
+// re-reads the registry when it notices; one that never notices picks the
+// change up at its next start, from the hive that now holds the right values.
+// That gap is narrower than it sounds — the durable state is correct either
+// way — but it is a gap, and it is not closed by anything in this file.
 const (
 	internetSettingsKey = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
 	valAutoConfigURL = "AutoConfigURL" // REG_SZ,   the PAC URL; its ABSENCE is "off"
 	valProxyEnable   = "ProxyEnable"   // REG_DWORD, the single global manual-proxy switch
 	valProxyServer   = "ProxyServer"   // REG_SZ,   every scheme's proxy, in ONE string
+	// REG_SZ, the bypass list. Written by nothing in this package: it is read
+	// only by Live's registry path, which needs the same thing WinHTTP hands
+	// back as lpszProxyBypass. See hiveProxyState.
+	valProxyOverride = "ProxyOverride"
 )
 
 // The two handle-less wininet options that push a registry change out to
@@ -245,9 +258,13 @@ func (c proxyCtl) Configured(_ context.Context, _ string, kinds ...sysport.Proxy
 	}
 	p := sysport.ProxySettings{Kinds: append([]sysport.ProxyKind(nil), kinds...)}
 
-	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKey, registry.QUERY_VALUE)
+	h, err := c.p.userHive()
 	if err != nil {
-		return p, fmt.Errorf("netstate: open HKCU\\%s: %w", internetSettingsKey, err)
+		return p, err
+	}
+	key, err := registry.OpenKey(h.root, h.path(internetSettingsKey), registry.QUERY_VALUE)
+	if err != nil {
+		return p, fmt.Errorf("netstate: open %s: %w", h.label(internetSettingsKey), err)
 	}
 	defer key.Close()
 
@@ -289,7 +306,11 @@ func (c proxyCtl) Configured(_ context.Context, _ string, kinds ...sysport.Proxy
 // second "state" write to pair with it, unlike macOS: on Windows the value's
 // presence is the enable.
 func (c proxyCtl) SetAuto(_ context.Context, _ string, url string) error {
-	key, err := openInternetSettings()
+	h, err := c.p.userHive()
+	if err != nil {
+		return err
+	}
+	key, err := h.openInternetSettings()
 	if err != nil {
 		return err
 	}
@@ -327,7 +348,11 @@ func (c proxyCtl) SetManual(_ context.Context, svc string, kind sysport.ProxyKin
 		return fmt.Errorf("netstate: SetManual cannot install an auto-proxy (PAC) setting on %s; use SetAuto", svc)
 	}
 
-	key, err := openInternetSettings()
+	h, err := c.p.userHive()
+	if err != nil {
+		return err
+	}
+	key, err := h.openInternetSettings()
 	if err != nil {
 		return err
 	}
@@ -364,7 +389,11 @@ func (c proxyCtl) Restore(_ context.Context, _ string, prev sysport.ProxySetting
 		return err
 	}
 
-	key, err := openInternetSettings()
+	h, err := c.p.userHive()
+	if err != nil {
+		return err
+	}
+	key, err := h.openInternetSettings()
 	if err != nil {
 		return err
 	}
@@ -607,8 +636,9 @@ func containsScheme(schemes []string, scheme string) bool {
 	return false
 }
 
-// Live reads the RESOLVED per-user proxy configuration out of WinHTTP and
-// translates it into the scutil key names.
+// Live reads the interactive user's proxy configuration back and translates it
+// into the scutil key names. Which observer it reads through depends on whose
+// hive that is; see "Which observer answers" below.
 //
 // # Why scutil's names on Windows
 //
@@ -628,7 +658,39 @@ func containsScheme(schemes []string, scheme string) bool {
 // Verify report "auto-proxy disabled" for a working proxy, or — with an
 // equally wrong name in VerifyReverted — makes a revert that left our proxy in
 // place report success. Neither is detectable without a Windows machine.
+//
+// # Which observer answers
+//
+// WinHttpGetIEProxyConfigForCurrentUser answers for the CALLING process's
+// token and there is no by-SID form of it. MSDN: "This function should not be
+// used in a service process that does not impersonate a logged-on user. If the
+// caller does not impersonate a logged on user, WinHTTP attempts to retrieve
+// the Internet Explorer settings for the current service process". So when
+// userhive.go has decided the settings belong in someone ELSE's hive, WinHTTP
+// would answer about the administrator dpb is running as — a verifier looking
+// at a different person's browser, which is worse than no verifier at all
+// because it fails a correct apply. That path reads the hive instead, and
+// windows.go's Contract 2b records the loss of separation out loud rather than
+// letting the two cases look alike.
 func (c proxyCtl) Live(_ context.Context) (sysport.ProxyState, error) {
+	h, err := c.p.userHive()
+	if err != nil {
+		return sysport.ProxyState{}, err
+	}
+	if h.isCurrentUser() {
+		return c.liveFromWinHTTP(h)
+	}
+	return liveFromHive(h)
+}
+
+// liveFromWinHTTP is the strong path: a different DLL, answering a different
+// question, about the same user this process is.
+func (c proxyCtl) liveFromWinHTTP(h userHive) (sysport.ProxyState, error) {
+	enabled, err := hiveProxyEnable(h)
+	if err != nil {
+		return sysport.ProxyState{}, err
+	}
+
 	var cfg winhttpCurrentUserIEProxyConfig
 	// Deferred BEFORE the call, not after it. cfg starts zeroed and free skips
 	// nil pointers, so this covers the success path, the error path, and the
@@ -650,9 +712,150 @@ func (c proxyCtl) Live(_ context.Context) (sysport.ProxyState, error) {
 	return proxyStateFromIE(
 		cfg.fAutoDetect != 0,
 		windows.UTF16PtrToString(cfg.lpszAutoConfigURL),
-		windows.UTF16PtrToString(cfg.lpszProxy),
+		gateOnProxyEnable(windows.UTF16PtrToString(cfg.lpszProxy), enabled),
 		windows.UTF16PtrToString(cfg.lpszProxyBypass),
 	), nil
+}
+
+// liveFromHive is the weak path, for a hive WinHTTP cannot be asked about. See
+// Live, and windows.go's Contract 2b.
+//
+// It reads the same four things WINHTTP_CURRENT_USER_IE_PROXY_CONFIG carries,
+// with one exception it refuses to fake: fAutoDetect. "Automatically detect
+// settings" is not a registry VALUE — it is one bit inside the binary
+// DefaultConnectionSettings blob under ...\Internet Settings\Connections, and
+// hand-parsing an undocumented binary layout to publish a key nothing in
+// netstate reads would be inventing evidence. withoutAutoDiscovery drops the
+// key rather than publishing a 0 that would read as a definite "WPAD is off".
+func liveFromHive(h userHive) (sysport.ProxyState, error) {
+	key, ok, err := openInternetSettingsForRead(h)
+	if err != nil {
+		return sysport.ProxyState{}, err
+	}
+	if !ok {
+		// No Internet Settings key at all: nothing is configured for that
+		// user. This is the registry's positive "never written", not a failed
+		// read — see openInternetSettingsForRead.
+		return withoutAutoDiscovery(proxyStateFromIE(false, "", "", "")), nil
+	}
+	defer key.Close()
+
+	enabled, err := readProxyEnable(h, key)
+	if err != nil {
+		return sysport.ProxyState{}, err
+	}
+	autoURL, err := regString(key, valAutoConfigURL)
+	if err != nil {
+		return sysport.ProxyState{}, err
+	}
+	server, err := regString(key, valProxyServer)
+	if err != nil {
+		return sysport.ProxyState{}, err
+	}
+	bypass, err := regString(key, valProxyOverride)
+	if err != nil {
+		return sysport.ProxyState{}, err
+	}
+
+	return withoutAutoDiscovery(proxyStateFromIE(false, autoURL, gateOnProxyEnable(server, enabled), bypass)), nil
+}
+
+// gateOnProxyEnable applies the single global manual-proxy switch to the packed
+// per-scheme string, which is the only place "is this proxy actually in use"
+// can be answered from.
+//
+// # Why this exists on the WinHTTP path too
+//
+// This file used to assume WinHTTP hands back a NULL lpszProxy whenever
+// ProxyEnable is 0, and published every scheme it found as Enable = 1 on the
+// strength of that. MSDN does not say so. The whole of
+// WinHttpGetIEProxyConfigForCurrentUser's Remarks is about WPAD, per-connection
+// settings and impersonation; the ProxyEnable DWORD is never mentioned, and the
+// WINHTTP_CURRENT_USER_IE_PROXY_CONFIG reference does not mention it either.
+// The assumption may well be true of every build shipped so far — but it is
+// folklore, not contract, and if it is ever false a proxy the user has switched
+// OFF reads as ON, so op_proxy.go's VerifyReverted reports OUR proxy still in
+// place after a clean teardown and dpb tells the user their machine is still
+// modified when it is not.
+//
+// # The direction it can fail in
+//
+// It can only ever turn a reported proxy OFF, never invent one. WinHTTP
+// answers for the CURRENT ACTIVE CONNECTION while ProxyEnable is the LAN
+// connection's switch, so the two can legitimately disagree — and when they do,
+// the conservative reading is the one that reports LESS than is there: a Verify
+// that fails when the proxy is in fact live is loud and diagnosable, whereas a
+// Verify that passes when it is not is the class of lie this package is built
+// to avoid.
+//
+// # The cost, said plainly
+//
+// The DWORD comes out of the same hive the setters write, so this one bit is
+// NOT independently observed. windows.go's Contract 2b names it as an
+// exception, alongside the route/iface one, rather than letting it pass
+// unnoticed.
+func gateOnProxyEnable(proxy string, enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return proxy
+}
+
+// withoutAutoDiscovery removes the one key liveFromHive cannot observe.
+//
+// An ABSENT key and a "0" are different statements. sysport.ProxyState.On
+// answers false for both, so nothing breaks either way today, but doctor prints
+// what is set, and printing "ProxyAutoDiscoveryEnable 0" for a machine whose
+// WPAD state was never read would be this package asserting something it did
+// not check.
+func withoutAutoDiscovery(st sysport.ProxyState) sysport.ProxyState {
+	delete(st.Keys, keyAutoDiscoveryEnable)
+	return st
+}
+
+// openInternetSettingsForRead opens the hive's Internet Settings key read-only,
+// reporting a key that has never existed as ok = false rather than as a
+// failure.
+//
+// That is the same reading env.go's Get gives a missing Environment key and
+// proxy.go's regString gives a missing value: registry.ErrNotExist is the
+// registry's own POSITIVE statement that nothing was ever written here, which
+// is a real answer to "what proxy is configured" — none. Every OTHER error is
+// returned, because an unreadable key is not an empty one; see windows.go's
+// Contract 1.
+func openInternetSettingsForRead(h userHive) (registry.Key, bool, error) {
+	key, err := registry.OpenKey(h.root, h.path(internetSettingsKey), registry.QUERY_VALUE)
+	if errors.Is(err, registry.ErrNotExist) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("netstate: open %s: %w", h.label(internetSettingsKey), err)
+	}
+	return key, true, nil
+}
+
+// hiveProxyEnable reads just the global switch, for the WinHTTP path, which
+// gets everything else from a different DLL.
+func hiveProxyEnable(h userHive) (bool, error) {
+	key, ok, err := openInternetSettingsForRead(h)
+	if err != nil || !ok {
+		return false, err
+	}
+	defer key.Close()
+	return readProxyEnable(h, key)
+}
+
+// readProxyEnable reads the ProxyEnable DWORD. An absent value is 0 — the same
+// reading readProxyServer gives it — and any other failure is returned.
+func readProxyEnable(h userHive, key registry.Key) (bool, error) {
+	n, _, err := key.GetIntegerValue(valProxyEnable)
+	if errors.Is(err, registry.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("netstate: read %s: %w", h.label(internetSettingsKey+`\`+valProxyEnable), err)
+	}
+	return n != 0, nil
 }
 
 // The scutil key names. They are constants so that a typo is a compile error
@@ -693,10 +896,12 @@ func proxyStateFromIE(autoDetect bool, autoConfigURL, proxy, bypass string) sysp
 		st.Keys[keyAutoConfigURL] = autoConfigURL
 	}
 
-	// lpszProxy is every scheme in one string; parseProxyServer is where that
-	// is taken apart. WinHTTP has already gated it on ProxyEnable, so an entry
-	// being present here means the system will actually use it — which is what
-	// makes "Enable" answerable at all.
+	// proxy is every scheme in one string; parseProxyServer is where that is
+	// taken apart. An entry being present here means the system will actually
+	// use it — which is what makes "Enable" answerable at all — and that is
+	// true because BOTH callers have already run the string through
+	// gateOnProxyEnable, not because WinHTTP promises to have done it. See
+	// gateOnProxyEnable for why the difference matters.
 	list := parseProxyServer(proxy)
 	for _, m := range schemeToScutil {
 		e, ok := findProxyEntry(list, m.scheme)
@@ -1062,10 +1267,15 @@ func proxyWants(p sysport.ProxySettings, kind sysport.ProxyKind) bool {
 // than OpenKey: it opens the existing key on every real Windows install, and
 // on the one where the key is somehow absent it makes it rather than failing a
 // revert the user needs.
-func openInternetSettings() (registry.Key, error) {
-	key, _, err := registry.CreateKey(registry.CURRENT_USER, internetSettingsKey, registry.QUERY_VALUE|registry.SET_VALUE)
+//
+// CreateKey is safe to point at a hive that is not this process's own only
+// because resolveUserHive has already proved the HKEY_USERS\<SID> root exists;
+// without that probe this call would cheerfully invent the whole branch under
+// a SID nobody is logged in as. See resolveUserHive.
+func (h userHive) openInternetSettings() (registry.Key, error) {
+	key, _, err := registry.CreateKey(h.root, h.path(internetSettingsKey), registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
-		return 0, fmt.Errorf("netstate: open HKCU\\%s for writing: %w", internetSettingsKey, err)
+		return 0, fmt.Errorf("netstate: open %s for writing: %w", h.label(internetSettingsKey), err)
 	}
 	return key, nil
 }

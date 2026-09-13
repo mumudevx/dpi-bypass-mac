@@ -49,26 +49,24 @@ var _ sysport.EnvController = envCtl{}
 // because a proxy override dpb installs belongs to the user account running
 // dpb, not to every account on the machine.
 //
-// # KNOWN LIMITATION: HKCU here is the ELEVATED token's hive
+// # Whose hive: not necessarily HKCU
 //
-// Every registry.CURRENT_USER open in this file resolves through the ACCESS
-// TOKEN OF THE CALLING PROCESS — MSDN, "Predefined Keys". dpb requires
-// elevation on Windows, so on the enterprise-default machine — a standard user
-// account plus a SEPARATE administrator account, where UAC asks for the
-// admin's credentials rather than consent — "the user account running dpb" in
-// the paragraph above is the ADMIN, and HTTP_PROXY / HTTPS_PROXY / NO_PROXY
-// are written into the ADMIN's environment.
+// This path is HIVE-RELATIVE, and every open below goes through
+// (*port).userHive rather than naming registry.CURRENT_USER. CURRENT_USER
+// resolves through the ACCESS TOKEN OF THE CALLING PROCESS — MSDN, "Predefined
+// Keys" — and dpb requires elevation on Windows, so on the enterprise-default
+// machine (a standard user account plus a SEPARATE administrator account,
+// where UAC asks for the admin's credentials rather than consent) "the user
+// account running dpb" in the paragraph above is the ADMIN. HTTP_PROXY,
+// HTTPS_PROXY and NO_PROXY would go into the ADMIN's environment, Get would
+// read them back out of the same place, Verify would pass, and not one
+// application in the logged-on user's session would inherit anything — because
+// CreateProcess builds a child's environment from the hive of the user who
+// launched it. userhive.go decides which hive that is and refuses rather than
+// guessing; proxy.go's internetSettingsKey asks it the same question.
 //
-// Get reads that same hive, so Verify passes; the interactive user's own
-// applications inherit nothing, because CreateProcess builds their environment
-// from the hive of the user who launched them. Nothing is left broken on the
-// way out — the revert is equally invisible — but nothing was ever done
-// either, and dpb says Ready throughout. proxy.go's internetSettingsKey
-// carries the identical limitation for Internet Settings, and the fix is the
-// same substantial piece of work described there (WTSQueryUserToken on the
-// active session, then that user's hive). It is deliberately NOT attempted
-// here, and it is the top item for the first session on a real Windows
-// machine.
+// What the fix does NOT change is the caveat above: a variable reaches only
+// processes started after it is written, whichever hive it is written to.
 const environmentKey = `Environment`
 
 // Get reads one variable's value straight out of HKCU\Environment.
@@ -102,9 +100,17 @@ const environmentKey = `Environment`
 // does not manufacture one.
 func (c envCtl) Get(_ context.Context, name string) (string, bool, error) {
 	if name == "" {
-		return "", false, fmt.Errorf("netstate: HKCU\\%s needs a variable name", environmentKey)
+		return "", false, fmt.Errorf("netstate: the user's %s registry key needs a variable name", environmentKey)
 	}
-	key, err := registry.OpenKey(registry.CURRENT_USER, environmentKey, registry.QUERY_VALUE)
+	// The empty-name guard above deliberately runs FIRST: it is a caller bug
+	// that needs no machine state to diagnose, and env_test.go's three
+	// refusal tests reach it on a zero-value port with no console session to
+	// resolve. Same ordering in Set and Unset.
+	h, err := c.p.userHive()
+	if err != nil {
+		return "", false, err
+	}
+	key, err := registry.OpenKey(h.root, h.path(environmentKey), registry.QUERY_VALUE)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotExist) {
 			// No Environment key at all is the same positive "never set" the
@@ -116,7 +122,7 @@ func (c envCtl) Get(_ context.Context, name string) (string, bool, error) {
 			// tool's problem.
 			return "", false, nil
 		}
-		return "", false, fmt.Errorf("netstate: open HKCU\\%s: %w", environmentKey, err)
+		return "", false, fmt.Errorf("netstate: open %s: %w", h.label(environmentKey), err)
 	}
 	defer key.Close()
 
@@ -125,7 +131,7 @@ func (c envCtl) Get(_ context.Context, name string) (string, bool, error) {
 		return "", false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("netstate: read HKCU\\%s\\%s: %w", environmentKey, name, err)
+		return "", false, fmt.Errorf("netstate: read %s\\%s: %w", h.label(environmentKey), name, err)
 	}
 	return val, true, nil
 }
@@ -135,20 +141,26 @@ func (c envCtl) Get(_ context.Context, name string) (string, bool, error) {
 // broadcast is logged rather than returned as an error here.
 func (c envCtl) Set(_ context.Context, name, value string) error {
 	if name == "" {
-		return fmt.Errorf("netstate: HKCU\\%s needs a variable name", environmentKey)
+		return fmt.Errorf("netstate: the user's %s registry key needs a variable name", environmentKey)
+	}
+	h, err := c.p.userHive()
+	if err != nil {
+		return err
 	}
 	// CreateKey rather than OpenKey, matching proxy.go's openInternetSettings:
 	// it opens the existing key on every real interactive session, and on the
 	// one where it is somehow absent this makes it rather than failing an
-	// Apply the user asked for.
-	key, _, err := registry.CreateKey(registry.CURRENT_USER, environmentKey, registry.SET_VALUE)
+	// Apply the user asked for. Safe to aim at another user's hive only
+	// because resolveUserHive has already proved that hive's root exists —
+	// otherwise this would invent the branch. See resolveUserHive.
+	key, _, err := registry.CreateKey(h.root, h.path(environmentKey), registry.SET_VALUE)
 	if err != nil {
-		return fmt.Errorf("netstate: open HKCU\\%s for writing: %w", environmentKey, err)
+		return fmt.Errorf("netstate: open %s for writing: %w", h.label(environmentKey), err)
 	}
 	defer key.Close()
 
 	if err := key.SetStringValue(name, value); err != nil {
-		return fmt.Errorf("netstate: set HKCU\\%s\\%s: %w", environmentKey, name, err)
+		return fmt.Errorf("netstate: set %s\\%s: %w", h.label(environmentKey), name, err)
 	}
 	broadcastEnvironmentChange(c.p.env().logf)
 	return nil
@@ -160,21 +172,25 @@ func (c envCtl) Set(_ context.Context, name, value string) error {
 // restoreAutoConfigURL and restoreProxyServer use for DeleteValue.
 func (c envCtl) Unset(_ context.Context, name string) error {
 	if name == "" {
-		return fmt.Errorf("netstate: HKCU\\%s needs a variable name", environmentKey)
+		return fmt.Errorf("netstate: the user's %s registry key needs a variable name", environmentKey)
 	}
-	key, err := registry.OpenKey(registry.CURRENT_USER, environmentKey, registry.SET_VALUE)
+	h, err := c.p.userHive()
+	if err != nil {
+		return err
+	}
+	key, err := registry.OpenKey(h.root, h.path(environmentKey), registry.SET_VALUE)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotExist) {
 			// No Environment key at all means there is nothing to unset.
 			broadcastEnvironmentChange(c.p.env().logf)
 			return nil
 		}
-		return fmt.Errorf("netstate: open HKCU\\%s for writing: %w", environmentKey, err)
+		return fmt.Errorf("netstate: open %s for writing: %w", h.label(environmentKey), err)
 	}
 	defer key.Close()
 
 	if err := key.DeleteValue(name); err != nil && !errors.Is(err, registry.ErrNotExist) {
-		return fmt.Errorf("netstate: delete HKCU\\%s\\%s: %w", environmentKey, name, err)
+		return fmt.Errorf("netstate: delete %s\\%s: %w", h.label(environmentKey), name, err)
 	}
 	broadcastEnvironmentChange(c.p.env().logf)
 	return nil
