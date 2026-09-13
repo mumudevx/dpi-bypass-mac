@@ -259,7 +259,18 @@ Every item names a package or file in this plan's File Structure, per the rule P
 - [ ] `GOOS=windows go build ./...` exit 0
 - [ ] `GOOS=windows go vet ./...` clean except `internal/sysconf/scdarwin`
 - [ ] `README.md` has a Windows install section that states the SmartScreen warning plainly and says what a tester's result does not establish
-- [ ] `goreleaser check` passes with Windows targets
+- [ ] `goreleaser build --snapshot` succeeds with the Windows targets
+
+  **Not `goreleaser check`.** That command fails, and it failed before this plan touched
+  the config — verified by running it against the previous `.goreleaser.yaml`. The cause is
+  a `brews` deprecation, which is a **macOS Homebrew distribution decision**, not a Windows
+  one: goreleaser now prefers `homebrew_casks`, and a formula and a cask are different
+  Homebrew concepts, so switching would change what `brew install dpb` does for existing
+  macOS users. That belongs to Plan 6, which owns distribution.
+
+  The config is valid and builds — `goreleaser build --snapshot` succeeds and emits the
+  deprecation as a warning. Demanding `check` here was the wrong gate: it asked this plan
+  to make a decision about the *other* platform's install path.
 - [ ] `dpb probe --host discord.com --reps 3 --strategy tlsfrag:pos=snimid` still 3/3 PASS on the development machine
 
 **What this plan still does not do:** nothing here has run on Windows. It produces a *config* that can cut a preview binary, and the four items above that need a real machine stay open. Plan 6 cuts the release, adds the Windows CI job, decides the wintun DLL question, and — on a Windows machine on a censored line — **measures** the ladder instead of assuming it.
