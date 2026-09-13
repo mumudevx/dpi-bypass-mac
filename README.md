@@ -203,10 +203,10 @@ is not the author's — and it is **not** a measurement of the bypass ladder,
 however many of the test sites do or do not get through. Three things say so
 directly, and are worth reading before drawing a conclusion from a number:
 
-- `internal/config/embed/turkey.toml` states outright that Turkcell
-  Superonline, Vodafone, Turknet and every mobile network are entirely
-  unmeasured — Türk Telekom is the only ISP any number in this repository
-  comes from.
+- [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) §4 is explicit that Superonline,
+  Vodafone, Turknet and every mobile network are unmeasured — Türk Telekom is the
+  only ISP any number in this repository comes from. `internal/config/embed/turkey.toml`
+  cites that finding as the reason it ships no per-ISP variants.
 - [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) §3.4 records efficacy that is
   *non-monotonic within one ISP on one day* — the same chunk size passing on
   one sweep and failing on the next, with no single rule that explains it.
