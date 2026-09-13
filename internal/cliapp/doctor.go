@@ -282,6 +282,16 @@ func collectChecks(ctx context.Context, g *globals, layout paths.Layout, full bo
 			add(checkDNS(ctx, g, cfg))
 		}
 	}
+
+	// platformChecks is empty on darwin (doctor_darwin.go) — every darwin fact
+	// is already covered above — and on Windows adds the two things Task 5's
+	// brief names as what a Windows user will actually hit: whether --tun's
+	// wintun driver is even present, and whether an elevated dpb is about to
+	// write an administrator's registry hive instead of the console user's
+	// (doctor_windows.go).
+	for _, c := range platformChecks(layout) {
+		add(c)
+	}
 	return out
 }
 
@@ -291,7 +301,10 @@ func collectChecks(ctx context.Context, g *globals, layout paths.Layout, full bo
 // A root-owned state directory is the classic sudo trap this whole layout
 // exists to avoid: one `sudo dpb run --tun` writes the journal as root, and
 // every unprivileged command afterwards — including the repair that would fix
-// it — cannot read its own files.
+// it — cannot read its own files. paths_windows.go's own package comment says
+// why this specific trap has no Windows shape: UAC elevation keeps the SAME
+// account, so a not-writable StateDir there means something else, which is
+// why the remedy text (notWritableRemedy) is split per platform.
 func checkPaths(layout paths.Layout) check {
 	c := check{Name: "paths", State: stateOK}
 	c.Detail = fmt.Sprintf("state %s, config %s, logs %s", layout.StateDir, layout.ConfigDir, layout.LogDir)
@@ -306,12 +319,10 @@ func checkPaths(layout paths.Layout) check {
 	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
 		c.State = stateFail
 		c.Detail = fmt.Sprintf("%s is not writable: %v", layout.StateDir, err)
-		if !layout.Elevated {
-			c.Remedy = fmt.Sprintf("a previous `sudo dpb` may own it: sudo chown -R %s %s",
-				layout.User, layout.StateDir)
-		} else {
-			c.Remedy = "check the permissions on " + layout.StateDir
-		}
+		// The remedy differs by platform: darwin's is the sudo/chown trap this
+		// package exists for, and Windows has no such thing to point at — see
+		// notWritableRemedy in doctor_darwin.go and doctor_windows.go.
+		c.Remedy = notWritableRemedy(layout)
 		return c
 	}
 	// The probe file is litter the moment it has answered the question.
@@ -440,6 +451,13 @@ func checkJournal(layout paths.Layout) check {
 // outage and is reported as a failure; a PAC URL in the same state costs a
 // little latency, because macOS treats an unfetchable auto-proxy URL as DIRECT,
 // and is reported as a warning.
+//
+// On Windows the same question is answered by netstate.ReadProxyState reading
+// WinHTTP's resolved configuration (or, on the split-account path Task 4
+// exists for, the registry hive directly — see Contract 2b in
+// internal/sysconf/scwindows/windows.go), so this check needs no change to
+// run there; only its Detail/Remedy wording is platform-specific, via
+// proxySystemName and proxyInspectRemedy in doctor_darwin.go / doctor_windows.go.
 func checkSystemProxy(ctx context.Context, g *globals, running bool) check {
 	c := check{Name: "system proxy", State: stateOK}
 	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf, Sys: g.sysOf()}
@@ -447,7 +465,7 @@ func checkSystemProxy(ctx context.Context, g *globals, running bool) check {
 	if err != nil {
 		c.State = stateWarn
 		c.Detail = err.Error()
-		c.Remedy = "run `scutil --proxy` by hand to see what macOS is pointed at"
+		c.Remedy = proxyInspectRemedy()
 		return c
 	}
 
@@ -490,7 +508,7 @@ func checkSystemProxy(ctx context.Context, g *globals, running bool) check {
 				c.State = stateFail
 			}
 		}
-		c.Detail = "macOS is pointed at a dpb that is not running: " + strings.Join(dead, "; ")
+		c.Detail = proxySystemName() + " is pointed at a dpb that is not running: " + strings.Join(dead, "; ")
 		c.Remedy = "run `dpb doctor --repair` to put the previous settings back, " +
 			"or `dpb run` to make them true again"
 	}
@@ -541,7 +559,11 @@ func isLoopbackTarget(v string) bool {
 var proxyEnvVars = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"}
 
 // checkProxyEnv reports the launchd session environment, which is the half of
-// the coverage story the proxy pane cannot show.
+// the coverage story the proxy pane cannot show. On Windows the equivalent
+// gap is HKCU\Environment plus the WM_SETTINGCHANGE broadcast scwindows'
+// envCtl issues after writing it; netstate.ReadLaunchEnv reads through the
+// same abstraction on both platforms, so only the Remedy text (proxyEnvRemedy
+// in doctor_darwin.go / doctor_windows.go) differs.
 func checkProxyEnv(ctx context.Context, g *globals, running bool) check {
 	c := check{Name: "proxy environment", State: stateOK}
 	env := netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf, Sys: g.sysOf()}
@@ -553,7 +575,7 @@ func checkProxyEnv(ctx context.Context, g *globals, running bool) check {
 		if err != nil {
 			c.State = stateWarn
 			c.Detail = err.Error()
-			c.Remedy = "run `launchctl getenv HTTPS_PROXY` by hand to see what is exported"
+			c.Remedy = proxyEnvRemedy()
 			return c
 		}
 		if v == "" {

@@ -259,6 +259,29 @@ func realHiveFacts() hiveFacts {
 	}
 }
 
+// HiveStatus reports, for `dpb doctor`, which registry hive this process's
+// per-user proxy and environment writes would land in right now.
+//
+// It is a read-only restatement of resolveUserHive's decision — not a second
+// copy of the logic — so a caller outside this package (cliapp's
+// doctor_windows.go) can surface Task 4's failure mode without duplicating
+// chooseUserHive: on a standard-user-plus-separate-administrator machine, an
+// elevated dpb's HKCU is the ADMINISTRATOR's hive, not the signed-in user's,
+// and a proxy write that reports success there configures a browser nobody
+// is looking at. interactive is true exactly when label names HKU\<SID>
+// rather than HKCU, i.e. exactly the case this whole file exists for.
+//
+// Like every other read in this package, a failure is returned as an error
+// naming what could not be determined, never guessed at as HKCU — see this
+// file's header for why.
+func HiveStatus() (label string, interactive bool, err error) {
+	h, err := resolveUserHive(realHiveFacts())
+	if err != nil {
+		return "", false, err
+	}
+	return h.name, !h.isCurrentUser(), nil
+}
+
 // userHive returns the hive this port's per-user controllers read and write,
 // resolving it on first use and PINNING it for the rest of the port's life.
 //
