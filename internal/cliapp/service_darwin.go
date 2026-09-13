@@ -45,6 +45,17 @@ import (
 // statusMechanism) and never touch launchctl, plutil or a plist path
 // themselves.
 
+// serviceName, serviceInstallHint and serviceFollowHint are the three
+// platform-provided strings service.go's comment lists. On darwin the job's
+// name IS the launchd label, `dpb service install` with no flag is the right
+// first thing to type, and tail(1) is the way to watch a file grow.
+const (
+	serviceName        = serviceLabel
+	serviceInstallHint = "dpb service install"
+)
+
+func serviceFollowHint(path string) string { return "follow with: tail -f " + path }
+
 // serviceScopeFor resolves the scope for this invocation.
 //
 // The log directory is NOT taken from the invoking user's layout when --system
@@ -241,14 +252,21 @@ func stopMechanism(ctx context.Context, g *globals, s serviceScope) error {
 
 // statusMechanism reports and prints one scope's launchd state. It returns
 // whether the job was found (installed or loaded) and whether it is running.
-func statusMechanism(ctx context.Context, g *globals, s serviceScope) (found, running bool) {
+//
+// The third return is the mechanism saying "I could not look" — see the unsure
+// slice in service.go's serviceStatus. It is always nil here. launchd's
+// observers cannot fail in a way that leaves the question open: os.Stat on the
+// plist answers or the file is not there, and a failing `launchctl print` IS
+// the answer that the job is not loaded, for the reasons serviceStateOf's
+// comment sets out. Windows is where the third answer is real.
+func statusMechanism(ctx context.Context, g *globals, s serviceScope) (found, running bool, cannotTell error) {
 	run := g.runnerOf()
 	w := g.env.Stdout
 
 	_, statErr := os.Stat(s.plist)
 	st := serviceStateOf(ctx, run, s)
 	if statErr != nil && !st.loaded {
-		return false, false
+		return false, false, nil
 	}
 
 	fmt.Fprintf(w, "%s  (%s)\n", serviceLabel, s.kind())
@@ -258,7 +276,7 @@ func statusMechanism(ctx context.Context, g *globals, s serviceScope) (found, ru
 		fmt.Fprintf(w, "  pid      %d\n", st.pid)
 	}
 	fmt.Fprintf(w, "  logs     %s\n           %s\n", s.outLog, s.errLog)
-	return true, st.running
+	return true, st.running, nil
 }
 
 // ── launchctl print, read as evidence rather than as an exit code ───────────

@@ -41,6 +41,17 @@ const (
 const teardownBudget = 10 * time.Second
 
 func main() {
+	// The one Windows-service branch in this binary, and it is here rather than
+	// inside run() because a service has to redirect its own stdout and stderr
+	// BEFORE anything captures them — the SCM starts it with no console to
+	// inherit (see internal/cliapp/svcrun_windows.go). Everything after the
+	// handover is the ordinary path: runAsWindowsService calls run() itself, so
+	// the signal context, the teardown stack and dispatch are shared, not
+	// duplicated. Off Windows, and on Windows when a human typed the command,
+	// it reports false and nothing here changes.
+	if code, isService := runAsWindowsService(); isService {
+		os.Exit(code)
+	}
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
@@ -95,6 +106,17 @@ func installSignals(stderr io.Writer, exit func(int)) (context.Context, func()) 
 	// drops on a full channel, and a dropped second Ctrl-C is the bug.
 	ch := make(chan os.Signal, 8)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+
+	// A Windows service is never sent a signal: the SCM delivers a control code
+	// to a callback instead. armServiceStop gives that callback a way into THIS
+	// channel, and does nothing at all off Windows or in an interactive Windows
+	// run. It is a relay into ch rather than a second cancel on purpose —
+	// everything downstream is then the SIGINT path unmodified, including the
+	// notice, the cancel, the teardown stack run() drains on the way out, and
+	// the press-again escape hatch. dpb's teardown restores the user's proxy,
+	// DNS and routes; a second copy of it would eventually disagree with this
+	// one, and the machine that lost the argument stays broken.
+	armServiceStop(ch)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

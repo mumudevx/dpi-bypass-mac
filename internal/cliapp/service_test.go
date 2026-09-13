@@ -480,6 +480,41 @@ func TestServiceInstallSystemNeedsRoot(t *testing.T) {
 	}
 }
 
+// TestRequireRootNamesTheElevatedPromptForAWindowsScope exercises requireRoot's
+// other branch directly, without a Windows machine to run service_windows.go's
+// own mechanism on: requireRoot itself carries no build tag, so the sentence it
+// picks for a winService scope compiles and runs right here on darwin, and a
+// wrong one — telling a Windows user to "re-run with sudo" — would be a defect
+// this suite could have caught without ever leaving this platform.
+func TestRequireRootNamesTheElevatedPromptForAWindowsScope(t *testing.T) {
+	t.Parallel()
+	s := serviceScope{system: true, mech: winService, layout: paths.Layout{Elevated: false}}
+
+	err := requireRoot(s, "install")
+	var ce codedError
+	if !errors.As(err, &ce) {
+		t.Fatalf("error = %v (%T), want a coded error", err, err)
+	}
+	if ce.ExitCode() != ExitNeedRoot {
+		t.Errorf("exit code = %d, want %d (needs root)", ce.ExitCode(), ExitNeedRoot)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "sudo") {
+		t.Errorf("error = %q; there is no sudo on Windows, so telling a user to use it is advice "+
+			"that cannot be followed", msg)
+	}
+	if !strings.Contains(msg, "Administrator") {
+		t.Errorf("error = %q, does not tell the user what an elevated Windows prompt is called", msg)
+	}
+
+	// An elevated caller needs no prompt at all, on either mechanism.
+	elevated := s
+	elevated.layout.Elevated = true
+	if err := requireRoot(elevated, "install"); err != nil {
+		t.Errorf("requireRoot on an elevated winService scope = %v, want nil", err)
+	}
+}
+
 // A LaunchDaemon runs as root with no SUDO_USER, so paths.Resolve() inside it
 // returns the machine-wide layout. Pointing its stdout at the invoking user's
 // ~/Library/Logs would split the daemon's own event log from the output launchd

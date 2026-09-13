@@ -18,14 +18,26 @@ import (
 // This file is the platform-free half: the six verbs (install, uninstall,
 // start, stop, status, logs) and the generic checks every mechanism needs
 // (needs-root, are the run flags well-formed, where do the logs live). What
-// each verb actually DOES to the machine — writing a launchd plist and
-// calling launchctl today; a Windows Task Scheduler entry or a Windows
-// service once Plan 5's Tasks 2 and 3 land — is one platform call per verb:
+// each verb actually DOES to the machine — writing a launchd plist and calling
+// launchctl on darwin; creating a LocalSystem service in the Windows service
+// control manager on Windows — is one platform call per verb:
 // installMechanism, uninstallMechanism, startMechanism, stopMechanism,
 // statusMechanism. See service_darwin.go for launchd's implementation of
 // those, including why its verbs are `enable`/`bootstrap`/`bootout` rather
 // than the deprecated `load -w`/`unload -w`, and how an install is verified
-// against two independent readers.
+// against two independent readers; see service_windows.go for the SCM's, whose
+// two readers are the registry and the SCM itself.
+//
+// Three more identifiers are platform-provided, and they exist because a
+// message that names the wrong mechanism is a message that sends a user
+// somewhere that does not exist:
+//
+//	serviceName         what the user sees the job called
+//	serviceInstallHint  the command that installs it here
+//	serviceFollowHint   how to tail a growing log file here
+//
+// Each platform file defines all three. serviceLabel below is launchd's own
+// and stays launchd's own.
 func newServiceCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "service",
@@ -67,9 +79,10 @@ const (
 	// route, or a captive portal is up. launchd has no way to express "restart
 	// unless the exit code was 5", so the honest compromise is to keep the
 	// retry loop cheap enough to leave running and loud enough to find in the
-	// log. The Windows service mechanism (Plan 5 Task 3) needs the identical
-	// reasoning for its own recovery-action delay, which is why this constant
-	// and its comment live here rather than in service_darwin.go.
+	// log. The Windows service mechanism needs the identical reasoning for its
+	// own recovery-action delay — see serviceRecoveryActions in
+	// service_windows.go, which uses this constant — which is why it and this
+	// comment live here rather than in service_darwin.go.
 	serviceThrottle = 30
 )
 
@@ -115,9 +128,23 @@ func (s serviceScope) kind() string {
 
 // requireRoot turns "you need sudo" into exit code 4 rather than a launchctl
 // permission error the user has to decode.
+//
+// The sentence differs by mechanism because the privileged operation does.
+// launchd needs root to write into /Library/LaunchDaemons and bootstrap into
+// the system domain; the SCM needs an elevated token before it will accept
+// CreateService, Start or Delete, and there is no sudo on Windows to re-run
+// with. Advice that cannot be followed is worse than no advice, so the two are
+// not merged into one string.
 func requireRoot(s serviceScope, verb string) error {
 	if !s.system || s.layout.Elevated {
 		return nil
+	}
+	if s.mech == winService {
+		return codedError{
+			code: ExitNeedRoot,
+			err: fmt.Errorf("service %s --system creates a LocalSystem service, which the service control manager refuses to an unelevated token: re-run from an Administrator prompt",
+				verb),
+		}
 	}
 	return codedError{
 		code: ExitNeedRoot,
@@ -318,6 +345,20 @@ func serviceStatus(ctx context.Context, g *globals, system, pinned bool) error {
 	found := false
 	running := false
 
+	// unsure collects the mechanisms that could not be consulted at all.
+	//
+	// It is kept apart from found/running because "I could not look" is a
+	// different answer from "I looked and it is not there", and reporting the
+	// second when the first is true is the defect class this tree has already
+	// paid for twice: a ProcessStart that read a failed lookup as "the process
+	// is dead" would have had Replay tear down a running user's network, and an
+	// envCtl.Get that read a failed read as "unset" would have deleted a
+	// pre-existing HTTPS_PROXY. Nothing ever lands here on darwin — launchctl's
+	// failure IS the answer, as serviceStateOf explains — but it does on
+	// Windows, where the SCM refuses a connection to an unelevated caller while
+	// the registry still says plainly whether the service exists.
+	var unsure []error
+
 	for _, sys := range scopes {
 		s, err := g.serviceScopeFor(sys)
 		if err != nil {
@@ -328,17 +369,28 @@ func serviceStatus(ctx context.Context, g *globals, system, pinned bool) error {
 			}
 			return err
 		}
-		f, r := statusMechanism(ctx, g, s)
+		f, r, cannotTell := statusMechanism(ctx, g, s)
 		found = found || f
 		running = running || r
+		if cannotTell != nil {
+			unsure = append(unsure, cannotTell)
+		}
 	}
 
 	if !found {
-		fmt.Fprintf(g.env.Stdout, "%s is not installed\n", serviceLabel)
-		fmt.Fprintf(g.env.Stdout, "  install it with `dpb service install`\n")
+		if len(unsure) > 0 {
+			return fmt.Errorf("service status: cannot tell whether %s is installed: %w",
+				serviceName, errors.Join(unsure...))
+		}
+		fmt.Fprintf(g.env.Stdout, "%s is not installed\n", serviceName)
+		fmt.Fprintf(g.env.Stdout, "  install it with `%s`\n", serviceInstallHint)
 		return errors.New("service status: not installed")
 	}
 	if !running {
+		if len(unsure) > 0 {
+			return fmt.Errorf("service status: %s is installed, but whether it is running could not be determined: %w",
+				serviceName, errors.Join(unsure...))
+		}
 		return errors.New("service status: installed but not running")
 	}
 	return nil
@@ -373,6 +425,21 @@ func newServiceLogsCmd(g *globals) *cobra.Command {
 
 // serviceLogs needs no platform call: whatever mechanism produced s.outLog
 // and s.errLog, reading their tails back is the same file I/O regardless.
+//
+// What is NOT the same is who wrote them, and the difference changes how the
+// output should be read. launchd redirects a job's stdout and stderr into these
+// two paths itself, from the StandardOutPath and StandardErrorPath keys
+// service_darwin.go puts in the plist, so the files exist from the job's first
+// write no matter what the job does. The Windows SCM has no equivalent key and
+// gives a service no console and no parent to inherit handles from, so there
+// the service process redirects its OWN os.Stdout and os.Stderr into the same
+// two files as its first act (svcrun_windows.go). Two consequences follow on
+// Windows only: anything the service manages to write before that redirect —
+// a failure to resolve the log directory, most of all — has nowhere to go and
+// is lost, and the streams are ordinary buffered file writes, so a service the
+// SCM kills leaves the tail of them unwritten. The NDJSON event log beside
+// them (events.ndjson, written through internal/emit) is the record to trust
+// when the two disagree.
 func serviceLogs(g *globals, system bool, lines int) error {
 	if lines <= 0 {
 		return usagef("service logs: --lines must be positive, got %d", lines)
@@ -401,7 +468,7 @@ func serviceLogs(g *globals, system bool, lines int) error {
 		}
 		fmt.Fprintln(w, out)
 	}
-	fmt.Fprintf(w, "\nfollow with: tail -f %s\n", s.errLog)
+	fmt.Fprintf(w, "\n%s\n", serviceFollowHint(s.errLog))
 	return nil
 }
 
