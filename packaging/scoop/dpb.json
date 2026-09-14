@@ -1,0 +1,59 @@
+{
+  "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
+  "##": [
+    "This is the source copy. The bucket Scoop actually reads from is",
+    "mumudevx/scoop-dpb (`scoop bucket add dpb https://github.com/mumudevx/scoop-dpb`,",
+    "then `scoop install dpb`); this file is checked in here so the manifest is",
+    "version-controlled with the code that produces the archives it points at,",
+    "the same reasoning Formula/dpb.rb gives for keeping a copy in-repo.",
+    "",
+    "URLs use the GitHub REPOSITORY slug, dpi-bypass-mac, not the Go module path",
+    "github.com/mumudevx/dpb -- the module was never renamed to match the repo.",
+    "Confirmed against .goreleaser.yaml's release.github block (owner: mumudevx,",
+    "name: dpi-bypass-mac). Getting this wrong is not hypothetical: it already",
+    "produced one real `brew install` 404 in this project.",
+    "",
+    "version/url below match the v0.1.0 tag; the two `hash` values are 64-zero",
+    "placeholders, not real checksums -- no windows_amd64.zip / windows_arm64.zip",
+    "has actually been published under that tag yet. Before this manifest is",
+    "pushed to mumudevx/scoop-dpb for a real cut: bump `version`, drop the",
+    "-SNAPSHOT-<commit> suffix goreleaser adds outside of a real tag build, and",
+    "replace both `hash` values with the sha256 lines from that release's",
+    "checksums.txt (`https://github.com/mumudevx/dpi-bypass-mac/releases/download/v<version>/checksums.txt`) --",
+    "same source Formula/dpb.rb's header points at for the macOS side.",
+    "",
+    "dpb.exe is unsigned. Scoop does not suppress SmartScreen for an unsigned",
+    "binary any more than a direct download does; see README.md's Windows",
+    "section for what the warning looks like and how to proceed."
+  ],
+  "version": "0.1.0",
+  "description": "DPI bypass for Windows and macOS: connects plain first, desyncs only on evidence",
+  "homepage": "https://github.com/mumudevx/dpi-bypass-mac",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/dpb_0.1.0_windows_amd64.zip",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "arm64": {
+      "url": "https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/dpb_0.1.0_windows_arm64.zip",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "bin": "dpb.exe",
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/mumudevx/dpi-bypass-mac/releases/download/v$version/dpb_$version_windows_amd64.zip"
+      },
+      "arm64": {
+        "url": "https://github.com/mumudevx/dpi-bypass-mac/releases/download/v$version/dpb_$version_windows_arm64.zip"
+      }
+    },
+    "hash": {
+      "url": "$baseurl/checksums.txt"
+    }
+  },
+  "notes": "dpb.exe is not code-signed. Windows SmartScreen will still warn on first run -- verify the SHA256 against that release's checksums.txt before running it, the same check README.md asks for on a direct download."
+}

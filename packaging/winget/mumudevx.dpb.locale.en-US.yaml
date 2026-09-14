@@ -1,0 +1,37 @@
+# Winget default-locale manifest for dpb.
+#
+# See mumudevx.dpb.yaml for how this manifest set is meant to be used and
+# submitted (it is not submitted from here -- see that file and the task
+# report). ShortDescription intentionally mirrors README.md's own framing
+# ("It is not a VPN") rather than a generic marketing line, so a winget search
+# result does not overclaim what the tool does.
+PackageIdentifier: mumudevx.dpb
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: mumudevx
+PublisherUrl: https://github.com/mumudevx
+PublisherSupportUrl: https://github.com/mumudevx/dpi-bypass-mac/issues
+PackageName: dpb
+PackageUrl: https://github.com/mumudevx/dpi-bypass-mac
+License: MIT
+LicenseUrl: https://github.com/mumudevx/dpi-bypass-mac/blob/main/LICENSE
+ShortDescription: DPI bypass for Windows and macOS, not a VPN -- connects plain first, desyncs only on evidence
+Description: >-
+  dpb gets past passive SNI inspection of the TLS ClientHello and DNS
+  poisoning, the two censorship techniques actually measured on a Turk Telekom
+  line. It runs a local proxy, reframes the first ClientHello record so the
+  hostname is not complete inside the record a middlebox inspects, and
+  resolves names over its own encrypted DNS chain. It connects with no desync
+  first and escalates only when a connection is reset or closed before any
+  server byte arrives, because every desync technique measured that bypassed
+  the block also broke some other, unrelated site. It adds no encryption and
+  no anonymity beyond what HTTPS already gives you.
+Moniker: dpb
+Tags:
+  - dpi
+  - censorship-circumvention
+  - proxy
+  - networking
+  - tls
+ManifestType: defaultLocale
+ManifestVersion: 1.28.0

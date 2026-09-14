@@ -110,6 +110,33 @@ Get-FileHash dpb_<version>_windows_amd64.zip -Algorithm SHA256
 The printed hash has to match the line for that file in `checksums.txt`. If it
 does not, do not run the binary — re-download it.
 
+**Scoop.**
+
+```powershell
+scoop bucket add dpb https://github.com/mumudevx/scoop-dpb
+scoop install dpb
+```
+
+`packaging/scoop/dpb.json` in this repository is the source manifest — kept
+version-controlled with the code that produces the archive it points at, the
+same reasoning `Formula/dpb.rb` gives for the macOS side. The
+`mumudevx/scoop-dpb` bucket it is meant to be published to does not exist yet,
+so the two commands above do not install anything today. Scoop does not
+suppress SmartScreen for an unsigned binary; see below.
+
+**Winget.**
+
+```powershell
+winget install mumudevx.dpb
+```
+
+The manifest set lives at `packaging/winget/`, written against the zip
+archive for both `x64` and `arm64`. It has not been submitted to
+`microsoft/winget-pkgs` — that is a pull request against someone else's
+repository, a deliberate step this project has not taken — so
+`winget install mumudevx.dpb` finds nothing until it does. Winget does not
+suppress SmartScreen for an unsigned binary either.
+
 **SmartScreen.** `dpb.exe` is not code-signed. There is no Apple-Developer
 equivalent in this project's release pipeline on macOS either — see
 `.goreleaser.yaml`'s header — and Windows has no back door around it: the
