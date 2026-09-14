@@ -113,6 +113,72 @@ func (h userHive) path(sub string) string { return h.prefix + sub }
 // send someone to the wrong hive with regedit open.
 func (h userHive) label(sub string) string { return h.name + `\` + sub }
 
+// sid is the SID this hive is addressed by, or "" for CURRENT_USER.
+func (h userHive) sid() string { return strings.TrimSuffix(h.prefix, `\`) }
+
+// requireLoaded re-proves that the hive this value names is still loaded.
+//
+// # Why a pinned hive is not enough
+//
+// resolveUserHive probes HKEY_USERS\<SID> once, before returning, and its
+// comment explains what that probe is for: registry.CreateKey MATERIALISES
+// every missing key in the path it is given, so without the probe a write
+// aimed at `HKU\<SID>\Software\...` would invent the <SID> root itself and
+// every subsequent write would succeed into a phantom hive nothing reads.
+//
+// The probe is a point-in-time answer, and (p *port).userHive PINS the result
+// for the rest of the port's life — deliberately, so that a capture and its
+// revert always address the same hive. That pinning comment used to promise
+// that a hive which unloads in between "makes the HKU\<SID> path fail to open
+// — a loud error on the revert". That was true of every OpenKey reader in this
+// package and FALSE of its two CreateKey writers, which would have re-created
+// the whole branch instead:
+//
+//	an elevated admin plus a separate signed-in user; dpb applies proxy mode;
+//	the user signs out or fast-user-switches, unloading their hive; Ctrl-C
+//	teardown calls Restore, which re-creates HKU\<SID>\...\Internet Settings
+//	as a phantom key, writes ProxyEnable=0 into it, and reports a clean revert
+//	of a machine it did not touch.
+//
+// So every writer calls this first, and the promise the pinning comment makes
+// is now kept by code rather than by assumption.
+//
+// CURRENT_USER needs no probe: it is a predefined key the system keeps open
+// for this process's own token (see userHive), and it cannot go away while the
+// process that is asking still exists.
+func (h userHive) requireLoaded() error {
+	if h.isCurrentUser() {
+		return nil
+	}
+	// QUERY_VALUE only, the least access that proves existence — the same
+	// probe, spelled the same way, as resolveUserHive's.
+	root, err := registry.OpenKey(h.root, h.sid(), registry.QUERY_VALUE)
+	if err != nil {
+		return fmt.Errorf("netstate: %s is no longer a loaded registry hive, so nothing can be written to it "+
+			"(that user has signed out or switched away since dpb captured their settings): %w", h.name, err)
+	}
+	// Closed immediately for the reason resolveUserHive gives: this was an
+	// existence probe, not the handle the caller uses.
+	_ = root.Close()
+	return nil
+}
+
+// createKey opens a hive-relative subkey for writing, creating what is
+// missing — but only after requireLoaded has proved there is a hive to create
+// it in. It is the only way anything in this package may call
+// registry.CreateKey under a userHive; see requireLoaded for what a bare
+// CreateKey does to an unloaded hive.
+func (h userHive) createKey(sub string, access uint32) (registry.Key, error) {
+	if err := h.requireLoaded(); err != nil {
+		return 0, err
+	}
+	key, _, err := registry.CreateKey(h.root, h.path(sub), access)
+	if err != nil {
+		return 0, fmt.Errorf("netstate: open %s for writing: %w", h.label(sub), err)
+	}
+	return key, nil
+}
+
 // currentUserHive is the ordinary answer: this process's own HKCU.
 var currentUserHive = userHive{root: registry.CURRENT_USER, name: "HKCU"}
 
@@ -292,6 +358,11 @@ func HiveStatus() (label string, interactive bool, err error) {
 // into another person's hive. With the hive pinned, that machine state instead
 // makes the HKU\<SID> path fail to open — a loud error on the revert, which is
 // the honest outcome, rather than a quiet write to a stranger's account.
+//
+// "Fail to open" is a promise about the WRITERS as much as the readers, and it
+// is kept by userHive.requireLoaded, which every writer in this package goes
+// through: registry.CreateKey on its own would have re-created the unloaded
+// hive's whole branch instead of failing. See requireLoaded.
 //
 // A FAILURE is not pinned. A failed resolution aborts whatever operation asked
 // for it, so nothing has been done under a wrong assumption yet, and a

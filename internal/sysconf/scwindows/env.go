@@ -147,15 +147,17 @@ func (c envCtl) Set(_ context.Context, name, value string) error {
 	if err != nil {
 		return err
 	}
-	// CreateKey rather than OpenKey, matching proxy.go's openInternetSettings:
+	// Creating rather than opening, matching proxy.go's openInternetSettings:
 	// it opens the existing key on every real interactive session, and on the
 	// one where it is somehow absent this makes it rather than failing an
-	// Apply the user asked for. Safe to aim at another user's hive only
-	// because resolveUserHive has already proved that hive's root exists —
-	// otherwise this would invent the branch. See resolveUserHive.
-	key, _, err := registry.CreateKey(h.root, h.path(environmentKey), registry.SET_VALUE)
+	// Apply the user asked for. Through userHive.createKey, never
+	// registry.CreateKey directly: a bare CreateKey aimed at a hive that has
+	// unloaded since it was pinned would invent the HKU\<SID> root and every
+	// key under it, and report a successful write into a phantom hive. See
+	// requireLoaded in userhive.go.
+	key, err := h.createKey(environmentKey, registry.SET_VALUE)
 	if err != nil {
-		return fmt.Errorf("netstate: open %s for writing: %w", h.label(environmentKey), err)
+		return err
 	}
 	defer key.Close()
 

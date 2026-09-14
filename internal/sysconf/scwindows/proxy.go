@@ -1263,21 +1263,20 @@ func proxyWants(p sysport.ProxySettings, kind sysport.ProxyKind) bool {
 	return false
 }
 
-// openInternetSettings opens the key for reading and writing. CreateKey rather
-// than OpenKey: it opens the existing key on every real Windows install, and
+// openInternetSettings opens the key for reading and writing. Creating rather
+// than opening: it opens the existing key on every real Windows install, and
 // on the one where the key is somehow absent it makes it rather than failing a
 // revert the user needs.
 //
-// CreateKey is safe to point at a hive that is not this process's own only
-// because resolveUserHive has already proved the HKEY_USERS\<SID> root exists;
-// without that probe this call would cheerfully invent the whole branch under
-// a SID nobody is logged in as. See resolveUserHive.
+// It goes through userHive.createKey rather than calling registry.CreateKey
+// directly, and that is not a style preference. CreateKey materialises every
+// missing key in the path it is given, INCLUDING the HKU\<SID> root itself, so
+// aimed at a hive that has unloaded since it was pinned it would invent a
+// phantom branch and report a successful write into a registry nothing reads —
+// the exact silent success userhive.go exists to prevent, arrived at from the
+// writers' side. createKey re-probes the root first; see requireLoaded.
 func (h userHive) openInternetSettings() (registry.Key, error) {
-	key, _, err := registry.CreateKey(h.root, h.path(internetSettingsKey), registry.QUERY_VALUE|registry.SET_VALUE)
-	if err != nil {
-		return 0, fmt.Errorf("netstate: open %s for writing: %w", h.label(internetSettingsKey), err)
-	}
-	return key, nil
+	return h.createKey(internetSettingsKey, registry.QUERY_VALUE|registry.SET_VALUE)
 }
 
 // regString reads a REG_SZ value, reading absence as "".
