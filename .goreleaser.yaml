@@ -163,8 +163,17 @@ brews:
     # release workflow sets this to false once it has seen the token.
     skip_upload: '{{ if index .Env "GORELEASER_SKIP_BREW" }}{{ .Env.GORELEASER_SKIP_BREW }}{{ else }}true{{ end }}'
     directory: Formula
-    homepage: "https://github.com/mumudevx/dpb"
-    description: "macOS DPI bypass: connects plain first, desyncs only on evidence"
+    # The GitHub REPOSITORY slug, dpi-bypass-mac, not the Go module path
+    # github.com/mumudevx/dpb — the module was never renamed to match the repo.
+    # This field is copied verbatim into the GENERATED tap formula, so the
+    # module path here meant `brew home dpb` opened a 404 and `brew audit`
+    # flagged the formula. Not hypothetical: the same confusion already shipped
+    # a `brew install` that 404'd. Formula/dpb.rb and everything under
+    # packaging/ already use the slug; this line was the last one that did not.
+    homepage: "https://github.com/mumudevx/dpi-bypass-mac"
+    # Windows and macOS, matching packaging/scoop/dpb.json and the winget
+    # locale manifest. It was macOS-only when this file was written.
+    description: "DPI bypass for Windows and macOS: connects plain first, desyncs only on evidence"
     license: "MIT"
     commit_author:
       name: goreleaser
