@@ -119,6 +119,47 @@ func (o *routeOp) Apply(ctx context.Context, e Env) error {
 // the delete anyway would remove their route, not ours.
 func (o *routeOp) mutated() bool { return o.added }
 
+// canAdopt is TRUE, and routeOp is the only Op in this package for which it is.
+// It is spelled out rather than left to canAdopt()'s default because on Windows
+// the default is load bearing, and an invisible default is not a decision the
+// next person can find.
+//
+// proxyOp, dnsOp, pacFileOp and launchEnvOp all return false: the only way
+// their Verify can pass before Apply is by finding OUR OWN settings already in
+// place, which means a previous run was SIGKILLed, and adopting that residue
+// would make it permanent. A route is the other case. A row already in the
+// kernel routing table with our destination, our interface, our next hop and
+// our scope is state the machine had before we arrived; the honest answer is to
+// touch it once (to read it) and never again.
+//
+// Two concrete things depend on that, and they are different:
+//
+//   - macOS: a coexisting VPN's `-ifscope` default. Adoption is what stops
+//     Ctrl-C from deleting it — Record.Adopted, honoured by Manager.UndoAll.
+//
+//   - Windows: the uplink default tunfe installs before the capture routes
+//     (front/tunfe/stack.go, BringUp). Windows has no RTF_IFSCOPE, so there is
+//     no second row to create — the "scoped" default IS the machine's own
+//     default. sysconf/scwindows/rib.go defines RouteEntry.Scoped as "this row
+//     has a next hop", and sysconf/scwindows/facts.go reads Facts.Uplink and
+//     Facts.Gateway out of that very row (`f.Uplink, f.Gateway = def.Iface,
+//     def.Gateway`), which is what cliapp then puts in Capture.Uplink and
+//     Capture.Gateway. So the RouteSpec tunfe asks for and the row matchRoute
+//     finds are THE SAME ROW: Verify passes before Apply, the Op is adopted,
+//     CreateIpForwardEntry2 is never called, and teardown deletes nothing.
+//     Windows' ERROR_OBJECT_ALREADY_EXISTS is not reached on that path at all.
+//
+// What this does NOT do is swallow the other collision, and the discriminator
+// is matchRoute rather than anything written here. matchRoute compares
+// destination AND interface AND next hop AND Scoped, so a capture route that
+// collides with somebody else's route — a coexisting tunnel's 0.0.0.0/1, a
+// stale row on a reused adapter with a next hop ours does not have — does not
+// match on those four, is NOT adopted, and goes to Apply. The Add then fails,
+// mutated() stays false, and Manager.rollback issues no delete. That is exactly
+// what Plan 3 made ERROR_OBJECT_ALREADY_EXISTS an error for (see
+// sysconf/scwindows/route.go, routeCtl.Add), and it is untouched.
+func (o *routeOp) canAdopt() bool { return true }
+
 func (o *routeOp) Verify(ctx context.Context, e Env) error {
 	rs, err := o.routes(e)
 	if err != nil {

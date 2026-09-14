@@ -1,3 +1,13 @@
+//go:build darwin
+
+// This file tests validateTunName's macOS rule specifically — utun/utunN
+// against real Mac interface names (en0, lo0, awdl0, bridge0, gif0) — so it
+// is tagged darwin rather than left portable or tagged !windows: since
+// tunname_darwin.go and tunname_windows.go each define their own
+// validateTunName with a different rule, a table built from macOS interface
+// names would assert nothing meaningful about the Windows one. See
+// tunname_windows_test.go for the Windows rule's own table.
+
 package cliapp
 
 import (

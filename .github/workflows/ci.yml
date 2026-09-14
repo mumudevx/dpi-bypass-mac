@@ -51,17 +51,29 @@ jobs:
       - name: vet
         run: go vet ./...
 
-      # Cross-compile check: 17 of 25 packages build for windows. The 8 that do
-      # not are blocked on later plans (netstate and imports need port_windows.go;
-      # scdarwin is darwin-tagged by design). The list widens as plans land.
+      # Cross-compile check: every package builds for windows except scdarwin.
+      # Plan 4 landed test-side constraints for internal/testnet (KillFuzz) and
+      # a real netwatch Source for windows, bringing all 25 packages into the
+      # cross-compile gate. A package added later is INCLUDED automatically and
+      # fails this step if it does not cross-compile, which is the point.
+      #
+      # The single exclusion:
+      #
+      #   internal/sysconf/scdarwin  is darwin-tagged by design and has no go
+      #     files for any other GOOS. `go build ./...` silently skips such a
+      #     package, but naming one explicitly is an error ("build constraints
+      #     exclude all Go files"), so an explicit list has to drop it.
       - name: cross-compile check (windows)
         run: |
-          GOOS=windows go build \
-            ./internal/buildinfo ./internal/config ./internal/emit ./internal/flow \
-            ./internal/front/proxyfe ./internal/httpmsg ./internal/observ ./internal/ops \
-            ./internal/paths ./internal/policy ./internal/probe ./internal/resolve \
-            ./internal/strategy ./internal/sysport ./internal/testcensor \
-            ./internal/testport ./internal/tlsmsg
+          pkgs=$(GOOS=windows go list ./... \
+            | grep -v -E '/internal/sysconf/scdarwin$')
+          GOOS=windows go build $pkgs
+
+      - name: cross-compile vet (windows)
+        run: |
+          pkgs=$(GOOS=windows go list ./... \
+            | grep -v -E '/internal/sysconf/scdarwin$')
+          GOOS=windows go vet $pkgs
 
       - name: test (race)
         run: go test ./... -race
