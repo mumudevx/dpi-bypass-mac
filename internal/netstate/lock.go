@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // LockInfo is the content of the run lock file. It records both the pid and the
@@ -137,7 +139,10 @@ func writeLockRecord(path string, info LockInfo) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("netstate: close lock %s: %w", name, err)
 	}
-	if err := os.Rename(name, path); err != nil {
+	// paths.ReplaceFile for the reason op_pacfile.go gives: on Windows a
+	// single-attempt rename over a destination a scanner has open fails, and a
+	// lock that could not be installed reads as "someone else holds it".
+	if err := paths.ReplaceFile(name, path); err != nil {
 		return fmt.Errorf("netstate: install lock %s: %w", path, err)
 	}
 	// Same reason the journal fsyncs its parent: fsyncing the file persists the

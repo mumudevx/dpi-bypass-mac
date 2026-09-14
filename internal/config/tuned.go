@@ -271,7 +271,11 @@ func (t Tuned) Save(path string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("config: close temp profile: %w", err)
 	}
-	if err := os.Rename(name, path); err != nil {
+	// paths.ReplaceFile, not os.Rename: `dpb tune` writes this file and the
+	// next run reads it, so on Windows a sharing violation from the scanner
+	// that just looked at the temp file is a tuning result silently discarded.
+	// See internal/paths/replace_windows.go.
+	if err := paths.ReplaceFile(name, path); err != nil {
 		return fmt.Errorf("config: install tuned profile: %w", err)
 	}
 	return nil

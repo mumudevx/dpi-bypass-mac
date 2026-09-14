@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 func init() { reviveByKind[OpPACFile] = revivePACFile }
@@ -110,7 +112,13 @@ func (o *pacFileOp) Apply(_ context.Context, _ Env) error {
 	if err := os.Chmod(name, 0o644); err != nil {
 		return fmt.Errorf("netstate: chmod temp PAC file %s: %w", name, err)
 	}
-	if err := os.Rename(name, o.path); err != nil {
+	// paths.ReplaceFile, not os.Rename: this is the mutation path. On Windows
+	// a rename over a destination that Defender or the search indexer opened
+	// the moment it saw the temp file created fails with a sharing violation,
+	// and here that is not a lost write — it is a PAC install or a revert that
+	// did not happen, leaving the system proxy pointing at content dpb does not
+	// think is there. See internal/paths/replace_windows.go.
+	if err := paths.ReplaceFile(name, o.path); err != nil {
 		return fmt.Errorf("netstate: install PAC file %s: %w", o.path, err)
 	}
 	// A rename is a directory operation: syncing the file's contents says

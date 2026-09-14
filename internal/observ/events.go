@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // Record is one line of the NDJSON event log.
@@ -165,12 +167,17 @@ func (e *EventLog) shift() error {
 	for i := e.opts.Keep - 1; i >= 1; i-- {
 		from := fmt.Sprintf("%s.%d", base, i)
 		to := fmt.Sprintf("%s.%d", base, i+1)
-		if err := os.Rename(from, to); err != nil && !os.IsNotExist(err) {
+		// paths.ReplaceFile, not os.Rename: rotation renames a file this
+		// process has just closed, which on Windows is exactly the moment
+		// Defender opens it. A missing generation still comes back
+		// immediately — see ReplaceFile on why ENOENT is not retried — so the
+		// IsNotExist tolerance below keeps working unchanged.
+		if err := paths.ReplaceFile(from, to); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("observ: rotate %s -> %s: %w", from, to, err)
 		}
 	}
 	to := base + ".1"
-	if err := os.Rename(base, to); err != nil && !os.IsNotExist(err) {
+	if err := paths.ReplaceFile(base, to); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("observ: rotate %s -> %s: %w", base, to, err)
 	}
 	if e.opts.Chown != nil {

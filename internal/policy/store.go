@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // Store is the durable verdict cache. MEASUREMENTS.md §5.2 requires both
@@ -118,7 +120,11 @@ func OpenStore(path string, now func() time.Time) (Store, error) {
 	}
 	var f storeFile
 	if err := json.Unmarshal(b, &f); err != nil || f.Version != storeVersion {
-		if rerr := os.Rename(path, path+".corrupt"); rerr != nil {
+		// Quarantining the unreadable file is best-effort either way, but on
+		// Windows the thing most likely to be holding it open is the scanner
+		// that looked at it when it was written, so one attempt is the wrong
+		// number here too.
+		if rerr := paths.ReplaceFile(path, path+".corrupt"); rerr != nil {
 			_ = os.Remove(path)
 		}
 		return s, nil
@@ -425,10 +431,11 @@ func writeFileAtomic(path string, b []byte) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("policy: close temp store: %w", err)
 	}
-	// replaceFile, not os.Rename: this store is flushed from every connection
-	// goroutine, and on Windows a rename over a destination another of them is
-	// mid-replacement of fails outright. See replace_windows.go.
-	if err := replaceFile(name, path); err != nil {
+	// paths.ReplaceFile, not os.Rename: this store is flushed from every
+	// connection goroutine, and on Windows a rename over a destination another
+	// of them is mid-replacement of fails outright. See
+	// internal/paths/replace_windows.go, which this failure is what measured.
+	if err := paths.ReplaceFile(name, path); err != nil {
 		return fmt.Errorf("policy: rename temp store: %w", err)
 	}
 	d, err := os.Open(dir)
