@@ -880,9 +880,9 @@ func (l *LadderRunner) now() time.Time {
 	return time.Now()
 }
 
-// measured turns "the clock did not move" into the smallest positive duration,
-// because those are not the same statement and RTTTracker.Observe is entitled
-// to reject only the second.
+// Measured turns "the clock did not move" into the smallest positive duration,
+// because those are not the same statement and a consumer that discards
+// non-positive samples is entitled to reject only the second.
 //
 // Go's monotonic clock on windows/amd64 reads the interrupt time out of
 // KUSER_SHARED_DATA, whose granularity is the system timer tick — 15.6 ms by
@@ -910,12 +910,27 @@ func (l *LadderRunner) now() time.Time {
 // anyway, so the magnitude only ever reaches the EWMA, where 1 ns and 0 are
 // indistinguishable. On darwin, where the monotonic clock is nanosecond-grained
 // and a real round trip is never zero, this is not reachable.
-func measured(d time.Duration) time.Duration {
+//
+// Exported because the ladder is not the only place that times a round trip
+// against this clock and then discards non-positive samples: internal/probe
+// does the same thing to every trial latency, and MEASUREMENTS.md §6 puts an
+// injected RST at ~22 ms — 1.4 ticks — so a sub-tick reset would drop out of
+// the median and take the RST-latency line off the report with it.
+//
+// It belongs at the MEASUREMENT site and nowhere else. A later `> 0` guard
+// cannot use it, because by then a zero is ambiguous: probe deliberately
+// passes 0 for a trial that failed before anything was dialled, and turning
+// THAT into 1 ns would invent a measurement that never happened.
+func Measured(d time.Duration) time.Duration {
 	if d == 0 {
 		return time.Nanosecond
 	}
 	return d
 }
+
+// measured is the package-local spelling of Measured, which the ladder and its
+// tests were written against.
+func measured(d time.Duration) time.Duration { return Measured(d) }
 
 func (l *LadderRunner) logf(format string, a ...any) {
 	if l.Logf != nil {

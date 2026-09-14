@@ -221,13 +221,13 @@ func RunTrial(ctx context.Context, s strategy.Strategy, t Target, round int, o T
 	start := o.now()
 	conn, err := o.Dial.DialTCP(ctx, t.Flow())
 	if err != nil {
-		return tr.fail(VerdictDialFail, err, o.now().Sub(start))
+		return tr.fail(VerdictDialFail, err, flow.Measured(o.now().Sub(start)))
 	}
 
 	tp, err := o.wrap(conn)
 	if err != nil {
 		conn.Close()
-		return tr.fail(VerdictLocalError, err, o.now().Sub(start))
+		return tr.fail(VerdictLocalError, err, flow.Measured(o.now().Sub(start)))
 	}
 	defer tp.Close()
 
@@ -235,7 +235,7 @@ func RunTrial(ctx context.Context, s strategy.Strategy, t Target, round int, o T
 	if tr.Peer.IsValid() && isSinkhole(tr.Peer.Addr(), o.sinkholes()) {
 		return tr.fail(VerdictBlockPage,
 			fmt.Errorf("probe: connected to the known sinkhole %s (MEASUREMENTS.md §2)", tr.Peer.Addr()),
-			o.now().Sub(start))
+			flow.Measured(o.now().Sub(start)))
 	}
 
 	if dl, ok := ctx.Deadline(); ok {
@@ -251,9 +251,10 @@ func RunTrial(ctx context.Context, s strategy.Strategy, t Target, round int, o T
 			// and be discarded from every denominator.
 			if errors.Is(err, net.ErrClosed) || flow.IsReset(err) {
 				return tr.fail(VerdictReset, fmt.Errorf("probe: connection gone before the handshake: %w", err),
-					o.now().Sub(start))
+					flow.Measured(o.now().Sub(start)))
 			}
-			return tr.fail(VerdictLocalError, fmt.Errorf("probe: set deadline: %w", err), o.now().Sub(start))
+			return tr.fail(VerdictLocalError, fmt.Errorf("probe: set deadline: %w", err),
+				flow.Measured(o.now().Sub(start)))
 		}
 	}
 
@@ -278,7 +279,13 @@ func RunTrial(ctx context.Context, s strategy.Strategy, t Target, round int, o T
 
 	tlsConn := tls.Client(dc, o.tlsConfig(t.Host))
 	hsErr := tlsConn.HandshakeContext(ctx)
-	tr.Latency = o.now().Sub(start)
+	// flow.Measured, at every site in this function that reads the clock: on
+	// windows/amd64 the monotonic clock ticks at 15.6 ms, so a trial that
+	// finished inside one tick measures as exactly 0 and every "> 0" guard
+	// below — fail's, resetLatencies', rank's — throws the sample away. §6 puts
+	// an injected RST at ~22 ms, so that is the common case for the one latency
+	// the report publishes, not a corner of it. See flow.Measured.
+	tr.Latency = flow.Measured(o.now().Sub(start))
 	tr.Segments = dc.segments
 	tr.SNIStart, tr.SNIEnd, tr.RecordEnd = dc.sniStart, dc.sniEnd, dc.recordEnd
 
@@ -296,6 +303,13 @@ func RunTrial(ctx context.Context, s strategy.Strategy, t Target, round int, o T
 	return tr
 }
 
+// fail records a verdict and, when one was taken, the latency.
+//
+// A zero d means "nothing was timed" — the callers that pass a literal 0 gave
+// up before the dial — and must stay unset rather than be recorded as an
+// instant answer. Every caller that DID read the clock passes the reading
+// through flow.Measured first, so a real sub-tick sample arrives here positive
+// and is kept; that is what makes this guard safe on a 15.6 ms clock.
 func (t Trial) fail(v Verdict, err error, d time.Duration) Trial {
 	t.Verdict = v
 	if err != nil {
