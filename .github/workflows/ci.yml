@@ -162,11 +162,20 @@ jobs:
       #
       # This one is NOT a divergence to be argued, it is a divergence being
       # removed, and it was the wrong one to have: this branch's own headline
-      # Windows failure was a concurrency failure (TestStoreIsConcurrencySafe,
-      # 400 flushes across 8 goroutines), and the Windows-only leaves added by
-      # plans 1-5 carry their own locks — the netstate store, the PAC server,
-      # the WinDivert reader loop. Without this flag a data race in code that
-      # only ever compiles on Windows cannot be caught anywhere, by anyone.
+      # Windows failure was a concurrency failure (internal/policy's
+      # TestStoreIsConcurrencySafe, 400 Flush() calls from 8 goroutines, 7 of
+      # them losing the write), and it was found by running the code rather
+      # than by reading it. Windows-only code has concurrency of its own —
+      # svcrun_windows.go hands the service handler's Body() across a channel
+      # from a goroutine — and shares the cross-platform locks around it, none
+      # of which any race detector had ever looked at on this GOOS.
+      #
+      # It earned itself on its first run, and not with a data race: -race also
+      # enables checkptr, which caught scwindows' rawAny test helper converting
+      # a 28-byte RawSockaddrInet pointer to a 112-byte *RawSockaddrAny and
+      # killed the package's test binary ("converted pointer straddles multiple
+      # allocations"). Nine call sites had been passing for as long as nothing
+      # instrumented the conversion.
       #
       # The runner supports it: -race needs cgo, and the windows-latest image
       # ships mingw-w64 gcc on PATH, so CGO_ENABLED defaults to 1. If that ever
