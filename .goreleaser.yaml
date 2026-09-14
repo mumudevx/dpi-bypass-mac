@@ -1,8 +1,8 @@
 # GoReleaser configuration for dpb.
 #
-# It builds darwin/arm64 (macOS only), and windows/arm64 + windows/amd64,
-# publishes a GitHub release with checksums, and updates the Homebrew formula
-# in mumudevx/homebrew-tap (darwin archives only).
+# It builds darwin/arm64 + darwin/amd64 (macOS only), and windows/arm64 +
+# windows/amd64, publishes a GitHub release with checksums, and updates the
+# Homebrew formula in mumudevx/homebrew-tap (darwin archives only).
 #
 # Three things are deliberately absent.
 #
@@ -22,11 +22,14 @@
 #      carries only com.apple.provenance, and `xattr -p com.apple.quarantine`
 #      answers "No such xattr".
 #
-#   3. No universal binary. There is only one darwin archive (arm64), so there
-#      is nothing for lipo to combine. Formula/dpb.rb's on_intel block does not
-#      want a second archive to glue in — it calls odie and refuses the
-#      install, because darwin/amd64 is excluded below on purpose, not because
-#      an archive is missing by accident.
+#   3. No universal binary. darwin/arm64 and darwin/amd64 ship as two separate
+#      archives, not one lipo-combined fat binary — that would need
+#      goreleaser's `universal_binaries:` block, which this file does not
+#      declare. Two single-arch archives is exactly what Formula/dpb.rb's
+#      on_arm/on_intel split (and the tap-generated formula's
+#      Hardware::CPU.arm? branch) already expect: brew fetches only the
+#      archive matching the running machine, so nobody notices the binary
+#      isn't fat.
 #
 # See docs/DOSSIER.md for the sources behind (1) and (2).
 
@@ -53,11 +56,17 @@ builds:
     goarch:
       - arm64
       - amd64
-    # darwin builds are arm64-only on purpose: this project ships for Apple
-    # Silicon only. Windows gets both arm64 (preview) and amd64. The ignore rule
-    # below preserves the darwin/arm64-only policy and is not an oversight.
-    ignore:
-      - { goos: darwin, goarch: amd64 }
+    # darwin used to build arm64 only, with amd64 excluded by an `ignore` rule
+    # here. That policy shipped a real crash on Intel: goreleaser's generated
+    # tap formula has no way to say "unsupported on this architecture" for a
+    # single-arch macOS build. It wraps the lone url in a bare
+    # `if Hardware::CPU.arm?` with no else, so closing that branch on a
+    # genuine Intel host doesn't decline the install — it fails with "formula
+    # requires at least a URL" and a Ruby backtrace, verified with a local tap
+    # and `brew tap-new`. No field under `brews:` (url_template, custom_block,
+    # dependencies) reaches into that template to add a fallback. Building
+    # darwin/amd64 gives the generated formula a real URL for both branches,
+    # so an Intel Mac gets an install instead of a crash.
     flags:
       - -trimpath
     # These are the variables internal/buildinfo reads; `dpb version` falls
