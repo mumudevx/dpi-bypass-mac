@@ -52,3 +52,51 @@ func TestDevtoolCaptureSysconfIsReachable(t *testing.T) {
 		t.Fatalf("`dpb devtool capture-sysconf` is not registered: %s", r.stderr)
 	}
 }
+
+// TestCaptureSysconfRefusesToRunWithoutAnOut pins the replacement for a
+// default that used to be internal/testwin/fixtures — i.e. inside whatever
+// checkout the developer was standing in. This command reads a machine's live
+// network configuration; writing that into a git working tree unless told
+// otherwise is how a corporate PAC URL gets committed by someone who only
+// meant to look at a routing table. scwindows redacts the contents
+// (capture.go's redaction comment), and this pins the other half: there is no
+// default destination at all, on any platform, so nothing is ever written
+// anywhere the operator did not name.
+//
+// The failure must also be the REQUIRED-FLAG failure and not the
+// platform-refusal one, which is why the message is checked: an unmet
+// requirement that happened to look like "windows only" would leave this
+// passing on darwin for the wrong reason.
+func TestCaptureSysconfRefusesToRunWithoutAnOut(t *testing.T) {
+	t.Parallel()
+	r := run(t, "devtool", "capture-sysconf")
+	if r.code == 0 {
+		t.Fatalf("exit code = 0; capture-sysconf must require --out\nstdout: %s", r.stdout)
+	}
+	if !strings.Contains(r.stderr, `required flag(s) "out" not set`) {
+		t.Errorf("stderr = %q, want cobra's unmet-required-flag message for --out", r.stderr)
+	}
+}
+
+// TestCaptureSysconfHelpStatesWhatItRedacts: the privacy behaviour is only
+// trustworthy if the person running the command can see it without reading
+// the source. Cobra prints Long for `--help`, so these are the claims that
+// must survive any future edit of that text — each one names a thing the
+// capture does NOT write out.
+func TestCaptureSysconfHelpStatesWhatItRedacts(t *testing.T) {
+	t.Parallel()
+	r := run(t, "devtool", "capture-sysconf", "--help")
+	if r.code != 0 {
+		t.Fatalf("exit code = %d\nstderr: %s", r.code, r.stderr)
+	}
+	for _, want := range []string{
+		"PRIVACY",
+		"auto-config (PAC) URL",
+		"documentation address",
+		"--out is required",
+	} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("capture-sysconf --help must state %q:\n%s", want, r.stdout)
+		}
+	}
+}

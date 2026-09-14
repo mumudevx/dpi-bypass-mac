@@ -1,8 +1,6 @@
 package cliapp
 
 import (
-	"path/filepath"
-
 	"github.com/spf13/cobra"
 )
 
@@ -11,16 +9,6 @@ import (
 // janitorcmd.go): a user never types this, but the project benefits from it
 // existing as a real subcommand rather than a script someone has to
 // remember lives outside the binary.
-//
-// defaultCaptureSysconfDir is relative to the CURRENT DIRECTORY, on purpose:
-// this is a command a developer runs from a checkout of this repository on a
-// real Windows machine, the same way `go test` and `gofmt -l cmd internal
-// tools` already assume a repo root working directory. A test that actually
-// executes capture-sysconf always overrides --out with a temporary
-// directory, so nothing under this default path is ever written by `go
-// test`.
-var defaultCaptureSysconfDir = filepath.Join("internal", "testwin", "fixtures")
-
 func newDevtoolCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "devtool",
@@ -44,10 +32,21 @@ func newDevtoolCmd(g *globals) *cobra.Command {
 // reads Win32 APIs that return STRUCTS, not text — MibIpForwardTable2 rows,
 // IpAdapterAddresses blocks, WINHTTP_CURRENT_USER_IE_PROXY_CONFIG — so there
 // is no CLI output to capture. This command captures the struct instead, as
-// JSON, into internal/testwin/fixtures. See
-// internal/sysconf/scwindows/capture.go for what is captured and why it
-// keeps more of each row than any production reader in this tree consumes
-// today.
+// JSON. See internal/sysconf/scwindows/capture.go for what is captured and
+// why it keeps more of each row than any production reader in this tree
+// consumes today.
+//
+// --out is REQUIRED and has no default. It used to default to
+// internal/testwin/fixtures, relative to the current directory, on the
+// reasoning that a developer runs this from a checkout — which is true and is
+// exactly the problem: the one command whose whole job is to read a machine's
+// live network configuration wrote its output into a git working tree by
+// default. Run on a managed laptop that is a corporate PAC URL and the
+// operator's own addresses, one `git add -A` away from a public commit.
+// scwindows redacts what identifies a network now, but the redaction and the
+// destination are two separate mistakes and only one of them is fixed by
+// redacting: a required flag means the operator says where the file lands, and
+// nothing lands in a checkout unless they typed the path.
 //
 // It only makes sense on a Windows host, because scwindows' three exported
 // Capture* functions are windows-tagged. runCaptureSysconf is therefore
@@ -64,6 +63,21 @@ func newCaptureSysconfCmd(g *globals) *cobra.Command {
 			"GetIpForwardTable2, GetAdaptersAddresses, WinHttpGetIEProxyConfigForCurrentUser —\n" +
 			"and writes what they returned as JSON under --out, so a future test can be\n" +
 			"written against a real machine's answer instead of an assumed one.\n\n" +
+			"PRIVACY. This reads the live network configuration of the machine it runs on,\n" +
+			"so the capture is redacted before it is written:\n\n" +
+			"  - the WinHTTP auto-config (PAC) URL, proxy and proxy-bypass strings are NOT\n" +
+			"    written. On a managed machine these name an employer's internal hosts and\n" +
+			"    domains. proxy.json records only WHICH of them were set, by field name.\n" +
+			"  - every IP address and route prefix is replaced by a documentation address\n" +
+			"    (RFC 5737 / RFC 3849) of the same family and category, keeping the prefix\n" +
+			"    length. A fixture still says \"default route, on-link route, link-local\n" +
+			"    address\"; it no longer says whose network.\n" +
+			"  - adapter friendly names and descriptions are KEPT, because they name\n" +
+			"    hardware rather than a network and a fixture without them is useless.\n" +
+			"    A VPN client's adapter description can still name its vendor, so read the\n" +
+			"    three files before committing them anywhere.\n\n" +
+			"--out is required and has no default: nothing is written into a git checkout\n" +
+			"unless you name a path inside one.\n\n" +
 			"It is implemented for Windows only; running it on any other platform refuses\n" +
 			"by name rather than silently doing nothing.",
 		Args: cobra.NoArgs,
@@ -71,7 +85,8 @@ func newCaptureSysconfCmd(g *globals) *cobra.Command {
 			return runCaptureSysconf(g.env.Stdout, outDir)
 		},
 	}
-	cmd.Flags().StringVar(&outDir, "out", defaultCaptureSysconfDir,
-		"directory to write routes.json, adapters.json and proxy.json into")
+	cmd.Flags().StringVar(&outDir, "out", "",
+		"directory to write routes.json, adapters.json and proxy.json into (required)")
+	_ = cmd.MarkFlagRequired("out")
 	return cmd
 }

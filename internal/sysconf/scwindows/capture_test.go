@@ -176,3 +176,118 @@ func TestCaptureProxyConfigNeverErrors(t *testing.T) {
 		t.Errorf("CapturedProxyConfig does not marshal to JSON: %v", err)
 	}
 }
+
+// TestRedactAddrStringKeepsCategoryAndLength pins capture.go's redaction
+// policy field by field, because the policy is the whole privacy guarantee:
+// what a fixture keeps is the category and the prefix length, what it loses is
+// which network. A row that came back unchanged from here would be a row that
+// names the machine the capture was taken on.
+func TestRedactAddrStringKeepsCategoryAndLength(t *testing.T) {
+	for _, c := range []struct {
+		in, want, why string
+	}{
+		{"0.0.0.0/0", "0.0.0.0/0", "the default route is a constant, not an identity"},
+		{"::/0", "::/0", "the same, for v6"},
+		{"127.0.0.0/8", "127.0.0.0/8", "loopback is a constant"},
+		{"::1", "::1", "loopback is a constant"},
+		{"192.168.1.0/24", "198.51.100.0/24", "an RFC 1918 LAN prefix keeps its length"},
+		{"10.0.0.0/8", "198.0.0.0/8", "a /8 stand-in is masked to its /8"},
+		{"192.168.1.1", "198.51.100.0", "a gateway address loses its identity"},
+		{"203.0.113.9", "198.51.100.0", "so does a public one"},
+		{"100.64.0.1", "198.51.100.0", "and a CGNAT one"},
+		{"169.254.1.2", "169.254.0.0", "link-local keeps its category"},
+		{"fe80::1234:5678:9abc:def0", "fe80::", "an EUI-64 interface id is device identity"},
+		{"fd12:3456:789a::1", "2001:db8::", "a ULA /48 is generated per site"},
+		{"2a01:358:4014:a00::3", "2001:db8::", "a global v6 address is an ISP allocation"},
+		{"224.0.0.251", "224.0.0.0", "multicast keeps its category"},
+		{"ff02::fb", "ff00::", "so does v6 multicast"},
+		{"", "", "an unreadable row's empty destination stays empty"},
+		{"not an address", "redacted", "a value that cannot be classified is not passed through"},
+	} {
+		if got := redactAddrString(c.in); got != c.want {
+			t.Errorf("redactAddrString(%q) = %q, want %q (%s)", c.in, got, c.want, c.why)
+		}
+	}
+}
+
+// TestRedactedProxyConfigDropsEveryStringAndNamesIt: the PAC URL is the field
+// this redaction exists for — on a managed laptop it names the employer — so
+// what must hold is that no part of it survives while the FACT that it was set
+// does, which is the part a test could ever want.
+func TestRedactedProxyConfigDropsEveryStringAndNamesIt(t *testing.T) {
+	got := CapturedProxyConfig{
+		Available:     true,
+		AutoDetect:    true,
+		AutoConfigURL: "http://wpad.corp.example/proxy.pac",
+		Proxy:         "http=proxy.corp.example:8080",
+		ProxyBypass:   "*.corp.example;<local>",
+	}.redacted()
+
+	if got.AutoConfigURL != "" || got.Proxy != "" || got.ProxyBypass != "" {
+		t.Errorf("a redacted capture still carries a proxy string: %+v", got)
+	}
+	if !got.Available || !got.AutoDetect {
+		t.Errorf("redaction must keep the non-identifying fields: %+v", got)
+	}
+	want := []string{"auto_config_url", "proxy", "proxy_bypass"}
+	if !reflect.DeepEqual(got.Redacted, want) {
+		t.Errorf("Redacted = %v, want %v", got.Redacted, want)
+	}
+
+	// A machine with nothing configured says so by naming nothing, rather than
+	// by naming fields that were empty anyway.
+	clean := CapturedProxyConfig{Available: true}.redacted()
+	if clean.Redacted != nil {
+		t.Errorf("Redacted = %v, want nil when no string was set", clean.Redacted)
+	}
+}
+
+// TestCaptureProxyConfigOnThisMachineIsRedacted closes the loop on the real
+// call: whatever WinHttpGetIEProxyConfigForCurrentUser returned on this
+// machine, what leaves the package carries no proxy string. On a CI runner
+// every string is empty anyway and this proves little; on a developer's
+// managed laptop it is the assertion that matters, and it is the same code
+// path in both places.
+func TestCaptureProxyConfigOnThisMachineIsRedacted(t *testing.T) {
+	got := CaptureProxyConfig()
+	if got.AutoConfigURL != "" || got.Proxy != "" || got.ProxyBypass != "" {
+		t.Errorf("CaptureProxyConfig returned an unredacted string: %+v", got)
+	}
+}
+
+// TestCaptureRoutesOnThisMachineIsRedacted: every destination and next hop
+// that left the package has to be a value redactAddrString can produce, which
+// is what "no row names this machine's network" means operationally. A real
+// table always has rows redaction touches (a default route's next hop, an
+// on-link LAN prefix), so this is not vacuous on any machine that has a
+// network — including the runner.
+func TestCaptureRoutesOnThisMachineIsRedacted(t *testing.T) {
+	routes, err := CaptureRoutes()
+	if err != nil {
+		t.Fatalf("CaptureRoutes: %v", err)
+	}
+	for _, r := range routes {
+		if got := redactAddrString(r.Destination); got != r.Destination {
+			t.Errorf("destination %q is not redacted (redacting it again gives %q)", r.Destination, got)
+		}
+		if got := redactAddrString(r.NextHop); got != r.NextHop {
+			t.Errorf("next hop %q is not redacted (redacting it again gives %q)", r.NextHop, got)
+		}
+	}
+}
+
+// TestCaptureAdaptersOnThisMachineIsRedacted is the same assertion for the
+// unicast addresses, which are the adapter fields that name a network.
+func TestCaptureAdaptersOnThisMachineIsRedacted(t *testing.T) {
+	adapters, err := CaptureAdapters()
+	if err != nil {
+		t.Fatalf("CaptureAdapters: %v", err)
+	}
+	for _, a := range adapters {
+		for _, addr := range a.UnicastAddresses {
+			if got := redactAddrString(addr); got != addr {
+				t.Errorf("adapter %q address %q is not redacted (got %q)", a.FriendlyName, addr, got)
+			}
+		}
+	}
+}

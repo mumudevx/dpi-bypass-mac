@@ -34,17 +34,3 @@ func TestCaptureSysconfWritesAllThreeFixtures(t *testing.T) {
 		}
 	}
 }
-
-// TestCaptureSysconfDefaultOutIsUnderTestwinFixtures pins the path
-// devtool.go documents: a developer who runs `dpb devtool capture-sysconf`
-// with no flags from a checkout of this repository gets fixtures under
-// internal/testwin/fixtures, matching the plan this command exists to carry
-// out. It is exercised through the flag's default value, not by actually
-// running the command with no --out (which would write into this package's
-// own directory under `go test`, exactly what every other test here avoids).
-func TestCaptureSysconfDefaultOutIsUnderTestwinFixtures(t *testing.T) {
-	want := filepath.Join("internal", "testwin", "fixtures")
-	if defaultCaptureSysconfDir != want {
-		t.Errorf("defaultCaptureSysconfDir = %q, want %q", defaultCaptureSysconfDir, want)
-	}
-}
