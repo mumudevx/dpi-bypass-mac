@@ -1,16 +1,79 @@
 # Windows measurements
 
-**No Windows measurement exists yet.** Nothing in this repository has run on a Windows machine.
+**No Windows measurement exists yet.** Nothing in this repository has run `dpb` on a Windows machine that is actually on a censored line. Everything below the protocol section is what a `windows-latest` CI runner in a datacentre revealed by running the *code* — real evidence about the Windows implementation, but not a ladder measurement; "What CI still cannot tell you" at the end of this document says exactly where that evidence stops.
 
-The ladder in `internal/config/embed/turkey.toml` was measured on **macOS** (Türk Telekom AS9121, Kayseri, 2026-09-02). Windows has a different TCP stack; those numbers do not transfer.
+The ladder in `internal/config/embed/turkey.toml` was measured on **macOS** (Türk Telekom AS9121, Kayseri, 2026-09-02, `docs/MEASUREMENTS.md`). Windows has a different TCP stack; those numbers do not transfer as-is — see "Why the macOS numbers do not transfer" below for what specifically is and is not at risk.
 
-## What would establish a Windows measurement
+Until a Windows measurement exists, every emitter choice on Windows is unverified. Use the first `-windows-preview` release as a release candidate, not a verified install. Read "Reporting a result" in the main README before filing an issue.
 
-- A Windows 11 machine on a live censored line (Türk Telekom or equivalent).
-- Running `dpb tune` on that machine to measure the same block and emitters.
-- The resulting ladder, stored and committed the same way the macOS numbers are.
+## The measurement protocol
 
-Until that happens, every emitter choice on Windows is unverified. Use the first `-windows-preview` release as a release candidate, not a verified install. Read "Reporting a result" in the main README before filing an issue.
+This is the exact procedure a measurement session follows once a Windows machine on a censored line exists, so that session is a matter of running these steps rather than re-deriving method from `docs/MEASUREMENTS.md` on the day. Every parameter below is copied from that file or from the code it drove — cited at each point — so the resulting numbers are *comparable* to the macOS ones, not merely produced the same way in spirit.
+
+### Setup
+
+- Windows 11, on a censored line — Türk Telekom AS9121 if it is available again, otherwise whatever ISP the session actually runs on, recorded plainly (§4 of `docs/MEASUREMENTS.md` already documents that Superonline, Vodafone, Turknet and every mobile network are unmeasured; a session on any of them is new evidence, not a repeat of the macOS one).
+- **Bridged, not NAT'd.** The Windows machine needs its own address on the censored line, not a translated address behind whatever host or router is doing NAT for it. `docs/MEASUREMENTS.md`'s numbers describe what the DPI does to a flow carrying a real address on that line; a NAT'd guest is measuring from behind an address something else already claimed. `docs/superpowers/specs/2026-09-07-windows-parity-design.md` §8 ("Test environment") already settled this for the same reason — a bridged UTM/Parallels VM on Apple Silicon, on the same physical line, is the reference layout.
+- Before measuring anything, confirm the line is the censored one it is assumed to be: the system resolver's answer for a known-blocked name must be the sinkhole (`dig discord.com` -> `195.175.254.2` or `2a01:358:4014:a00::3`, `resolve.DefaultSinkholes`; `docs/MEASUREMENTS.md` §2). If it answers with a real address instead, this is not the network the ladder was measured against and nothing below is comparable to it.
+
+### Commands
+
+The reps and cooldown below are not chosen for this document — they are the numbers `docs/MEASUREMENTS.md` already used, copied from where the code itself already records that fact:
+
+- `internal/probe/runner.go` defines `DefaultReps = 3`, commented **verbatim** as "the rep count MEASUREMENTS.md used throughout" — §3's 129 trials were 14 emitters x 3 targets x 3 reps, §3.2's 66 trials were run at 3 reps per cut position. The same file's `DefaultCooldown = 400 * time.Millisecond` is described as "anti-noise rather than anti-escalation": `docs/MEASUREMENTS.md` §6 measured the DPI as stateless between flows (15 back-to-back blocked attempts did not change the 16th's outcome), so the pause exists only to make each rep an independent sample of the network, not to dodge a penalty that was measured not to exist.
+- `internal/config/embed/turkey.toml`'s own `[prober]` block hardcodes the identical triple — `reps = 3`, `cooldown = "400ms"`, `concurrency = 4` — against the exact three hosts `docs/MEASUREMENTS.md` §1 confirmed blocked and the one control host from the same section. A session that runs `dpb tune` with no flags at all is already running `docs/MEASUREMENTS.md`'s own parameters, not a guess at them.
+
+**Per rung, with `dpb probe`.** One command per rung of the current `tr` ladder (`turkey.toml`'s four measured rungs), against each of the three confirmed-blocked hosts (`docs/MEASUREMENTS.md` §1):
+
+```
+dpb probe --host discord.com --addr <resolved-ip> --reps 3
+dpb probe --host discord.com --addr <resolved-ip> --reps 3 --strategy tlsfrag:pos=snimid
+dpb probe --host discord.com --addr <resolved-ip> --reps 3 --strategy chunk:size=12
+dpb probe --host discord.com --addr <resolved-ip> --reps 3 --strategy oob:pos=1
+```
+
+— repeated for `discord.gg` and `cdn.discordapp.com`. Resolve `<resolved-ip>` on the day of the session through a non-system resolver (`dig -p 1253 @77.88.8.8 discord.com`, `docs/MEASUREMENTS.md` §2), rather than reusing `162.159.128.233` from the macOS run: it is a Cloudflare anycast address, and there is no claim here that it is still the same one.
+
+`--reps 3` is passed explicitly rather than left at `dpb probe`'s own default of 5. That default exists for a different purpose — `internal/cliapp/probe.go`'s `probeCooldown` comment explains it as "five reps are five independent samples" for a quick spot-check — and 5 is not the number this comparison needs; 3 is.
+
+**The full sweep, with `dpb tune`:**
+
+```
+dpb tune --json --export
+```
+
+With no target arguments, this measures `turkey.toml`'s own seeded targets: the same three blocked hosts, `cloudflare.com` as the control, and the ten fragile Turkish banks and `.gov.tr` sites from `docs/MEASUREMENTS.md` §5 (`internal/cliapp/tune.go`'s `seedBlocked`/`seedControl`/`seedFragile`, whose own comment calls them measurements, "not a guess"). Its two defaults already land on the same numbers as the per-rung commands above, by two different routes: `--depth full` (the default) resolves `reps` to 3 (`probe.DepthReps(probe.DepthFull) == 3`, pinned by `internal/probe/candidates_test.go`), and `--cooldown` defaults directly to `probe.DefaultCooldown`, 400 ms. This is the closest single command to reproducing §5.1's two-axis compatibility matrix: bypass against the blocked set, safety against the fragile set and the control, scored together.
+
+Keep both outputs: the JSON is the full report, and `--export` prints the one pasteable line another session can verify independently — the artifact `docs/MEASUREMENTS.md`'s own numbers should have had from the start and did not, until code existed to produce one.
+
+### What would invalidate the result
+
+This is the most important section. `docs/MEASUREMENTS.md` §5.4 records losing an entire compatibility matrix to exactly this trap: the harness dialled by hostname, Go's resolver used the machine's *system* resolver, and the system resolver answered every blocked name with the ISP sinkhole (`195.175.254.2`). Every emitter that day was scored against a connection to the sinkhole, not to the origin — a result that reads as "nothing bypasses this DPI" while measuring nothing about the DPI at all. In that document's own words: "no desync strategy can help with that." `--addr` exists on `dpb probe` specifically because of this incident.
+
+The trap on Windows is the same trap, not a new one — and it is still live even though its original trigger, dialling by hostname straight through `net.Dial`, is no longer what `dpb probe`/`dpb tune` do. Both already resolve through `internal/resolve`'s own chain (`resolve.DefaultResolvers`, wired in as `probeChain` in `internal/cliapp/probe.go` and directly in `internal/cliapp/tune.go`) rather than the OS resolver — which is the fix §5.4's own conclusion demanded: "Every outbound dial in the implementation must resolve through the tool's own chain, never through the system resolver." What can still reintroduce the trap on a Windows session specifically:
+
+- **Sanity-checking a result with anything other than `dpb probe`/`dpb tune`.** `curl.exe`, `Invoke-WebRequest`, a browser, `Test-NetConnection` — every one of them uses Windows' own system resolver, the one already shown to answer blocked names with the sinkhole. A "manual" confirmation through any of them is not a confirmation; it is a repeat of §5.4's mistake with different tool names.
+- **Passing a bare hostname to `dpb probe` without `--addr`.** The resolve-chain path is a safety net, not a substitute for pinning: it depends on the DoH/DoT/alternate-port endpoints in `resolve.DefaultEndpoints()` all being reachable from wherever the session actually runs, which has never been verified from a Windows machine — a fresh install's own DNS-over-HTTPS setting, a corporate or ISP-injected resolver, or a VPN client's split-DNS could each interpose ahead of it. `--addr` removes the resolver from the picture entirely for that command, which is why `dpb probe --help`'s own long description already carries this warning, citing §5.4 by name.
+- **Trusting a PASS without checking what actually answered.** Before scoring any rung, confirm the dialled address is not `195.175.254.2` or `2a01:358:4014:a00::3` (`resolve.DefaultSinkholes`). A PASS against the sinkhole is not a PASS.
+- **A captive portal, or a VPN client silently owning the default route.** Worth confirming by hand on a fresh Windows install before trusting that traffic left over the censored line at all: `route print`'s IPv4 table should show the bridged adapter at the lowest metric, not a VPN adapter that quietly took over after boot.
+
+### Why the macOS numbers do not transfer
+
+`internal/config/embed/turkey.toml`'s ladder — `""` (plain), `tlsfrag:pos=snimid`, `chunk:size=12`, `oob:pos=1` — was measured on macOS (`docs/MEASUREMENTS.md`'s own title: "Türk Telekom (AS9121, Kayseri), 2026-09-02"). Every rung's number depends, to a different degree, on the TCP stack that produced it:
+
+- §3.4 already makes this point about a difference *within* one OS, and it applies with more force across two: "a chunk size is meaningless without the write geometry it was measured under. Quote a size only together with the segment budget, and never carry a size from one implementation to another." `chunk:size=12`'s 12 is a number about `internal/ops`'s 16-segment write cap (chosen to stay clear of XNU's `if_sndbyte_unsent` panic, §3.4) as much as it is a number about the DPI's parser. Windows' TCP stack paces, coalesces and segments outbound writes on its own schedule, with no XNU panic to cap around, so a boundary macOS places at byte `12 x N` is not guaranteed to land at the same place on the wire.
+- §3.2's record-split rule (`tlsfrag:pos=snimid`, cutting before the SNI ends within the first TLS record) is the more portable of the two mechanisms — it is a claim about TLS *record* boundaries, which `internal/tlsmsg` constructs identically regardless of OS, not about TCP segmentation (§3.1 already shows TCP framing is irrelevant to this rule even on macOS). That makes it the better candidate for transferring, not a confirmed transfer.
+- `oob:pos=1` depends on Winsock's urgent-data (MSG_OOB) handling, which has historically diverged from BSD's in exactly what a receiver sees and where. This rung was tuned against BSD's behaviour; nothing here has exercised Winsock's.
+
+None of this predicts the Windows numbers will be worse, better, or different in a particular direction — only that they are unmeasured, and unmeasured is the state a Windows session exists to fix, not to assume away as "it's the same TLS bytes, it should be the same result."
+
+### A `tr-windows` ladder is created only if measurement shows one is needed
+
+`turkey.toml`'s own comment states the rule this follows without needing a new one written for Windows, quoted verbatim: "docs/MEASUREMENTS.md 4 is explicit that Superonline, Vodafone, Turknet and every mobile network are unmeasured, and 3.4 shows efficacy is non-monotonic within one ISP on one day — which is why there is no turkey-superonline.toml and never will be. `dpb tune` running on the user's own line is the ISP-specific knowledge."
+
+The same ethic covers operating systems, not only ISPs: a `tr-windows` ladder is not created in advance of evidence that the `tr` ladder actually fails, or measurably underperforms, on Windows. If a Windows session's `dpb tune` output agrees with `turkey.toml` — the same rungs bypass, the same fragile hosts do or do not break — nothing changes: `turkey.toml` is already platform-free TOML (`docs/superpowers/specs/2026-09-07-windows-parity-design.md` §10: "`ladder = "tr"` resolves to the same four rungs on both systems") and it stays that way. A split gets discussed only once a measured divergence exists to discuss — the same bar §3.4's non-monotonicity finding already sets for a second ISP profile, applied here to a second platform instead.
+
+---
 
 ## What running the code for the first time revealed (2026-09-14, CI, not a ladder measurement)
 
