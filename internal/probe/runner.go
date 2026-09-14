@@ -27,11 +27,20 @@ type Progress struct {
 	ETA       time.Duration
 }
 
-// Defaults for a sweep. Each is traced rather than chosen: reps is the rep
-// count MEASUREMENTS.md used throughout, cooldown is anti-noise rather than
-// anti-escalation (§6 measures the DPI as stateless between flows, so 15
-// back-to-back attempts do not change the 16th), concurrency and budget are
-// the plan's.
+// Defaults for a sweep. Each is traced rather than chosen.
+//
+// reps is 3, the rep count of MEASUREMENTS.md's LARGEST sweeps: §3's 129
+// trials (14 emitters x 3 blocked targets x 3 reps) and §3.2's 66 trials at 3
+// reps per cut position. It is not "the rep count MEASUREMENTS.md used
+// throughout", which is what this comment used to claim and is not true —
+// §3.4's chunk curve ran at 5 and 3, and §5.1's two-axis matrix at 2. Anything
+// that reads this default as a guarantee of comparability against a specific
+// section has to check that section's own number; DepthReps' doc comment says
+// the same thing from the other side.
+//
+// cooldown is anti-noise rather than anti-escalation (§6 measures the DPI as
+// stateless between flows, so 15 back-to-back attempts do not change the
+// 16th). concurrency and budget are the plan's.
 const (
 	DefaultReps        = 3
 	DefaultConcurrency = 4

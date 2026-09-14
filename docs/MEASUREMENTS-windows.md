@@ -20,7 +20,7 @@ This is the exact procedure a measurement session follows once a Windows machine
 
 The reps and cooldown below are not chosen for this document — they are the numbers `docs/MEASUREMENTS.md` already used, copied from where the code itself already records that fact:
 
-- `internal/probe/runner.go` defines `DefaultReps = 3`, commented **verbatim** as "the rep count MEASUREMENTS.md used throughout" — §3's 129 trials were 14 emitters x 3 targets x 3 reps, §3.2's 66 trials were run at 3 reps per cut position. The same file's `DefaultCooldown = 400 * time.Millisecond` is described as "anti-noise rather than anti-escalation": `docs/MEASUREMENTS.md` §6 measured the DPI as stateless between flows (15 back-to-back blocked attempts did not change the 16th's outcome), so the pause exists only to make each rep an independent sample of the network, not to dodge a penalty that was measured not to exist.
+- `internal/probe/runner.go` defines `DefaultReps = 3`, and that 3 is traceable: §3's 129 trials were 14 emitters x 3 targets x 3 reps, and §3.2's 66 trials were run at 3 reps per cut position. (That comment used to call it "the rep count MEASUREMENTS.md used throughout", which overstated it — §3.4 ran at 5 and 3, §5.1 at 2 — and it now says which sweeps the 3 comes from. See the rep-count note under "The full sweep" below, because it is the one place this protocol's comparability claim depends on the number.) The same file's `DefaultCooldown = 400 * time.Millisecond` is described as "anti-noise rather than anti-escalation": `docs/MEASUREMENTS.md` §6 measured the DPI as stateless between flows (15 back-to-back blocked attempts did not change the 16th's outcome), so the pause exists only to make each rep an independent sample of the network, not to dodge a penalty that was measured not to exist.
 - `internal/config/embed/turkey.toml`'s own `[prober]` block hardcodes the identical triple — `reps = 3`, `cooldown = "400ms"`, `concurrency = 4` — against the exact three hosts `docs/MEASUREMENTS.md` §1 confirmed blocked and the one control host from the same section. A session that runs `dpb tune` with no flags at all is already running `docs/MEASUREMENTS.md`'s own parameters, not a guess at them.
 
 **Per rung, with `dpb probe`.** One command per rung of the current `tr` ladder (`turkey.toml`'s four measured rungs), against each of the three confirmed-blocked hosts (`docs/MEASUREMENTS.md` §1):
@@ -42,7 +42,11 @@ dpb probe --host discord.com --addr <resolved-ip> --reps 3 --strategy oob:pos=1
 dpb tune --json --export
 ```
 
-With no target arguments, this measures `turkey.toml`'s own seeded targets: the same three blocked hosts, `cloudflare.com` as the control, and the ten fragile Turkish banks and `.gov.tr` sites from `docs/MEASUREMENTS.md` §5 (`internal/cliapp/tune.go`'s `seedBlocked`/`seedControl`/`seedFragile`, whose own comment calls them measurements, "not a guess"). Its two defaults already land on the same numbers as the per-rung commands above, by two different routes: `--depth full` (the default) resolves `reps` to 3 (`probe.DepthReps(probe.DepthFull) == 3`, pinned by `internal/probe/candidates_test.go`), and `--cooldown` defaults directly to `probe.DefaultCooldown`, 400 ms. This is the closest single command to reproducing §5.1's two-axis compatibility matrix: bypass against the blocked set, safety against the fragile set and the control, scored together.
+With no target arguments, this measures `turkey.toml`'s own seeded targets: the same three blocked hosts, `cloudflare.com` as the control, and the ten fragile Turkish banks and `.gov.tr` sites from `docs/MEASUREMENTS.md` §5 (`internal/cliapp/tune.go`'s `seedBlocked`/`seedControl`/`seedFragile`, whose own comment calls them measurements, "not a guess"). Its two defaults already land on the same numbers as the per-rung commands above, by two different routes: `--depth full` (the default) resolves `reps` to 3 (`probe.DepthReps(probe.DepthFull) == 3`, pinned by `internal/probe/candidates_test.go`), and `--cooldown` defaults directly to `probe.DefaultCooldown`, 400 ms. This is the closest single command to §5.1's two-axis compatibility matrix — the same two axes, scored together: bypass against the blocked set, safety against the fragile set and the control.
+
+It is not a reproduction of §5.1, and the difference is the rep count. §5.1 ran **2 reps** each (`docs/MEASUREMENTS.md` §5.1: "3 blocked hosts, 10 fragile hosts, 4 ordinary controls, 2 reps each"), while `--depth full` resolves to 3. Three reps is the stronger sample, not the comparable one, and a stronger sample of the fragile axis is exactly where a difference would show: a bank that breaks 1 time in 20 at 2 reps is not the same observation as one that breaks 1 time in 30 at 3. For sampling that matches §5.1 exactly, pass it: `dpb tune --json --export --reps 2`. `--depth quick` also resolves to 2 reps but is NOT the way to get there, because quick narrows the swept candidate set as well (`internal/probe/candidates.go`'s `sweepSpecs`), which changes the matrix's rows rather than its samples.
+
+Either way the honest framing is "a fresh two-axis measurement on Windows, run the way §5.1 was run", not "§5.1 re-run". The same caveat applies to `probe.DefaultReps`' own comment, which until this branch called 3 "the rep count MEASUREMENTS.md used throughout": 3 is §3's and §3.2's number, 5 and 3 are §3.4's, and 2 is §5.1's.
 
 Keep both outputs: the JSON is the full report, and `--export` prints the one pasteable line another session can verify independently — the artifact `docs/MEASUREMENTS.md`'s own numbers should have had from the start and did not, until code existed to produce one.
 
@@ -330,6 +334,22 @@ teardown in the wrong order.
 
 Both are fixed at the measurement site: a sample the clock was too coarse to
 time now says "faster than this clock can see" rather than "no sample".
+
+The first landing of that fix reached one site — the RTT the relay ladder learns
+per destination — and left `dpb probe` on the wrong side of the same clock, which
+mattered more, because `probe` is step 1 of §2 below and is where a Windows
+operator meets this tool. Every trial latency was discarded when it read as
+zero, by `Trial.fail`, by the reset-latency median, and by the per-candidate
+ranking. §6 of MEASUREMENTS.md puts an injected RST at ~22 ms, which is 1.4
+ticks: a sub-tick reset therefore dropped out of the median, and when every
+reset in a run was sub-tick the `RST latency` line vanished from the report
+altogether — the one number that separates an injected reset from an origin
+that is simply down, silently absent on the platform whose clock caused it.
+`flow.Measured` is now exported and applied at all six of `RunTrial`'s clock
+reads, and a median that rounds to zero prints `<1ms (below this clock's
+resolution)` rather than `0s`. The `> 0` guards downstream stay, because a
+literal zero still has a meaning the fix must not erase: probe passes one
+deliberately for a trial that failed before anything was dialled.
 
 ### `dpb doctor` on Windows answers about the machine it runs on
 
