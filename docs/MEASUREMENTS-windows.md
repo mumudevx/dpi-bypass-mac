@@ -218,7 +218,9 @@ connection-table reader — `GetExtendedTcpTable`, which
 
 ## What the harness was actually reading (2026-09-14, third Windows run)
 
-27 failures became 2. The number is not the finding; what the remaining
+27 failures became 1, and 7 failing packages became 1: every package except
+`internal/sysconf/scwindows` is green on `windows-latest` for the first time.
+The number is not the finding; what the remaining
 Category 2 pass had to discover to get there is.
 
 ### The command tests were reading the runner, not the fixture
@@ -292,7 +294,7 @@ one entry, and is PROTECTED, which is the half that does the work.
 
 ### The bare-proxy disagreement is settled, and still not fixed
 
-`TestSetManualExpandsABareProxy` is the only failure left, and the git history
+`TestSetManualExpandsABareProxy` is the one failure left on the whole job, and the git history
 says which side is wrong. `23d165c` introduced the test; the later `e9ac983`
 introduced `proxyEntry.Bare` and a table case in the same file asserting the
 OPPOSITE shape for an input of the same form, because re-emitting an expanded
