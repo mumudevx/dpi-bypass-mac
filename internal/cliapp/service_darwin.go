@@ -45,16 +45,58 @@ import (
 // statusMechanism) and never touch launchctl, plutil or a plist path
 // themselves.
 
-// serviceName, serviceInstallHint and serviceFollowHint are the three
-// platform-provided strings service.go's comment lists. On darwin the job's
-// name IS the launchd label, `dpb service install` with no flag is the right
-// first thing to type, and tail(1) is the way to watch a file grow.
+// serviceName, serviceInstallHint, serviceFollowHint, serviceHelp and
+// serviceLogNote are the five platform-provided identifiers service.go's
+// comment lists. On darwin the job's name IS the launchd label, `dpb service
+// install` with no flag is the right first thing to type, and tail(1) is the
+// way to watch a file grow.
 const (
 	serviceName        = serviceLabel
 	serviceInstallHint = "dpb service install"
 )
 
 func serviceFollowHint(path string) string { return "follow with: tail -f " + path }
+
+// serviceHelp is launchd's vocabulary, unchanged: these strings were the
+// unconditional text in service.go before Windows gained two mechanisms of its
+// own, and they are correct here, which is why they read exactly as they did.
+var serviceHelp = serviceHelpText{
+	cmdShort: "Install, remove and inspect dpb as a launchd job",
+	cmdLong: "service manages dpb's launchd job.\n\n" +
+		"By default it installs a LaunchAgent in your own login session, which is the\n" +
+		"right choice for proxy mode: it needs no root, it starts when you log in, and\n" +
+		"the proxy environment variables it sets land in the session your applications\n" +
+		"actually run in.\n\n" +
+		"--system installs a LaunchDaemon instead. That needs root, and it is only the\n" +
+		"right choice when dpb must run before or without a login session.",
+	scopeFlag:    "act on the machine-wide LaunchDaemon instead of your login session's LaunchAgent",
+	installShort: "Write the launchd job and load it",
+	installLong: "install writes the property list, enables the job, and bootstraps it into\n" +
+		"launchd, then confirms launchd knows about it.\n\n" +
+		"Anything after `--` is appended to the `dpb run` command line the job runs.\n" +
+		"Those flags are parsed here, before the plist is written, so a typo is a\n" +
+		"usage error now rather than a job launchd respawns and kills forever.\n\n" +
+		"For scripts: --system writes into /Library/LaunchDaemons and bootstraps into\n" +
+		"launchd's system domain, so without root it stops before writing anything and\n" +
+		"returns exit 4. That code means \"re-run this with sudo\" and nothing else —\n" +
+		"`dpb tune` reports \"nothing is blocked here\" as exit 6, not 4, so a caller can\n" +
+		"branch on the two.",
+	installExample: "  dpb service install\n" +
+		"  dpb service install -- --profile turkey --port 8081\n" +
+		"  sudo dpb service install --system",
+	uninstallShort: "Unload the launchd job and delete its property list",
+	stopShort:      "Unload the job, leaving it installed",
+	stopLong: "stop boots the job out of launchd rather than signalling it. The job is\n" +
+		"configured to come back after an unclean exit, so a signal would only\n" +
+		"restart it; `dpb service start` loads it again.",
+}
+
+// serviceLogNote has nothing to add on darwin: launchd redirects the job's
+// stdout and stderr into the two paths `dpb service logs` prints, from the
+// plist keys servicePlist writes, so both mechanisms here really do produce
+// the files that command reads. See service.go's serviceLogs for the Windows
+// mechanism that does not.
+func serviceLogNote(serviceScope) string { return "" }
 
 // serviceScopeFor resolves the scope for this invocation.
 //

@@ -175,6 +175,15 @@ wireguard-windows runs its tunnel as SYSTEM and leaves the per-user
 configuration surface to a process in the user's own session, because SYSTEM
 cannot reach that session either.
 
+One consequence worth knowing before you go looking for a log file: a
+Scheduled Task action gets no console and no output redirection, so the logon
+task writes no `service.out.log` / `service.err.log` — only the `--system`
+service does, because that process redirects its own streams. `dpb service
+logs` says so, and the logon task's own record is Task Scheduler's:
+`schtasks /query /tn dpb /v` for the Last Run Result, and Event Viewer's
+**Microsoft > Windows > TaskScheduler > Operational** log for why a start was
+refused.
+
 **Uninstall.**
 
 ```powershell
@@ -186,9 +195,15 @@ task or service is gone:
 
 ```powershell
 dpb doctor                       # system proxy, proxy environment and journal checks
-netsh winhttp show proxy         # the machine-level WinHTTP proxy, by hand
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+                                 # the per-user proxy settings dpb actually writes
 reg query HKCU\Environment       # the per-user HTTP_PROXY / HTTPS_PROXY variables
 ```
+
+`netsh winhttp show proxy` is **not** the check to use here: it reports the
+machine-wide WinHTTP proxy, a different setting that dpb never touches. It
+prints "Direct access (no proxy server)" whether or not dpb's per-user proxy
+is live, so it can only mislead you in both directions.
 
 If you ran with `--tun`, also check that DNS and the routing table were
 restored — `ipconfig /all` for the resolvers, `route print` for the routes

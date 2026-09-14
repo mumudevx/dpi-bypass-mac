@@ -84,8 +84,9 @@ const (
 // the same source.
 const serviceRegKey = `SYSTEM\CurrentControlSet\Services\` + serviceName
 
-// serviceInstallHint and serviceFollowHint are two of the three
-// platform-provided strings service.go's header lists.
+// serviceInstallHint, serviceFollowHint, serviceHelp and serviceLogNote are
+// four of the five platform-provided identifiers service.go's header lists
+// (serviceName above is the fifth).
 //
 // The install hint carries --system because the plain form refuses here, and it
 // says "elevated" because requireRoot would otherwise be the first thing the
@@ -94,6 +95,76 @@ const serviceInstallHint = "dpb service install --system (from an Administrator 
 
 func serviceFollowHint(path string) string {
 	return "follow with: powershell -Command \"Get-Content -Wait -Tail 20 '" + path + "'\""
+}
+
+// serviceHelp is Windows' half of service.go's help text.
+//
+// Every string here has to describe TWO mechanisms, because that is what this
+// platform has: a logon Scheduled Task for the scope with no flag, and an SCM
+// service for --system. Help text is static, so it cannot resolve a scope the
+// way kind() does — it names both and says which is which, which is also the
+// distinction a user most needs before they type either one. The wording
+// follows the README's Windows section deliberately: a user who has read one
+// should not have to re-learn the split from the other.
+var serviceHelp = serviceHelpText{
+	cmdShort: "Install, remove and inspect dpb as a logon task or a Windows service",
+	cmdLong: "service manages dpb's background job, which on Windows is one of two\n" +
+		"mechanisms — they are not interchangeable.\n\n" +
+		"By default it installs a Scheduled Task with a logon trigger, running as YOU.\n" +
+		"That is the right choice for proxy mode and needs no Administrator: the proxy\n" +
+		"environment variables and Internet Settings it writes are per-user, and only a\n" +
+		"process inside your own logon can put them where your applications will read\n" +
+		"them.\n\n" +
+		"--system creates a LocalSystem service in the service control manager instead.\n" +
+		"That needs Administrator, and it is the right choice for --tun, which needs\n" +
+		"Administrator anyway for the wintun adapter and the route table. A LocalSystem\n" +
+		"service cannot write your HKCU hive, so it is NOT a way to run proxy mode.",
+	scopeFlag:    "act on the machine-wide LocalSystem service instead of your login session's Scheduled Task",
+	installShort: "Register the logon task (or, with --system, create the service) and start it",
+	installLong: "install registers the job, confirms it through two independent observers, and\n" +
+		"starts it.\n\n" +
+		"With no flag that is a Scheduled Task with a logon trigger, running as you: it\n" +
+		"is registered with schtasks, read back from the definition Task Scheduler\n" +
+		"persists, and started immediately — a logon trigger alone fires only at your\n" +
+		"NEXT logon, which would leave your proxy dark until then.\n\n" +
+		"Anything after `--` is appended to the `dpb run` command line the job runs.\n" +
+		"Those flags are parsed here, before anything is registered, so a typo is a\n" +
+		"usage error now rather than a job that fails at every logon.\n\n" +
+		"For scripts: --system creates a LocalSystem service, which the service control\n" +
+		"manager refuses to an unelevated token, so without Administrator it stops\n" +
+		"before touching anything and returns exit 4. That code means \"re-run this\n" +
+		"elevated\" and nothing else — `dpb tune` reports \"nothing is blocked here\" as\n" +
+		"exit 6, not 4, so a caller can branch on the two.",
+	installExample: "  dpb service install\n" +
+		"  dpb service install -- --profile turkey --port 8081\n" +
+		"  dpb service install --system   (from an Administrator prompt)",
+	uninstallShort: "Delete the logon task, or with --system the service",
+	stopShort:      "End the running job, leaving it installed",
+	stopLong: "stop ends the job's process and leaves the job itself registered, so the\n" +
+		"logon task still fires at your next logon and the service still starts at the\n" +
+		"next boot. `dpb service start` runs it again now; `dpb service uninstall` is\n" +
+		"what removes it.",
+}
+
+// serviceLogNote is why `dpb service logs` may have nothing to print here.
+//
+// The two files it reads are real for the SCM mechanism — svcrun_windows.go
+// redirects the service process's own os.Stdout and os.Stderr into them — and
+// are never written at all for the logon task, which has no console and no
+// redirect. Saying so is the whole point: without it the command answers "(no
+// such file — the job has not written to it yet)" twice for a task that is
+// running perfectly, and a tester reasonably concludes their install is
+// broken. See logonTaskRecordHint in service_task_windows.go for what the
+// logon task's record actually is, and why wrapping its action in `cmd /c` to
+// manufacture these files was declined.
+func serviceLogNote(s serviceScope) string {
+	if s.mech != winLogonTask {
+		return ""
+	}
+	return "Note: a Scheduled Task action gets no console and no output redirection, so\n" +
+		"the two files below are not written by this mechanism at all — only\n" +
+		"`dpb service install --system`'s service writes them (it redirects its own\n" +
+		"streams). This job's record is Task Scheduler's own:\n  " + logonTaskRecordHint
 }
 
 // Timings. The SCM is asynchronous everywhere: Start, Control and Delete all

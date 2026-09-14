@@ -54,7 +54,15 @@ import (
 //     definition as an XML file under %WINDIR%\System32\Tasks\<name>, written
 //     by the Task Scheduler service itself (not by dpb — see
 //     writeStagingXML), and readLogonTaskFile reads that file back and parses
-//     it as XML.
+//     it as XML. It is a STRENGTHENING observer, not a required one: that
+//     directory's ACL does not grant standard users read access — which is
+//     why `schtasks /query` exists for them at all — so on the unelevated
+//     path this mechanism is FOR, the read comes back "Access is denied" for
+//     a task that was created perfectly. When it answers, it is the only
+//     observer independent of the tool that wrote the task, and every field
+//     is checked against it. When it cannot answer, that is "I could not
+//     look" and nothing is undone over it; see service_task.go's
+//     taskFileState, where that decision lives so it can be tested.
 //   - Observer 2 is schtasks itself, asked again by EXIT STATUS ONLY.
 //     schtasks prints its result in the system UI language and there is no
 //     LC_ALL=C on Windows — the exact hazard this project already paid for on
@@ -73,7 +81,10 @@ import (
 // is answered a third way, through winProcessRunning: a CreateToolhelp32Snapshot
 // walk of the process list, which carries no text a locale can touch at all
 // (see that function's own comment for the API-verification this project
-// requires before a new Windows call is trusted).
+// requires before a new Windows call is trusted, and service_task.go's
+// winProcCounts for what one entry in that snapshot is allowed to prove —
+// starting with the fact that the process asking the question is itself
+// called dpb.exe).
 //
 // What is NOT attempted here: Task Scheduler's own <RestartOnFailure> element
 // (Interval/Count), even though the design notes for this port list it as the
@@ -106,9 +117,41 @@ const logonTaskName = serviceName
 // logonTaskDescription is what Task Scheduler's UI shows for the task. Unlike
 // serviceDescription it says nothing about administrator rights, because this
 // scope deliberately has none.
+//
+// It does not mention `dpb service logs`, and that is deliberate: see
+// logonTaskRecordHint for why this mechanism has no stdout log to print.
 const logonTaskDescription = "Runs dpb's DPI-bypass proxy in your login session, so its " +
 	"HTTP(S)_PROXY environment variables and WinINET settings land where your " +
-	"applications actually run. `dpb service logs` prints its output."
+	"applications actually run. Task Scheduler's own history for this task is " +
+	"where its starts and exit codes are recorded."
+
+// logonTaskRecordHint names where this mechanism's account of itself actually
+// lives, and it is NOT service.out.log / service.err.log.
+//
+// Those two files exist on Windows only because svcrun_windows.go redirects
+// os.Stdout and os.Stderr into them as the SCM service's first act — the SCM
+// gives a service no console and no parent to inherit handles from, so the
+// process has to create its own. A Task Scheduler action gets exactly the same
+// nothing and there is no equivalent redirect here, so nothing ever writes
+// those two paths in this scope. Printing them as "logs" made
+// `dpb service logs` answer "(no such file — the job has not written to it
+// yet)" forever, for a task that was running correctly.
+//
+// The honest record is Task Scheduler's, which keeps what a user actually
+// needs when a task will not start: the action's exit code (Last Run Result)
+// and the engine's own reason for refusing to start it.
+//
+// Two alternatives were weighed and declined. Wrapping the action in
+// `cmd /c "... >>log 2>&1"` would produce the advertised files, but it puts
+// cmd.exe between Task Scheduler and dpb: `schtasks /end` is documented to end
+// the task's process, and an orphaned dpb.exe still holding the user's proxy
+// with no supervisor is a far worse failure than a missing log file — and the
+// cmd quoting it needs could not be tested anywhere in this repository.
+// Pointing at events.ndjson would be the same defect in a new file: nothing in
+// this tree opens observ.EventLog yet, so that path does not exist either.
+const logonTaskRecordHint = "`schtasks /query /tn " + logonTaskName + " /v` shows its Last Run Result, and " +
+	"Event Viewer > Applications and Services Logs > Microsoft > Windows > TaskScheduler > Operational " +
+	"says why a start was refused"
 
 // logonInstallHint is this mechanism's own install command, distinct from
 // serviceInstallHint (which is specifically the SCM's --system, elevated
@@ -172,7 +215,8 @@ func installLogonTask(ctx context.Context, g *globals, s serviceScope, args []st
 	}
 
 	wantArgs := logonTaskArguments(runArgs)
-	if err := verifyLogonTask(ctx, run, exe, wantArgs); err != nil {
+	note, err := verifyLogonTask(ctx, run, exe, wantArgs)
+	if err != nil {
 		return rollbackLogonTask(ctx, run, fmt.Errorf("service install: %w", err))
 	}
 
@@ -186,8 +230,8 @@ func installLogonTask(ctx context.Context, g *globals, s serviceScope, args []st
 	}
 	if !running {
 		return rollbackLogonTask(ctx, run, fmt.Errorf(
-			"service install: %s is registered but did not start within %s; `dpb service logs` will say why",
-			logonTaskName, serviceStartWait))
+			"service install: %s is registered but did not start within %s; %s",
+			logonTaskName, serviceStartWait, logonTaskRecordHint))
 	}
 
 	w := g.env.Stdout
@@ -196,7 +240,10 @@ func installLogonTask(ctx context.Context, g *globals, s serviceScope, args []st
 	fmt.Fprintf(w, "  task     %s\n", file)
 	fmt.Fprintf(w, "  command  %s %s\n", exe, wantArgs)
 	fmt.Fprintf(w, "  account  %s\n", sid)
-	fmt.Fprintf(w, "  logs     %s\n           %s\n", s.outLog, s.errLog)
+	fmt.Fprintf(w, "  record   %s\n", logonTaskRecordHint)
+	if note != "" {
+		fmt.Fprintf(w, "  note     %s\n", note)
+	}
 	fmt.Fprintf(w, "\nIt starts at your next logon and is running now. `dpb service stop` ends it.\n")
 	return nil
 }
@@ -241,77 +288,160 @@ func writeStagingXML(doc string) (path string, cleanup func(), err error) {
 }
 
 // verifyLogonTask confirms a fresh registration through both observers named
-// in the package comment.
-func verifyLogonTask(ctx context.Context, run netstate.Runner, wantExe, wantArgs string) error {
-	def, found, err := readLogonTaskFile()
-	if err != nil {
-		return fmt.Errorf("the task was created but its definition could not be read back: %w", err)
-	}
-	if !found {
-		file, _ := logonTaskFile()
-		return fmt.Errorf("schtasks reported success but %s does not exist", file)
-	}
-	if def.command != wantExe {
-		return fmt.Errorf("the task's Command is %q, not the %q dpb asked for", def.command, wantExe)
-	}
-	if def.arguments != wantArgs {
-		return fmt.Errorf("the task's Arguments is %q, not the %q dpb asked for", def.arguments, wantArgs)
-	}
-	if !def.hasLogonTrigger {
-		return errors.New("the task has no LogonTrigger; it would never run at your next logon")
+// in the package comment, and returns the note describing which of them
+// actually answered (empty when the strong, file-based check ran).
+//
+// # What may and may not cost the user their install
+//
+// The caller is installLogonTask, and its response to an error here is
+// rollbackLogonTask: it DELETES the task. So the only errors this function is
+// allowed to return are ones that are evidence about the task itself.
+//
+//   - The definition was read and disagrees with what dpb asked for — a wrong
+//     Command, wrong Arguments, no LogonTrigger, or bytes that are not a task
+//     definition at all. That is a task that would not do the job, and
+//     removing it is right.
+//   - NO observer can find the task. Both looked (or one abstained and the
+//     other said "I do not know that name"), and there is nothing to keep.
+//
+// Everything else is "I could not look", and it must not be worth destroying a
+// good install over. The concrete case is not exotic, it is the DEFAULT one:
+// %WINDIR%\System32\Tasks is unreadable without Administrator, and this whole
+// mechanism exists to run proxy mode WITHOUT Administrator, so before this
+// distinction existed the supported install path deleted its own correct task
+// every single time and reported "the task was created but its definition
+// could not be read back: Access is denied (the task was removed again,
+// nothing is installed)".
+//
+// That statusLogonTask already handled the identical error correctly — it
+// falls through to the schtasks observer and reports the task — is what makes
+// this a defect rather than a policy: two verbs in one file disagreed about
+// what "Access is denied" means.
+func verifyLogonTask(ctx context.Context, run netstate.Runner, wantExe, wantArgs string) (note string, err error) {
+	def, found, fileErr := readLogonTaskFile()
+	state := classifyTaskFile(found, fileErr)
+	file, _ := logonTaskFile()
+
+	// The second observer is consulted in every case rather than only after
+	// the first one has passed: it is the one a standard user is always able
+	// to reach, so it is also the fallback. Exit status only — see the package
+	// comment on why nothing here may branch on schtasks' stdout.
+	schtasksKnows := !run.Run(ctx, "schtasks", "/query", "/tn", logonTaskName).Failed()
+
+	if state.couldNotLook() || state == taskFileAbsent {
+		if !schtasksKnows {
+			if state == taskFileAbsent {
+				return "", fmt.Errorf("schtasks reported success but %s does not exist and schtasks does not know %q either",
+					file, logonTaskName)
+			}
+			return "", fmt.Errorf("neither observer can confirm the task: %s could not be read (%w), and schtasks does not know %q",
+				file, fileErr, logonTaskName)
+		}
+		return logonTaskObserverNote(state, file, fileErr), nil
 	}
 
-	// And now the other observer, exactly as verifyWinService asks the SCM
-	// after reading the registry: the file says what got written down,
-	// schtasks says whether Task Scheduler's own database agrees. Exit status
-	// only — see the package comment.
-	if res := run.Run(ctx, "schtasks", "/query", "/tn", logonTaskName); res.Failed() {
-		return fmt.Errorf("the task's definition file exists but schtasks does not know %q", logonTaskName)
+	if state == taskFileBroken {
+		return "", fmt.Errorf("the task was created but %w", fileErr)
 	}
-	return nil
+
+	// state is taskFileRead: the bytes arrived, so the strong checks — the
+	// ones that make this observer worth having — can run.
+	if def.command != wantExe {
+		return "", fmt.Errorf("the task's Command is %q, not the %q dpb asked for", def.command, wantExe)
+	}
+	if def.arguments != wantArgs {
+		return "", fmt.Errorf("the task's Arguments is %q, not the %q dpb asked for", def.arguments, wantArgs)
+	}
+	if !def.hasLogonTrigger {
+		return "", errors.New("the task has no LogonTrigger; it would never run at your next logon")
+	}
+	if !schtasksKnows {
+		return "", fmt.Errorf("the task's definition file exists but schtasks does not know %q", logonTaskName)
+	}
+	return "", nil
+}
+
+// logonTaskInstalled is "is this task installed", asked the way every verb
+// that must know before it acts should ask it: the file observer first,
+// schtasks whenever the file could not be read.
+//
+// It is the same combination statusLogonTask makes through logonTaskFound, and
+// it exists because start, stop and uninstall were each making it a different
+// and worse way — by failing outright on the file read, which on the
+// unelevated path is a permanent "Access is denied" for a task that is
+// installed and running. The second return is "I could not tell", never
+// folded into a false "it is not there".
+func logonTaskInstalled(ctx context.Context, run netstate.Runner) (bool, error) {
+	_, found, fileErr := readLogonTaskFile()
+	state := classifyTaskFile(found, fileErr)
+	if state == taskFileBroken {
+		// The definition is there — dpb read it — even though it does not
+		// parse. "Installed" is the honest answer, and it is the one that lets
+		// `dpb service uninstall` remove it.
+		return true, nil
+	}
+	if !state.couldNotLook() {
+		return state == taskFileRead, nil
+	}
+	schtasksKnows := !run.Run(ctx, "schtasks", "/query", "/tn", logonTaskName).Failed()
+	return logonTaskFound(false, fileErr, schtasksKnows)
 }
 
 // ── uninstall ───────────────────────────────────────────────────────────────
 
 // uninstallLogonTask ends any running instance, deletes the task, and
-// confirms it is gone through the filesystem observer — the same asymmetry
+// confirms it is gone by ASKING AGAIN — the same asymmetry
 // service_darwin.go's uninstallMechanism and service_windows.go's
 // uninstallMechanism both use: what the job's absence is judged on is the
 // read-back, not the exit status of the command that tried to cause it.
+//
+// "Asking again" means both observers, through waitForLogonTaskGone: the
+// definition file when it is readable, schtasks when it is not. Judging this
+// on the file alone made the unelevated uninstall — the only one this
+// mechanism has — unable to report success at all.
 func uninstallLogonTask(ctx context.Context, g *globals, s serviceScope) error {
 	run := g.runnerOf()
 	_ = run.Run(ctx, "schtasks", "/end", "/tn", logonTaskName)
 	_ = run.Run(ctx, "schtasks", "/delete", "/tn", logonTaskName, "/f")
 
-	if err := waitForLogonTaskFileGone(ctx); err != nil {
+	if err := waitForLogonTaskGone(ctx, run); err != nil {
 		return fmt.Errorf("service uninstall: %w", err)
 	}
 	fmt.Fprintf(g.env.Stdout, "removed  %s (%s)\n", logonTaskName, s.kind())
-	fmt.Fprintf(g.env.Stdout, "  logs are left in place: %s\n", s.logDir)
+	fmt.Fprintf(g.env.Stdout, "  the log directory is left in place: %s\n", s.logDir)
 	return nil
 }
 
-// waitForLogonTaskFileGone polls the filesystem observer until the
-// definition is gone.
+// waitForLogonTaskGone polls until neither observer can find the task.
 //
 // schtasks /delete is documented as a synchronous call, unlike the SCM's
 // DeleteService (which only marks a service for deletion — see
 // waitForServiceGone in service_windows.go). A short, bounded poll costs
 // nothing when the delete really was immediate, and this project's rule for
 // anything that looks asynchronous is to confirm it rather than assume it.
-func waitForLogonTaskFileGone(ctx context.Context) error {
+//
+// It polls logonTaskInstalled rather than readLogonTaskFile directly for the
+// reason that function exists: an unelevated caller cannot read
+// %WINDIR%\System32\Tasks at all, and the earlier version of this loop turned
+// that into "cannot confirm dpb is gone: Access is denied" — a `dpb service
+// uninstall` that could never report success on the one path this mechanism
+// is for, even though the delete had worked.
+func waitForLogonTaskGone(ctx context.Context, run netstate.Runner) error {
 	deadline := time.Now().Add(serviceDeleteWait)
 	for {
-		_, found, err := readLogonTaskFile()
-		if err != nil {
-			return fmt.Errorf("cannot confirm %s is gone: %w", logonTaskName, err)
+		installed, cannotTell := logonTaskInstalled(ctx, run)
+		if cannotTell != nil {
+			// Neither observer could answer. Unlike the file-only version this
+			// replaced, reaching here means the ACL fallback ALSO failed, so
+			// it is a genuine "I cannot tell" rather than the default state of
+			// an unelevated machine.
+			return fmt.Errorf("cannot confirm %s is gone: %w", logonTaskName, cannotTell)
 		}
-		if !found {
+		if !installed {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			file, _ := logonTaskFile()
-			return fmt.Errorf("%s still exists %s after the delete", file, serviceDeleteWait)
+			return fmt.Errorf("%s still exists %s after the delete", logonTaskName, serviceDeleteWait)
 		}
 		if err := sleepCtx(ctx, servicePoll); err != nil {
 			return err
@@ -323,15 +453,15 @@ func waitForLogonTaskFileGone(ctx context.Context) error {
 
 // startLogonTask runs an installed task now.
 func startLogonTask(ctx context.Context, g *globals, s serviceScope) error {
-	_, found, err := readLogonTaskFile()
-	if err != nil {
-		return fmt.Errorf("service start: %w", err)
+	run := g.runnerOf()
+	installed, cannotTell := logonTaskInstalled(ctx, run)
+	if cannotTell != nil {
+		return fmt.Errorf("service start: cannot tell whether %s is installed: %w", logonTaskName, cannotTell)
 	}
-	if !found {
+	if !installed {
 		return fmt.Errorf("service start: %s is not installed; run `%s` first", logonTaskName, logonInstallHint)
 	}
 
-	run := g.runnerOf()
 	if res := run.Run(ctx, "schtasks", "/run", "/tn", logonTaskName); res.Failed() {
 		return fmt.Errorf("service start: %s", res.Reason())
 	}
@@ -345,8 +475,8 @@ func startLogonTask(ctx context.Context, g *globals, s serviceScope) error {
 		return fmt.Errorf("service start: %w", err)
 	}
 	if !running {
-		return fmt.Errorf("service start: %s is installed but did not start within %s; "+
-			"`dpb service logs` will say why", logonTaskName, serviceStartWait)
+		return fmt.Errorf("service start: %s is installed but did not start within %s; %s",
+			logonTaskName, serviceStartWait, logonTaskRecordHint)
 	}
 	fmt.Fprintf(g.env.Stdout, "started  %s (%s)\n", logonTaskName, s.kind())
 	return nil
@@ -355,15 +485,15 @@ func startLogonTask(ctx context.Context, g *globals, s serviceScope) error {
 // stopLogonTask ends the running instance, leaving the task installed so it
 // still fires at the next logon. `dpb service uninstall` is what removes it.
 func stopLogonTask(ctx context.Context, g *globals, s serviceScope) error {
-	_, found, err := readLogonTaskFile()
-	if err != nil {
-		return fmt.Errorf("service stop: %w", err)
+	run := g.runnerOf()
+	installed, cannotTell := logonTaskInstalled(ctx, run)
+	if cannotTell != nil {
+		return fmt.Errorf("service stop: cannot tell whether %s is installed: %w", logonTaskName, cannotTell)
 	}
-	if !found {
+	if !installed {
 		return fmt.Errorf("service stop: %s is not installed", logonTaskName)
 	}
 
-	run := g.runnerOf()
 	if res := run.Run(ctx, "schtasks", "/end", "/tn", logonTaskName); res.Failed() {
 		return fmt.Errorf("service stop: %s", res.Reason())
 	}
@@ -377,7 +507,14 @@ func stopLogonTask(ctx context.Context, g *globals, s serviceScope) error {
 		return fmt.Errorf("service stop: %w", err)
 	}
 	if running {
-		return fmt.Errorf("service stop: dpb is still running %s after %s", logonTaskName, serviceStopWait)
+		// "a dpb.exe other than this one": winProcCounts excludes the caller
+		// (that exclusion is what makes this check able to succeed at all),
+		// but it still matches by base name, so a dpb the user started
+		// themselves counts here. Saying so is the difference between a
+		// message a user can act on and one that looks like a bug.
+		return fmt.Errorf("service stop: %s was ended but a dpb.exe other than this one is still "+
+			"running after %s; the process snapshot matches by name, so a dpb you started yourself counts too",
+			logonTaskName, serviceStopWait)
 	}
 	fmt.Fprintf(g.env.Stdout, "stopped  %s (%s), still installed\n", logonTaskName, s.kind())
 	return nil
@@ -438,7 +575,14 @@ func statusLogonTask(ctx context.Context, g *globals, s serviceScope) (found, ru
 	}
 
 	fmt.Fprintf(w, "%s  (%s)\n", logonTaskName, s.kind())
-	switch {
+	switch state := classifyTaskFile(fileFound, fileErr); {
+	case state == taskFileDenied:
+		// NOT added to cannotTell. An ACL-denied read on this path is the
+		// expected state of an unelevated machine, not an observer failure
+		// worth degrading the answer over: schtasks has already answered, and
+		// `service status` reporting "cannot tell" here would be the same
+		// overclaim in the other direction. See verifyLogonTask.
+		fmt.Fprintf(w, "  task     %s\n", logonTaskObserverNote(state, mustLogonTaskFile(), fileErr))
 	case fileErr != nil:
 		fmt.Fprintf(w, "  task     unreadable — %v\n", fileErr)
 		cannotTell = errors.Join(cannotTell, fileErr)
@@ -457,7 +601,7 @@ func statusLogonTask(ctx context.Context, g *globals, s serviceScope) (found, ru
 	if err != nil {
 		fmt.Fprintf(w, "  state    unknown — %v\n", err)
 		cannotTell = errors.Join(cannotTell, err)
-		fmt.Fprintf(w, "  logs     %s\n           %s\n", s.outLog, s.errLog)
+		fmt.Fprintf(w, "  record   %s\n", logonTaskRecordHint)
 		return found, false, cannotTell
 	}
 	live, err := winProcessRunning(filepath.Base(exe))
@@ -471,7 +615,7 @@ func statusLogonTask(ctx context.Context, g *globals, s serviceScope) (found, ru
 	default:
 		fmt.Fprintf(w, "  state    not running\n")
 	}
-	fmt.Fprintf(w, "  logs     %s\n           %s\n", s.outLog, s.errLog)
+	fmt.Fprintf(w, "  record   %s\n", logonTaskRecordHint)
 	return found, running, cannotTell
 }
 
@@ -689,13 +833,12 @@ func currentUserSID() (string, error) {
 // Process32First and Process32Next are real syscalls in this module version,
 // not stubs.
 //
-// Matching by base name only, not the full path, is a known, accepted
-// imprecision: a second, unrelated dpb.exe elsewhere on the machine would
-// count. Task Scheduler's action exposes no PID to key off of instead, and
-// layering a full-path check on top would mean trusting
-// QueryFullProcessImageName's access checks not to fail quietly for a process
-// this caller has every right to see — one more Windows API this project has
-// not yet had reason to lean on.
+// Which entries in that snapshot are allowed to count — the caller's own
+// process is not one of them — is service_task.go's winProcCounts, kept out of
+// this file so it can be tested on a host with no Task Scheduler. Read its
+// comment: the exclusion it makes is the difference between a `dpb service
+// stop` that can succeed and one that cannot, and the base-name imprecision it
+// knowingly keeps is stated there too.
 func winProcessRunning(exeBase string) (bool, error) {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
@@ -703,12 +846,17 @@ func winProcessRunning(exeBase string) (bool, error) {
 	}
 	defer windows.CloseHandle(snap)
 
+	// os.Getpid() is read once, outside the walk: it cannot change, and
+	// re-reading it per entry would only invite a future edit to move the
+	// exclusion somewhere it can be skipped.
+	self := os.Getpid()
+
 	var entry windows.ProcessEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))
 	err = windows.Process32First(snap, &entry)
 	for ; err == nil; err = windows.Process32Next(snap, &entry) {
 		name := windows.UTF16ToString(entry.ExeFile[:])
-		if strings.EqualFold(name, exeBase) {
+		if winProcCounts(name, int(entry.ProcessID), exeBase, self) {
 			return true, nil
 		}
 	}

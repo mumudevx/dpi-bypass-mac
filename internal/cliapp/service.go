@@ -28,27 +28,28 @@ import (
 // against two independent readers; see service_windows.go for the SCM's, whose
 // two readers are the registry and the SCM itself.
 //
-// Three more identifiers are platform-provided, and they exist because a
+// Five more identifiers are platform-provided, and they exist because a
 // message that names the wrong mechanism is a message that sends a user
 // somewhere that does not exist:
 //
 //	serviceName         what the user sees the job called
 //	serviceInstallHint  the command that installs it here
 //	serviceFollowHint   how to tail a growing log file here
+//	serviceHelp         every help string whose truth is mechanism-specific
+//	serviceLogNote      why s.outLog and s.errLog may never appear, or ""
 //
-// Each platform file defines all three. serviceLabel below is launchd's own
-// and stays launchd's own.
+// Each platform file defines all five. serviceHelp and serviceLogNote were
+// added when `dpb service --help` was found still explaining launchd to
+// Windows users after `doctor` and the README had been corrected. A help text
+// is the surface a user meets FIRST, so naming a mechanism their machine does
+// not have is not a cosmetic wrong — and the same applies to promising log
+// files that a mechanism never writes, which is what serviceLogNote is for.
+// serviceLabel below is launchd's own and stays launchd's own.
 func newServiceCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "service",
-		Short: "Install, remove and inspect dpb as a launchd job",
-		Long: "service manages dpb's launchd job.\n\n" +
-			"By default it installs a LaunchAgent in your own login session, which is the\n" +
-			"right choice for proxy mode: it needs no root, it starts when you log in, and\n" +
-			"the proxy environment variables it sets land in the session your applications\n" +
-			"actually run in.\n\n" +
-			"--system installs a LaunchDaemon instead. That needs root, and it is only the\n" +
-			"right choice when dpb must run before or without a login session.",
+		Short: serviceHelp.cmdShort,
+		Long:  serviceHelp.cmdLong,
 	}
 	cmd.AddCommand(
 		newServiceInstallCmd(g),
@@ -59,6 +60,23 @@ func newServiceCmd(g *globals) *cobra.Command {
 		newServiceLogsCmd(g),
 	)
 	return cmd
+}
+
+// serviceHelpText is the set of help strings whose wording depends on which
+// mechanism the platform binds a scope to. One struct rather than a dozen
+// loose constants: it keeps the per-platform definitions side by side, so the
+// next person to add a verb cannot half-define it, and the fields are the
+// exact set of places this file used to name launchd unconditionally.
+type serviceHelpText struct {
+	cmdShort       string
+	cmdLong        string
+	scopeFlag      string
+	installShort   string
+	installLong    string
+	installExample string
+	uninstallShort string
+	stopShort      string
+	stopLong       string
 }
 
 // serviceLabel is the launchd job name. It is also the file name of the plist
@@ -119,7 +137,22 @@ type serviceScope struct {
 	layout paths.Layout
 }
 
+// kind is the one-phrase name for this scope's mechanism, printed in every
+// install, stop, remove and status line.
+//
+// It switches on mech rather than on system alone because "user agent" and
+// "system daemon" are launchd's words, and a Windows install printing
+// "installed dpb (user agent)" names something that does not exist on the
+// machine the user is reading it on. The two launchd mechanisms keep their
+// exact previous strings, which is why the switch falls through to the
+// system/agent pair rather than listing them.
 func (s serviceScope) kind() string {
+	switch s.mech {
+	case winLogonTask:
+		return "logon task"
+	case winService:
+		return "Windows service"
+	}
 	if s.system {
 		return "system daemon"
 	}
@@ -154,8 +187,7 @@ func requireRoot(s serviceScope, verb string) error {
 }
 
 func systemFlag(cmd *cobra.Command, v *bool) {
-	cmd.Flags().BoolVar(v, "system", false,
-		"act on the machine-wide LaunchDaemon instead of your login session's LaunchAgent")
+	cmd.Flags().BoolVar(v, "system", false, serviceHelp.scopeFlag)
 }
 
 // ── install ─────────────────────────────────────────────────────────────────
@@ -163,22 +195,11 @@ func systemFlag(cmd *cobra.Command, v *bool) {
 func newServiceInstallCmd(g *globals) *cobra.Command {
 	var system bool
 	cmd := &cobra.Command{
-		Use:   "install [-- RUN FLAGS...]",
-		Short: "Write the launchd job and load it",
-		Long: "install writes the property list, enables the job, and bootstraps it into\n" +
-			"launchd, then confirms launchd knows about it.\n\n" +
-			"Anything after `--` is appended to the `dpb run` command line the job runs.\n" +
-			"Those flags are parsed here, before the plist is written, so a typo is a\n" +
-			"usage error now rather than a job launchd respawns and kills forever.\n\n" +
-			"For scripts: --system writes into /Library/LaunchDaemons and bootstraps into\n" +
-			"launchd's system domain, so without root it stops before writing anything and\n" +
-			"returns exit 4. That code means \"re-run this with sudo\" and nothing else —\n" +
-			"`dpb tune` reports \"nothing is blocked here\" as exit 6, not 4, so a caller can\n" +
-			"branch on the two.",
-		Example: "  dpb service install\n" +
-			"  dpb service install -- --profile turkey --port 8081\n" +
-			"  sudo dpb service install --system",
-		Args: cobra.ArbitraryArgs,
+		Use:     "install [-- RUN FLAGS...]",
+		Short:   serviceHelp.installShort,
+		Long:    serviceHelp.installLong,
+		Example: serviceHelp.installExample,
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return serviceInstall(cmd.Context(), g, system, args)
 		},
@@ -238,7 +259,7 @@ func newServiceUninstallCmd(g *globals) *cobra.Command {
 	var system bool
 	cmd := &cobra.Command{
 		Use:   "uninstall",
-		Short: "Unload the launchd job and delete its property list",
+		Short: serviceHelp.uninstallShort,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return serviceUninstall(cmd.Context(), g, system)
@@ -290,11 +311,9 @@ func newServiceStopCmd(g *globals) *cobra.Command {
 	var system bool
 	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "Unload the job, leaving it installed",
-		Long: "stop boots the job out of launchd rather than signalling it. The job is\n" +
-			"configured to come back after an unclean exit, so a signal would only\n" +
-			"restart it; `dpb service start` loads it again.",
-		Args: cobra.NoArgs,
+		Short: serviceHelp.stopShort,
+		Long:  serviceHelp.stopLong,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return serviceStop(cmd.Context(), g, system)
 		},
@@ -321,8 +340,8 @@ func newServiceStatusCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Report whether the job is installed, loaded and running",
-		Long: "status with no --system looks in your login session first and then in the\n" +
-			"system domain, so it finds the job wherever it was installed. Exit status is\n" +
+		Long: "status with no --system looks in your own login session first and then\n" +
+			"machine-wide, so it finds the job wherever it was installed. Exit status is\n" +
 			"0 only when a job is actually running.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -426,20 +445,26 @@ func newServiceLogsCmd(g *globals) *cobra.Command {
 // serviceLogs needs no platform call: whatever mechanism produced s.outLog
 // and s.errLog, reading their tails back is the same file I/O regardless.
 //
-// What is NOT the same is who wrote them, and the difference changes how the
-// output should be read. launchd redirects a job's stdout and stderr into these
-// two paths itself, from the StandardOutPath and StandardErrorPath keys
-// service_darwin.go puts in the plist, so the files exist from the job's first
-// write no matter what the job does. The Windows SCM has no equivalent key and
-// gives a service no console and no parent to inherit handles from, so there
-// the service process redirects its OWN os.Stdout and os.Stderr into the same
-// two files as its first act (svcrun_windows.go). Two consequences follow on
-// Windows only: anything the service manages to write before that redirect —
-// a failure to resolve the log directory, most of all — has nowhere to go and
-// is lost, and the streams are ordinary buffered file writes, so a service the
-// SCM kills leaves the tail of them unwritten. The NDJSON event log beside
-// them (events.ndjson, written through internal/emit) is the record to trust
-// when the two disagree.
+// What is NOT the same is WHO wrote them — or whether anybody did — and that
+// changes what this command is able to show.
+//
+// launchd redirects a job's stdout and stderr into these two paths itself,
+// from the StandardOutPath and StandardErrorPath keys service_darwin.go puts
+// in the plist, so on darwin the files exist from the job's first write no
+// matter what the job does. The Windows SCM has no equivalent key and gives a
+// service no console and no parent to inherit handles from, so there the
+// service process redirects its OWN os.Stdout and os.Stderr into the same two
+// files as its first act (svcrun_windows.go). Two consequences follow for that
+// mechanism: anything the service writes before the redirect — a failure to
+// resolve the log directory, most of all — has nowhere to go and is lost, and
+// the streams are ordinary buffered file writes, so a service the SCM kills
+// leaves their tail unwritten.
+//
+// A Windows Scheduled Task action gets the same nothing as a service and has
+// no redirect at all, so for that mechanism these two files are never written
+// by anyone. That is what serviceLogNote says, in the mechanism's own words,
+// before this command prints "(no such file)" twice and leaves a tester
+// concluding their task is broken.
 func serviceLogs(g *globals, system bool, lines int) error {
 	if lines <= 0 {
 		return usagef("service logs: --lines must be positive, got %d", lines)
@@ -449,6 +474,9 @@ func serviceLogs(g *globals, system bool, lines int) error {
 		return err
 	}
 	w := g.env.Stdout
+	if note := serviceLogNote(s); note != "" {
+		fmt.Fprintf(w, "%s\n\n", note)
+	}
 	for _, f := range []string{s.outLog, s.errLog} {
 		fmt.Fprintf(w, "==> %s\n", f)
 		b, err := os.ReadFile(f)

@@ -34,13 +34,23 @@ func notWritableRemedy(layout paths.Layout) string {
 func proxySystemName() string { return "Windows" }
 
 // proxyInspectRemedy is checkSystemProxy's advice when netstate.ReadProxyState
-// itself fails. scwindows' Proxy().Live reads WinHTTP's resolved
-// configuration (or, on the split-account path, the registry hive directly —
+// itself fails. scwindows' Proxy().Live reads WinHTTP's resolved configuration
+// for THIS USER (or, on the split-account path, the registry hive directly —
 // windows.go's Contract 2b), so the by-hand equivalent of `scutil --proxy` is
-// Settings > Network & Internet > Proxy, or `netsh winhttp show proxy`.
+// the Settings pane, or a read of the same per-user key dpb writes.
+//
+// It deliberately does NOT name `netsh winhttp show proxy`. That command
+// reports the MACHINE-WIDE WinHTTP proxy, which is a different setting in a
+// different place: dpb sets per-user Internet Settings (HKCU, or HKU\<SID>)
+// and never touches the machine-wide one. A user following that advice while
+// dpb's proxy was live would read "Direct access (no proxy server)" and
+// conclude dpb had done nothing — a remedy that manufactures the exact wrong
+// diagnosis. `reg query` on the key dpb actually writes cannot do that.
 func proxyInspectRemedy() string {
-	return "open Settings > Network & Internet > Proxy, or run `netsh winhttp show proxy` " +
-		"by hand to see what Windows is pointed at"
+	return "open Settings > Network & Internet > Proxy, or run " +
+		`reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"` +
+		" by hand to see what this user's applications are pointed at " +
+		"(`netsh winhttp show proxy` reads the machine-wide WinHTTP proxy, which dpb never sets)"
 }
 
 // proxyEnvRemedy is checkProxyEnv's advice when netstate.ReadLaunchEnv itself
