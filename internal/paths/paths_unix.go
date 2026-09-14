@@ -5,6 +5,7 @@ package paths
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -106,4 +107,15 @@ func xdgDir(e env, key, home string, fallback string) string {
 		return filepath.Join(v, appDir)
 	}
 	return filepath.Join(home, fallback, appDir)
+}
+
+// restrictToOwner sets POSIX mode 0600 — the mode bits ARE the access control
+// here, and chmod(2) is the whole implementation. See RestrictToOwner for what
+// the Windows leaf has to do instead, and why the two cannot share an
+// os.Chmod call.
+func restrictToOwner(path string) error {
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("paths: restrict %s to its owner: %w", path, err)
+	}
+	return nil
 }

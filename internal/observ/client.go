@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"syscall"
 	"time"
 )
 
@@ -56,10 +55,15 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 	if err == nil {
 		return conn, nil
 	}
-	// ENOENT: no socket file at all. ECONNREFUSED: the file survived a SIGKILL
-	// but nothing is accepting on it. Both mean "not running"; anything else is
-	// a real failure the user needs to see.
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
+	// ENOENT: no socket file at all. Connection refused: the file survived a
+	// SIGKILL but nothing is accepting on it. Both mean "not running"; anything
+	// else is a real failure the user needs to see.
+	//
+	// "Connection refused" goes through a platform leaf because the two systems
+	// do not spell it with the same constant, and the one that reads as portable
+	// is the one that silently never matches: connrefused_windows.go has the
+	// evidence and the measurement.
+	if errors.Is(err, os.ErrNotExist) || isConnRefused(err) {
 		return nil, fmt.Errorf("%w (%s)", ErrNotRunning, c.path)
 	}
 	return nil, fmt.Errorf("observ: connect to the control socket %s: %w", c.path, err)

@@ -153,6 +153,35 @@ func (l Layout) EnsureDirs() error {
 	return nil
 }
 
+// RestrictToOwner makes an EXISTING file reachable only by the account this
+// process runs as. It is the "this is nobody else's business" half of the same
+// question Chown above answers for ownership, and it lives here for the same
+// reason: who may read dpb's files is a per-platform fact, not a per-caller one.
+//
+// It is a platform leaf because the two systems do not have the same KIND of
+// answer. paths_unix.go sets POSIX mode 0600. paths_windows.go replaces the
+// file's DACL, because there are no mode bits to set there — and os.Chmod is
+// NOT a stand-in for that: on Windows it only toggles
+// FILE_ATTRIBUTE_READONLY, writes no ACL at all, and returns nil. A caller that
+// wrote os.Chmod(path, 0o600) therefore got a file every account on the machine
+// could read, with no error and nothing to grep for.
+//
+// That was measured, not inferred. The windows-latest CI run of 2026-09-14 —
+// the first time this project's Windows code ran — found the tuned profile
+// (internal/config) and the control socket (internal/observ) both sitting at
+// mode 0666 after their chmod(0o600) "succeeded". Those two files are the
+// user's measured ladder, which names the sites they reach for, and the socket
+// that is dpb's entire authentication story. See docs/MEASUREMENTS-windows.md.
+//
+// Two limits are stated rather than implied. First, `os.Stat().Mode().Perm()`
+// still reports 0666 on Windows after this succeeds, because Go derives that
+// number from the file ATTRIBUTES and nothing else; the DACL is real but it is
+// not visible through the POSIX-shaped API, so a caller must not use the mode
+// as evidence. Second, a directory whose filesystem has no ACLs at all (a
+// FAT-formatted volume) cannot honour this, and the error says so instead of
+// the call quietly doing nothing.
+func RestrictToOwner(path string) error { return restrictToOwner(path) }
+
 // Chown gives path to the layout's owner when this process is root acting for a
 // user. It is a no-op otherwise, including for the system layout.
 func (l Layout) Chown(path string) error {

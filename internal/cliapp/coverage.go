@@ -191,6 +191,12 @@ func buildCoverage(ctx context.Context, g *globals, layout paths.Layout,
 }
 
 // readMechanisms reports which of the two coverage levers are in force.
+//
+// The Name prefix and the Covers text come from coverage_darwin.go /
+// coverage_windows.go. They used to be literals here naming Safari, CFNetwork
+// and launchd on every platform, which made the one command a user runs to find
+// out why their program is not covered answer about software the machine does
+// not have. What each lever IS stays here; who reads it is per-platform.
 func readMechanisms(ctx context.Context, env netstate.Env) []mechanism {
 	var out []mechanism
 
@@ -198,7 +204,7 @@ func readMechanisms(ctx context.Context, env netstate.Env) []mechanism {
 	if err != nil {
 		out = append(out, mechanism{
 			Name:   "system proxy",
-			Covers: "Safari, Chrome, Electron apps, anything on CFNetwork",
+			Covers: systemProxyCovers,
 			Err:    err.Error(),
 		})
 	} else {
@@ -206,7 +212,7 @@ func readMechanisms(ctx context.Context, env netstate.Env) []mechanism {
 			Name:   "auto-proxy URL (PAC)",
 			Set:    st.On("ProxyAutoConfigEnable"),
 			Value:  st.Str("ProxyAutoConfigURLString"),
-			Covers: "Safari, Chrome, Electron apps, anything on CFNetwork",
+			Covers: systemProxyCovers,
 		})
 		out = append(out, mechanism{
 			Name:   "secure web proxy",
@@ -225,8 +231,8 @@ func readMechanisms(ctx context.Context, env netstate.Env) []mechanism {
 	for _, name := range []string{"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"} {
 		v, err := netstate.ReadLaunchEnv(ctx, env, name)
 		m := mechanism{
-			Name:   "launchd " + name,
-			Covers: "reqwest, curl, Go, Python, Node — including Discord's own updater (GT24)",
+			Name:   envMechanismPrefix + name,
+			Covers: envMechanismCovers,
 		}
 		if err != nil {
 			m.Err = err.Error()

@@ -425,7 +425,10 @@ func writeFileAtomic(path string, b []byte) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("policy: close temp store: %w", err)
 	}
-	if err := os.Rename(name, path); err != nil {
+	// replaceFile, not os.Rename: this store is flushed from every connection
+	// goroutine, and on Windows a rename over a destination another of them is
+	// mid-replacement of fails outright. See replace_windows.go.
+	if err := replaceFile(name, path); err != nil {
 		return fmt.Errorf("policy: rename temp store: %w", err)
 	}
 	d, err := os.Open(dir)
