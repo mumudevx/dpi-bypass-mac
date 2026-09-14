@@ -1,4 +1,4 @@
-# dpb — macOS DPI bypass
+# dpb — DPI bypass for macOS and Windows
 
 `dpb` gets past the two censorship techniques that were actually measured on a
 Türk Telekom line: passive SNI inspection of the TLS ClientHello, and DNS
@@ -83,6 +83,167 @@ make build        # -> ./dpb
 ```
 
 Requires Go 1.26.4 on macOS. `make install` puts it in `$GOBIN`.
+
+### Windows
+
+> **Preview.** This section describes what the Windows code does, not what
+> has been observed doing it: nothing below has run on a real Windows machine
+> yet. Treat the first `-windows-preview` release as a release candidate
+> waiting on its first outside report, not a verified install — and read
+> "Reporting a result" before you file one.
+
+**Requirements.** Windows 11, x64 or ARM64. Proxy mode needs no special
+privilege at all. `--tun` needs Administrator — the same reason `--tun` needs
+`sudo` on macOS: creating the wintun adapter and writing the route table both
+require it.
+
+**Download.** Get `dpb_<version>_windows_<arch>.zip` from
+[GitHub Releases](https://github.com/mumudevx/dpi-bypass-mac/releases) and
+check it against that release's `checksums.txt` before running anything:
+
+```powershell
+Get-FileHash dpb_<version>_windows_amd64.zip -Algorithm SHA256
+```
+
+The printed hash has to match the line for that file in `checksums.txt`. If it
+does not, do not run the binary — re-download it.
+
+**SmartScreen.** `dpb.exe` is not code-signed. There is no Apple-Developer
+equivalent in this project's release pipeline on macOS either — see
+`.goreleaser.yaml`'s header — and Windows has no back door around it: the
+first time you run `dpb.exe`, Windows Defender SmartScreen will show a blue
+"Windows protected your PC" screen with one visible button, **Don't run**.
+Click **More info** first; a second button, **Run anyway**, appears below it.
+That is the standard warning for any unsigned binary downloaded from the
+internet, not something specific to dpb, and there is no way to make it stop
+appearing without a paid code-signing certificate this project does not have.
+Only proceed if you verified the SHA256 above.
+
+**First run** (proxy mode, no Administrator needed):
+
+```powershell
+dpb run --profile turkey
+```
+
+`dpb run` points Windows at itself the same way it points macOS at itself —
+writing the per-user proxy settings (`HKCU\...\Internet Settings`, or the
+signed-in user's hive by SID if dpb is elevated as a different account; see
+"Service" below) — and reverts them on the way out: on Ctrl-C and on a panic.
+Every change is written to a journal before it is attempted, the same journal
+`dpb doctor --repair` reads, so even a killed process leaves a record of what
+to undo.
+
+```powershell
+dpb why www.isbank.com.tr   # every rule that matched, and the verdict in force
+dpb status                  # running? which strategy? cache hit rate?
+dpb doctor                  # audit this machine; --repair puts back what a crash left
+```
+
+**TUN mode.** `dpb run --tun` needs an elevated (Administrator) prompt or
+shell, and needs the wintun driver — dpb does not bundle `wintun.dll`.
+Download it for your architecture from [wintun.net](https://www.wintun.net)
+and place `wintun.dll` next to `dpb.exe`. `dpb doctor` checks for it before
+you have to find out the hard way; without it, `--tun` fails with "the wintun
+driver is not installed".
+
+**Service.** Two commands, for two different things:
+
+```powershell
+dpb service install            # a logon Scheduled Task, running as YOU; no Administrator
+dpb service install --system   # a real Windows service, running as LocalSystem; needs Administrator
+dpb service status
+dpb service logs
+dpb service uninstall          # add --system to match whichever you installed
+```
+
+They are not interchangeable, and the difference is not cosmetic. A Windows
+service runs in session 0 as `LocalSystem`, which can neither write the
+signed-in user's `HKCU` hive — where proxy settings live — nor deliver a
+settings-changed notification into that user's session; both only make sense
+inside a real interactive logon. So:
+
+- **Proxy mode** is per-user by construction (it sets environment variables
+  and Internet Settings for one desktop session), and installs as the **logon
+  task**. This needs no Administrator rights and is the supported way to run
+  proxy mode unattended.
+- **TUN mode** needs Administrator anyway, for the wintun adapter and the
+  route table, so it installs as the **SCM service** (`--system`), which is
+  what the SCM is actually for.
+
+This is the same split WireGuard uses on Windows, for the same reason:
+wireguard-windows runs its tunnel as SYSTEM and leaves the per-user
+configuration surface to a process in the user's own session, because SYSTEM
+cannot reach that session either.
+
+One consequence worth knowing before you go looking for a log file: a
+Scheduled Task action gets no console and no output redirection, so the logon
+task writes no `service.out.log` / `service.err.log` — only the `--system`
+service does, because that process redirects its own streams. `dpb service
+logs` says so, and the logon task's own record is Task Scheduler's:
+`schtasks /query /tn dpb /v` for the Last Run Result, and Event Viewer's
+**Microsoft > Windows > TaskScheduler > Operational** log for why a start was
+refused.
+
+**Uninstall.**
+
+```powershell
+dpb service uninstall   # or: dpb service uninstall --system
+```
+
+Confirm the machine was actually put back the way it was, not just that the
+task or service is gone:
+
+```powershell
+dpb doctor                       # system proxy, proxy environment and journal checks
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+                                 # the per-user proxy settings dpb actually writes
+reg query HKCU\Environment       # the per-user HTTP_PROXY / HTTPS_PROXY variables
+```
+
+`netsh winhttp show proxy` is **not** the check to use here: it reports the
+machine-wide WinHTTP proxy, a different setting that dpb never touches. It
+prints "Direct access (no proxy server)" whether or not dpb's per-user proxy
+is live, so it can only mislead you in both directions.
+
+If you ran with `--tun`, also check that DNS and the routing table were
+restored — `ipconfig /all` for the resolvers, `route print` for the routes
+`--tun` added — since those are the two things full-tunnel mode changes that
+proxy mode never touches.
+
+**Reporting a result.** If you are the first person other than the author to
+try this on Windows, you are almost certainly on **amd64** and on a
+**different ISP**. That makes your run a *compatibility* test — does dpb
+install, start, capture traffic, and clean up after itself on a machine that
+is not the author's — and it is **not** a measurement of the bypass ladder,
+however many of the test sites do or do not get through. Three things say so
+directly, and are worth reading before drawing a conclusion from a number:
+
+- [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) §4 is explicit that Superonline,
+  Vodafone, Turknet and every mobile network are unmeasured — Türk Telekom is the
+  only ISP any number in this repository comes from. `internal/config/embed/turkey.toml`
+  cites that finding as the reason it ships no per-ISP variants.
+- [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) §3.4 records efficacy that is
+  *non-monotonic within one ISP on one day* — the same chunk size passing on
+  one sweep and failing on the next, with no single rule that explains it.
+  Nothing about a different day, city or account on the **same** ISP is
+  guaranteed to reproduce.
+- Every number in `MEASUREMENTS.md` was measured on **macOS**. Windows has a
+  different TCP stack, and nothing in this repository has re-measured the
+  ladder against it yet (that is Phase 6 of the Windows-parity plan).
+
+So "3 of 6 test sites worked" is not, by itself, something the project can act
+on — it conflates the ladder, the ISP, the day and the OS into one number. A
+report that IS useful says which of these happened, plainly, and pastes any
+error text verbatim:
+
+- did `dpb.exe` install and start (proxy mode, and separately `--tun` if you
+  tried it);
+- did `dpb service install` (and `--system`) actually survive a reboot;
+- did traffic visibly flow through the proxy or the tunnel;
+- did `dpb service uninstall` and `dpb doctor` leave the machine's proxy, DNS
+  and routes back the way they started;
+- and only then, separately, what `dpb probe` or ordinary browsing showed
+  against whichever sites you tried, with the ISP and city named.
 
 ## Use
 

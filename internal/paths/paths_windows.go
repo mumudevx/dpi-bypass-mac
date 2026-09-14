@@ -4,6 +4,7 @@ package paths
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -40,16 +41,12 @@ func resolve(e env) (Layout, error) {
 	}
 
 	if l.System {
-		root := strings.TrimSpace(e.getenv(systemRootEnv))
-		if root == "" {
-			return Layout{}, fmt.Errorf("paths: %%%s%% is unset; cannot place machine-wide state", systemRootEnv)
+		sys, err := systemLayout(e)
+		if err != nil {
+			return Layout{}, err
 		}
-		base := filepath.Join(root, appDir)
-		l.User = "SYSTEM"
-		l.ConfigDir, l.StateDir = base, base
-		l.CacheDir = filepath.Join(base, "cache")
-		l.LogDir = filepath.Join(base, "logs")
-		return l, nil
+		sys.Elevated = l.Elevated
+		return sys, nil
 	}
 
 	roam := strings.TrimSpace(e.getenv(userRoamEnv))
@@ -65,6 +62,43 @@ func resolve(e env) (Layout, error) {
 	l.CacheDir = filepath.Join(local, appDir, "cache")
 	l.LogDir = filepath.Join(local, appDir, "logs")
 	return l, nil
+}
+
+// systemLayout is the machine-wide layout, the one a dpb running as a Windows
+// service resolves for itself. It is factored out of resolve() so SystemLayout
+// below can hand the SAME answer to a process that is not a service.
+func systemLayout(e env) (Layout, error) {
+	root := strings.TrimSpace(e.getenv(systemRootEnv))
+	if root == "" {
+		return Layout{}, fmt.Errorf("paths: %%%s%% is unset; cannot place machine-wide state", systemRootEnv)
+	}
+	base := filepath.Join(root, appDir)
+	return Layout{
+		UID: -1, GID: -1,
+		System:    true,
+		User:      "SYSTEM",
+		ConfigDir: base,
+		StateDir:  base,
+		CacheDir:  filepath.Join(base, "cache"),
+		LogDir:    filepath.Join(base, "logs"),
+	}, nil
+}
+
+// SystemLayout returns the machine-wide layout without being a service.
+//
+// `dpb service install --system` runs as an elevated interactive user, so
+// Resolve() gives it that user's %LOCALAPPDATA% locations — but the service it
+// is installing runs as LocalSystem and will resolve the %ProgramData% ones.
+// The installer has to name the log files the service will actually write, or
+// `dpb service logs --system` reads the wrong half; that is exactly the trap
+// service_darwin.go's serviceScopeFor documents for a LaunchDaemon. This exists
+// so the installer and the service agree by construction, rather than by two
+// copies of the same filepath.Join staying in step for the life of the tree.
+//
+// It is Windows-only because the problem is: on darwin the daemon's locations
+// are literal paths under /Library that service_darwin.go already spells out.
+func SystemLayout() (Layout, error) {
+	return systemLayout(env{getenv: os.Getenv})
 }
 
 // isElevated reports whether this process holds a UAC-elevated token.

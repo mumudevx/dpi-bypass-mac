@@ -1,7 +1,8 @@
 # GoReleaser configuration for dpb.
 #
-# It builds darwin/arm64 and darwin/amd64, publishes a GitHub release with a
-# checksums file, and updates the Homebrew formula in mumudevx/homebrew-tap.
+# It builds darwin/arm64 (macOS only), and windows/arm64 + windows/amd64,
+# publishes a GitHub release with checksums, and updates the Homebrew formula
+# in mumudevx/homebrew-tap (darwin archives only).
 #
 # Three things are deliberately absent.
 #
@@ -46,9 +47,15 @@ builds:
       - CGO_ENABLED=0
     goos:
       - darwin
+      - windows
     goarch:
       - arm64
       - amd64
+    # darwin builds are arm64-only on purpose: this project ships for Apple
+    # Silicon only. Windows gets both arm64 (preview) and amd64. The ignore rule
+    # below preserves the darwin/arm64-only policy and is not an oversight.
+    ignore:
+      - { goos: darwin, goarch: amd64 }
     flags:
       - -trimpath
     # These are the variables internal/buildinfo reads; `dpb version` falls
@@ -65,11 +72,28 @@ builds:
     # below cannot be checked by anyone but the person who cut the release.
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+# ONE archive block, with a per-platform format override.
+#
+# There were two, one declaring tar.gz and one zip, and both selected the same
+# build id with no platform filter — `archives` has no goos field, so neither
+# block was restricted to anything. Every platform was therefore archived
+# TWICE: a snapshot produced six archives, including a darwin_arm64.zip and two
+# windows .tar.gz files the README never mentions, plus three spurious lines in
+# checksums.txt. A tester landing on the Releases page had to guess which of
+# two archives for their platform was the intended one.
+#
+# format_overrides is the mechanism for "zip on Windows, tar.gz everywhere
+# else", and it is keyed by goos, which is exactly the filter the second block
+# was reaching for and could not express. No wintun.dll is bundled in either
+# format; the README directs users to wintun.net.
 archives:
   - id: dpb
     ids:
       - dpb
     formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - README.md

@@ -1,55 +1,55 @@
 package cliapp
 
 import (
-	"bytes"
 	"context"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/mumudevx/dpb/internal/netstate"
 	"github.com/mumudevx/dpb/internal/paths"
 )
 
-// `dpb service` installs dpb as a launchd job so it survives logout and reboot.
+// `dpb service` installs dpb as a background service so it survives logout
+// and reboot, using whichever mechanism its serviceMech is bound to.
 //
-// Two things about this command are deliberate and easy to get wrong.
+// This file is the platform-free half: the six verbs (install, uninstall,
+// start, stop, status, logs) and the generic checks every mechanism needs
+// (needs-root, are the run flags well-formed, where do the logs live). What
+// each verb actually DOES to the machine — writing a launchd plist and calling
+// launchctl on darwin; creating a LocalSystem service in the Windows service
+// control manager on Windows — is one platform call per verb:
+// installMechanism, uninstallMechanism, startMechanism, stopMechanism,
+// statusMechanism. See service_darwin.go for launchd's implementation of
+// those, including why its verbs are `enable`/`bootstrap`/`bootout` rather
+// than the deprecated `load -w`/`unload -w`, and how an install is verified
+// against two independent readers; see service_windows.go for the SCM's, whose
+// two readers are the registry and the SCM itself.
 //
-// First, the verbs. launchd's `load -w` / `unload -w` have been deprecated
-// since 10.10 and lie in ways that matter: `load` on an already-loaded job
-// prints nothing useful, and `-w` silently rewrites the persistent disabled
-// database, so a job can end up disabled with no record of who did it. The
-// modern triple — `enable`, `bootstrap`, `bootout` — separates "may this run"
-// from "is this loaded", and each one reports a real failure. docs/PLAN.md's
-// CLI surface names them explicitly: never `load -w`.
+// Five more identifiers are platform-provided, and they exist because a
+// message that names the wrong mechanism is a message that sends a user
+// somewhere that does not exist:
 //
-// Second, the verification. Every other mutation in this tool is verified
-// through a different subsystem than it was applied with (see netstate's
-// package comment). launchd has no second observer for its own job table, so
-// this command splits the difference the same way netstate's launchenv Op does:
-// the half that CAN be independently checked — the plist we wrote — is checked
-// with plutil(1) and a read-back, and only the load itself is confirmed with
-// `launchctl print`. A green install therefore means "the file on disk is a
-// valid property list AND launchd admits to knowing the job", which is strictly
-// more than "launchctl exited 0".
+//	serviceName         what the user sees the job called
+//	serviceInstallHint  the command that installs it here
+//	serviceFollowHint   how to tail a growing log file here
+//	serviceHelp         every help string whose truth is mechanism-specific
+//	serviceLogNote      why s.outLog and s.errLog may never appear, or ""
+//
+// Each platform file defines all five. serviceHelp and serviceLogNote were
+// added when `dpb service --help` was found still explaining launchd to
+// Windows users after `doctor` and the README had been corrected. A help text
+// is the surface a user meets FIRST, so naming a mechanism their machine does
+// not have is not a cosmetic wrong — and the same applies to promising log
+// files that a mechanism never writes, which is what serviceLogNote is for.
+// serviceLabel below is launchd's own and stays launchd's own.
 func newServiceCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "service",
-		Short: "Install, remove and inspect dpb as a launchd job",
-		Long: "service manages dpb's launchd job.\n\n" +
-			"By default it installs a LaunchAgent in your own login session, which is the\n" +
-			"right choice for proxy mode: it needs no root, it starts when you log in, and\n" +
-			"the proxy environment variables it sets land in the session your applications\n" +
-			"actually run in.\n\n" +
-			"--system installs a LaunchDaemon instead. That needs root, and it is only the\n" +
-			"right choice when dpb must run before or without a login session.",
+		Short: serviceHelp.cmdShort,
+		Long:  serviceHelp.cmdLong,
 	}
 	cmd.AddCommand(
 		newServiceInstallCmd(g),
@@ -62,6 +62,23 @@ func newServiceCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
+// serviceHelpText is the set of help strings whose wording depends on which
+// mechanism the platform binds a scope to. One struct rather than a dozen
+// loose constants: it keeps the per-platform definitions side by side, so the
+// next person to add a verb cannot half-define it, and the fields are the
+// exact set of places this file used to name launchd unconditionally.
+type serviceHelpText struct {
+	cmdShort       string
+	cmdLong        string
+	scopeFlag      string
+	installShort   string
+	installLong    string
+	installExample string
+	uninstallShort string
+	stopShort      string
+	stopLong       string
+}
+
 // serviceLabel is the launchd job name. It is also the file name of the plist
 // and half of every service target, so it is not a value to change lightly:
 // a rename orphans the job an older dpb installed.
@@ -71,7 +88,7 @@ const (
 	serviceOutLog = "service.out.log"
 	serviceErrLog = "service.err.log"
 
-	// serviceThrottle is launchd's minimum seconds between respawns.
+	// serviceThrottle is the minimum seconds between respawns.
 	//
 	// launchd's own floor is 10 s. 30 s is deliberately slower, because the
 	// exits worth respawning through are transient (a listener losing its port
@@ -80,75 +97,87 @@ const (
 	// route, or a captive portal is up. launchd has no way to express "restart
 	// unless the exit code was 5", so the honest compromise is to keep the
 	// retry loop cheap enough to leave running and loud enough to find in the
-	// log.
+	// log. The Windows service mechanism needs the identical reasoning for its
+	// own recovery-action delay — see serviceRecoveryActions in
+	// service_windows.go, which uses this constant — which is why it and this
+	// comment live here rather than in service_darwin.go.
 	serviceThrottle = 30
 )
 
-// serviceScope is where one launchd job lives: which launchd domain owns it,
-// which file describes it, and where its output goes.
+// serviceMech is the platform mechanism a serviceScope is bound to.
+type serviceMech int
+
+const (
+	launchdAgent  serviceMech = iota // darwin, gui/<uid>
+	launchdDaemon                    // darwin, system
+	winLogonTask                     // windows, the interactive user
+	winService                       // windows, LocalSystem
+)
+
+// serviceScope is where one service instance lives: which mechanism owns it,
+// and where its output goes. system and uid identify the scope every
+// mechanism understands; the fields below mech are consulted only by that
+// mechanism's own code.
 type serviceScope struct {
 	system bool
 	uid    int
-	// domain is a launchd domain target: "system", or "gui/<uid>".
+	// mech is which platform mechanism owns this scope. See serviceMech.
+	mech serviceMech
+
+	// domain and plist are launchd's own vocabulary for locating and
+	// describing the job — see service_darwin.go. They are meaningful only
+	// when mech is launchdAgent or launchdDaemon; a mechanism with no use for
+	// them (a Windows scheduled task, a Windows service) leaves them empty.
 	domain string
 	plist  string
+
 	logDir string
 	outLog string
 	errLog string
 	layout paths.Layout
 }
 
-// target is the service target `launchctl enable/bootout/kickstart/print` take.
-func (s serviceScope) target() string { return s.domain + "/" + serviceLabel }
-
+// kind is the one-phrase name for this scope's mechanism, printed in every
+// install, stop, remove and status line.
+//
+// It switches on mech rather than on system alone because "user agent" and
+// "system daemon" are launchd's words, and a Windows install printing
+// "installed dpb (user agent)" names something that does not exist on the
+// machine the user is reading it on. The two launchd mechanisms keep their
+// exact previous strings, which is why the switch falls through to the
+// system/agent pair rather than listing them.
 func (s serviceScope) kind() string {
+	switch s.mech {
+	case winLogonTask:
+		return "logon task"
+	case winService:
+		return "Windows service"
+	}
 	if s.system {
 		return "system daemon"
 	}
 	return "user agent"
 }
 
-// serviceScopeFor resolves the scope for this invocation.
-//
-// The log directory is NOT taken from the invoking user's layout when --system
-// is given. A LaunchDaemon runs as root with no SUDO_USER, so paths.Resolve()
-// inside it returns the machine-wide layout; pointing the plist at the invoking
-// user's ~/Library/Logs would split the daemon's own event log from the stdout
-// launchd captures for it, and `dpb service logs` would then read the wrong
-// half.
-func (g *globals) serviceScopeFor(system bool) (serviceScope, error) {
-	l, err := g.layoutOf()
-	if err != nil {
-		return serviceScope{}, err
-	}
-	s := serviceScope{system: system, uid: l.UID, layout: l}
-	if system {
-		root := g.sysRoot
-		if root == "" {
-			root = string(filepath.Separator)
-		}
-		s.domain = "system"
-		s.plist = filepath.Join(root, "Library", "LaunchDaemons", serviceLabel+".plist")
-		s.logDir = filepath.Join(root, "Library", "Logs", "dpb")
-	} else {
-		if l.Home == "" {
-			return serviceScope{}, usagef(
-				"there is no login session to install into (root with no SUDO_USER); use --system")
-		}
-		s.domain = "gui/" + strconv.Itoa(l.UID)
-		s.plist = filepath.Join(l.Home, "Library", "LaunchAgents", serviceLabel+".plist")
-		s.logDir = l.LogDir
-	}
-	s.outLog = filepath.Join(s.logDir, serviceOutLog)
-	s.errLog = filepath.Join(s.logDir, serviceErrLog)
-	return s, nil
-}
-
 // requireRoot turns "you need sudo" into exit code 4 rather than a launchctl
 // permission error the user has to decode.
+//
+// The sentence differs by mechanism because the privileged operation does.
+// launchd needs root to write into /Library/LaunchDaemons and bootstrap into
+// the system domain; the SCM needs an elevated token before it will accept
+// CreateService, Start or Delete, and there is no sudo on Windows to re-run
+// with. Advice that cannot be followed is worse than no advice, so the two are
+// not merged into one string.
 func requireRoot(s serviceScope, verb string) error {
 	if !s.system || s.layout.Elevated {
 		return nil
+	}
+	if s.mech == winService {
+		return codedError{
+			code: ExitNeedRoot,
+			err: fmt.Errorf("service %s --system creates a LocalSystem service, which the service control manager refuses to an unelevated token: re-run from an Administrator prompt",
+				verb),
+		}
 	}
 	return codedError{
 		code: ExitNeedRoot,
@@ -158,8 +187,7 @@ func requireRoot(s serviceScope, verb string) error {
 }
 
 func systemFlag(cmd *cobra.Command, v *bool) {
-	cmd.Flags().BoolVar(v, "system", false,
-		"act on the machine-wide LaunchDaemon instead of your login session's LaunchAgent")
+	cmd.Flags().BoolVar(v, "system", false, serviceHelp.scopeFlag)
 }
 
 // ── install ─────────────────────────────────────────────────────────────────
@@ -167,22 +195,11 @@ func systemFlag(cmd *cobra.Command, v *bool) {
 func newServiceInstallCmd(g *globals) *cobra.Command {
 	var system bool
 	cmd := &cobra.Command{
-		Use:   "install [-- RUN FLAGS...]",
-		Short: "Write the launchd job and load it",
-		Long: "install writes the property list, enables the job, and bootstraps it into\n" +
-			"launchd, then confirms launchd knows about it.\n\n" +
-			"Anything after `--` is appended to the `dpb run` command line the job runs.\n" +
-			"Those flags are parsed here, before the plist is written, so a typo is a\n" +
-			"usage error now rather than a job launchd respawns and kills forever.\n\n" +
-			"For scripts: --system writes into /Library/LaunchDaemons and bootstraps into\n" +
-			"launchd's system domain, so without root it stops before writing anything and\n" +
-			"returns exit 4. That code means \"re-run this with sudo\" and nothing else —\n" +
-			"`dpb tune` reports \"nothing is blocked here\" as exit 6, not 4, so a caller can\n" +
-			"branch on the two.",
-		Example: "  dpb service install\n" +
-			"  dpb service install -- --profile turkey --port 8081\n" +
-			"  sudo dpb service install --system",
-		Args: cobra.ArbitraryArgs,
+		Use:     "install [-- RUN FLAGS...]",
+		Short:   serviceHelp.installShort,
+		Long:    serviceHelp.installLong,
+		Example: serviceHelp.installExample,
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return serviceInstall(cmd.Context(), g, system, args)
 		},
@@ -208,82 +225,8 @@ func serviceInstall(ctx context.Context, g *globals, system bool, extra []string
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(s.plist), 0o755); err != nil {
-		return fmt.Errorf("service install: create %s: %w", filepath.Dir(s.plist), err)
-	}
-	if err := os.MkdirAll(s.logDir, 0o755); err != nil {
-		return fmt.Errorf("service install: create %s: %w", s.logDir, err)
-	}
-	// Under sudo the plist is written by root into the invoking user's
-	// LaunchAgents directory; hand both back or the user cannot remove their
-	// own service without sudo either. Chown is a no-op when unprivileged.
-	_ = s.layout.Chown(filepath.Dir(s.plist))
-	_ = s.layout.Chown(s.logDir)
-
 	args := append([]string{exe, "run"}, extra...)
-	if err := os.WriteFile(s.plist, []byte(servicePlist(args, s)), 0o644); err != nil {
-		return fmt.Errorf("service install: write %s: %w", s.plist, err)
-	}
-	_ = s.layout.Chown(s.plist)
-
-	run := g.runnerOf()
-
-	// Verify the file before launchd ever sees it. plutil is a different
-	// reader than the writer above, and an invalid plist is the one failure
-	// launchd reports so badly (a bare "Bootstrap failed: 5: Input/output
-	// error") that it is worth spending a process to rule out.
-	if res := run.Run(ctx, "plutil", "-lint", s.plist); res.Failed() {
-		_ = os.Remove(s.plist)
-		return fmt.Errorf("service install: the property list dpb generated is not valid: %s", res.Reason())
-	}
-
-	// Make a reinstall idempotent. A job that is already loaded makes
-	// bootstrap fail, and the user asked for "install", not "fail because you
-	// already did this".
-	_ = run.Run(ctx, "launchctl", "bootout", s.target())
-
-	if res := run.Run(ctx, "launchctl", "enable", s.target()); res.Failed() {
-		return serviceRollback(ctx, run, s, fmt.Errorf("service install: %s", res.Reason()))
-	}
-	if res := run.Run(ctx, "launchctl", "bootstrap", s.domain, s.plist); res.Failed() {
-		return serviceRollback(ctx, run, s, fmt.Errorf("service install: %s", res.Reason()))
-	}
-
-	st := serviceStateOf(ctx, run, s)
-	if !st.loaded {
-		return serviceRollback(ctx, run, s,
-			errors.New("service install: launchctl reported success but launchd does not know the job"))
-	}
-
-	w := g.env.Stdout
-	fmt.Fprintf(w, "installed  %s (%s)\n", serviceLabel, s.kind())
-	fmt.Fprintf(w, "  plist    %s\n", s.plist)
-	fmt.Fprintf(w, "  command  %s\n", strings.Join(args, " "))
-	fmt.Fprintf(w, "  logs     %s\n           %s\n", s.outLog, s.errLog)
-	fmt.Fprintf(w, "  state    %s\n", st.describe())
-	if s.system {
-		// Said out loud because a silently reduced coverage surface is exactly
-		// the failure this tool exists to avoid. `launchctl setenv` sets the
-		// variables in the domain of the process that calls it; a daemon runs
-		// in the system domain, and GUI applications inherit from their own
-		// gui/<uid> domain, so the HTTP(S)_PROXY lever that reaches Electron's
-		// in-process updater does not reach it from here.
-		fmt.Fprintf(w, "\nnote: a system daemon sets HTTP(S)_PROXY in launchd's system domain, which\n"+
-			"      GUI applications do not inherit. For proxy mode, the user agent\n"+
-			"      (`dpb service install` with no --system) covers more of your machine.\n")
-	} else {
-		fmt.Fprintf(w, "\nIt starts at login and is running now. `dpb service stop` unloads it.\n")
-	}
-	return nil
-}
-
-// serviceRollback undoes a half-finished install so the machine is never left
-// with a plist launchd will pick up at the next login and a user who was told
-// the install failed.
-func serviceRollback(ctx context.Context, run netstate.Runner, s serviceScope, cause error) error {
-	_ = run.Run(ctx, "launchctl", "bootout", s.target())
-	_ = os.Remove(s.plist)
-	return fmt.Errorf("%w (the job was removed again, nothing is installed)", cause)
+	return installMechanism(ctx, g, s, args)
 }
 
 // checkRunFlags parses extra against the real `dpb run` flag set.
@@ -316,7 +259,7 @@ func newServiceUninstallCmd(g *globals) *cobra.Command {
 	var system bool
 	cmd := &cobra.Command{
 		Use:   "uninstall",
-		Short: "Unload the launchd job and delete its property list",
+		Short: serviceHelp.uninstallShort,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return serviceUninstall(cmd.Context(), g, system)
@@ -334,29 +277,7 @@ func serviceUninstall(ctx context.Context, g *globals, system bool) error {
 	if err := requireRoot(s, "uninstall"); err != nil {
 		return err
 	}
-	run := g.runnerOf()
-
-	// bootout's result is deliberately ignored: it fails with "Could not find
-	// service" for a job that is not loaded, which is the state uninstall is
-	// trying to reach. What the job's absence is judged on is the check below,
-	// not this command's exit status.
-	_ = run.Run(ctx, "launchctl", "bootout", s.target())
-
-	if err := os.Remove(s.plist); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("service uninstall: remove %s: %w", s.plist, err)
-	}
-
-	st := serviceStateOf(ctx, run, s)
-	if st.loaded {
-		return fmt.Errorf("service uninstall: %s is still loaded in %s after bootout; "+
-			"run `launchctl print %s` to see why", serviceLabel, s.domain, s.target())
-	}
-	if _, err := os.Stat(s.plist); err == nil {
-		return fmt.Errorf("service uninstall: %s still exists", s.plist)
-	}
-	fmt.Fprintf(g.env.Stdout, "removed  %s (%s)\n", serviceLabel, s.kind())
-	fmt.Fprintf(g.env.Stdout, "  logs are left in place: %s\n", s.logDir)
-	return nil
+	return uninstallMechanism(ctx, g, s)
 }
 
 // ── start / stop ────────────────────────────────────────────────────────────
@@ -383,45 +304,16 @@ func serviceStart(ctx context.Context, g *globals, system bool) error {
 	if err := requireRoot(s, "start"); err != nil {
 		return err
 	}
-	if _, err := os.Stat(s.plist); err != nil {
-		return fmt.Errorf("service start: %s is not installed (no %s); run `dpb service install` first",
-			serviceLabel, s.plist)
-	}
-	run := g.runnerOf()
-
-	if st := serviceStateOf(ctx, run, s); !st.loaded {
-		// stop unloads rather than signalling, because the job has KeepAlive
-		// set and a signalled job comes straight back. So start's first move
-		// is to load it again.
-		if res := run.Run(ctx, "launchctl", "enable", s.target()); res.Failed() {
-			return fmt.Errorf("service start: %s", res.Reason())
-		}
-		if res := run.Run(ctx, "launchctl", "bootstrap", s.domain, s.plist); res.Failed() {
-			return fmt.Errorf("service start: %s", res.Reason())
-		}
-	}
-	if res := run.Run(ctx, "launchctl", "kickstart", s.target()); res.Failed() {
-		return fmt.Errorf("service start: %s", res.Reason())
-	}
-
-	st := serviceStateOf(ctx, run, s)
-	if !st.running {
-		return fmt.Errorf("service start: %s is loaded but not running (%s); `dpb service logs` will say why",
-			serviceLabel, st.describe())
-	}
-	fmt.Fprintf(g.env.Stdout, "started  %s (%s), %s\n", serviceLabel, s.kind(), st.describe())
-	return nil
+	return startMechanism(ctx, g, s)
 }
 
 func newServiceStopCmd(g *globals) *cobra.Command {
 	var system bool
 	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "Unload the job, leaving it installed",
-		Long: "stop boots the job out of launchd rather than signalling it. The job is\n" +
-			"configured to come back after an unclean exit, so a signal would only\n" +
-			"restart it; `dpb service start` loads it again.",
-		Args: cobra.NoArgs,
+		Short: serviceHelp.stopShort,
+		Long:  serviceHelp.stopLong,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return serviceStop(cmd.Context(), g, system)
 		},
@@ -438,14 +330,7 @@ func serviceStop(ctx context.Context, g *globals, system bool) error {
 	if err := requireRoot(s, "stop"); err != nil {
 		return err
 	}
-	run := g.runnerOf()
-	_ = run.Run(ctx, "launchctl", "bootout", s.target())
-
-	if st := serviceStateOf(ctx, run, s); st.loaded {
-		return fmt.Errorf("service stop: %s is still loaded in %s", serviceLabel, s.domain)
-	}
-	fmt.Fprintf(g.env.Stdout, "stopped  %s (%s), still installed at %s\n", serviceLabel, s.kind(), s.plist)
-	return nil
+	return stopMechanism(ctx, g, s)
 }
 
 // ── status ──────────────────────────────────────────────────────────────────
@@ -455,8 +340,8 @@ func newServiceStatusCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Report whether the job is installed, loaded and running",
-		Long: "status with no --system looks in your login session first and then in the\n" +
-			"system domain, so it finds the job wherever it was installed. Exit status is\n" +
+		Long: "status with no --system looks in your own login session first and then\n" +
+			"machine-wide, so it finds the job wherever it was installed. Exit status is\n" +
 			"0 only when a job is actually running.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -476,10 +361,22 @@ func serviceStatus(ctx context.Context, g *globals, system, pinned bool) error {
 		scopes = []bool{false, true}
 	}
 
-	run := g.runnerOf()
-	w := g.env.Stdout
 	found := false
 	running := false
+
+	// unsure collects the mechanisms that could not be consulted at all.
+	//
+	// It is kept apart from found/running because "I could not look" is a
+	// different answer from "I looked and it is not there", and reporting the
+	// second when the first is true is the defect class this tree has already
+	// paid for twice: a ProcessStart that read a failed lookup as "the process
+	// is dead" would have had Replay tear down a running user's network, and an
+	// envCtl.Get that read a failed read as "unset" would have deleted a
+	// pre-existing HTTPS_PROXY. Nothing ever lands here on darwin — launchctl's
+	// failure IS the answer, as serviceStateOf explains — but it does on
+	// Windows, where the SCM refuses a connection to an unelevated caller while
+	// the registry still says plainly whether the service exists.
+	var unsure []error
 
 	for _, sys := range scopes {
 		s, err := g.serviceScopeFor(sys)
@@ -491,29 +388,28 @@ func serviceStatus(ctx context.Context, g *globals, system, pinned bool) error {
 			}
 			return err
 		}
-		_, statErr := os.Stat(s.plist)
-		st := serviceStateOf(ctx, run, s)
-		if statErr != nil && !st.loaded {
-			continue
+		f, r, cannotTell := statusMechanism(ctx, g, s)
+		found = found || f
+		running = running || r
+		if cannotTell != nil {
+			unsure = append(unsure, cannotTell)
 		}
-		found = true
-		running = running || st.running
-
-		fmt.Fprintf(w, "%s  (%s)\n", serviceLabel, s.kind())
-		fmt.Fprintf(w, "  plist    %s%s\n", s.plist, existsNote(statErr))
-		fmt.Fprintf(w, "  state    %s\n", st.describe())
-		if st.pid > 0 {
-			fmt.Fprintf(w, "  pid      %d\n", st.pid)
-		}
-		fmt.Fprintf(w, "  logs     %s\n           %s\n", s.outLog, s.errLog)
 	}
 
 	if !found {
-		fmt.Fprintf(w, "%s is not installed\n", serviceLabel)
-		fmt.Fprintf(w, "  install it with `dpb service install`\n")
+		if len(unsure) > 0 {
+			return fmt.Errorf("service status: cannot tell whether %s is installed: %w",
+				serviceName, errors.Join(unsure...))
+		}
+		fmt.Fprintf(g.env.Stdout, "%s is not installed\n", serviceName)
+		fmt.Fprintf(g.env.Stdout, "  install it with `%s`\n", serviceInstallHint)
 		return errors.New("service status: not installed")
 	}
 	if !running {
+		if len(unsure) > 0 {
+			return fmt.Errorf("service status: %s is installed, but whether it is running could not be determined: %w",
+				serviceName, errors.Join(unsure...))
+		}
 		return errors.New("service status: installed but not running")
 	}
 	return nil
@@ -546,6 +442,29 @@ func newServiceLogsCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
+// serviceLogs needs no platform call: whatever mechanism produced s.outLog
+// and s.errLog, reading their tails back is the same file I/O regardless.
+//
+// What is NOT the same is WHO wrote them — or whether anybody did — and that
+// changes what this command is able to show.
+//
+// launchd redirects a job's stdout and stderr into these two paths itself,
+// from the StandardOutPath and StandardErrorPath keys service_darwin.go puts
+// in the plist, so on darwin the files exist from the job's first write no
+// matter what the job does. The Windows SCM has no equivalent key and gives a
+// service no console and no parent to inherit handles from, so there the
+// service process redirects its OWN os.Stdout and os.Stderr into the same two
+// files as its first act (svcrun_windows.go). Two consequences follow for that
+// mechanism: anything the service writes before the redirect — a failure to
+// resolve the log directory, most of all — has nowhere to go and is lost, and
+// the streams are ordinary buffered file writes, so a service the SCM kills
+// leaves their tail unwritten.
+//
+// A Windows Scheduled Task action gets the same nothing as a service and has
+// no redirect at all, so for that mechanism these two files are never written
+// by anyone. That is what serviceLogNote says, in the mechanism's own words,
+// before this command prints "(no such file)" twice and leaves a tester
+// concluding their task is broken.
 func serviceLogs(g *globals, system bool, lines int) error {
 	if lines <= 0 {
 		return usagef("service logs: --lines must be positive, got %d", lines)
@@ -555,6 +474,9 @@ func serviceLogs(g *globals, system bool, lines int) error {
 		return err
 	}
 	w := g.env.Stdout
+	if note := serviceLogNote(s); note != "" {
+		fmt.Fprintf(w, "%s\n\n", note)
+	}
 	for _, f := range []string{s.outLog, s.errLog} {
 		fmt.Fprintf(w, "==> %s\n", f)
 		b, err := os.ReadFile(f)
@@ -574,7 +496,7 @@ func serviceLogs(g *globals, system bool, lines int) error {
 		}
 		fmt.Fprintln(w, out)
 	}
-	fmt.Fprintf(w, "\nfollow with: tail -f %s\n", s.errLog)
+	fmt.Fprintf(w, "\n%s\n", serviceFollowHint(s.errLog))
 	return nil
 }
 
@@ -589,123 +511,4 @@ func tailLines(s string, n int) string {
 		all = all[len(all)-n:]
 	}
 	return strings.Join(all, "\n")
-}
-
-// ── launchctl print, read as evidence rather than as an exit code ───────────
-
-// serviceState is what `launchctl print` says about a job.
-type serviceState struct {
-	loaded  bool
-	running bool
-	state   string
-	pid     int
-}
-
-func (st serviceState) describe() string {
-	switch {
-	case !st.loaded:
-		return "not loaded"
-	case st.state != "":
-		return st.state
-	case st.running:
-		return "running"
-	default:
-		return "loaded"
-	}
-}
-
-var (
-	// launchctl print's body is an indented block of `key = value` lines.
-	// Captured from this machine (macOS 26.3.1) on 2026-09-02:
-	//
-	//   gui/501/com.apple.Finder = {
-	//   	active count = 7
-	//   	state = running
-	//   	pid = 430
-	//
-	// A job that is loaded but idle prints `state = not running` and no pid at
-	// all, which is why "running" is decided by the state line and not by the
-	// presence of a pid.
-	reServiceState = regexp.MustCompile(`(?m)^\s*state\s*=\s*(.+?)\s*$`)
-	reServicePID   = regexp.MustCompile(`(?m)^\s*pid\s*=\s*(\d+)\s*$`)
-)
-
-// serviceStateOf asks launchd about the job.
-//
-// A failure is reported as "not loaded" rather than as an error, because that
-// is what launchctl's failure means here: `launchctl print` on an unknown job
-// exits 113 with "Could not find service ... in domain for ...". Any other
-// failure — a missing launchctl, a permission problem — also leaves us unable
-// to claim the job is loaded, and every caller treats "not loaded" as the
-// conservative answer.
-func serviceStateOf(ctx context.Context, run netstate.Runner, s serviceScope) serviceState {
-	res := run.Run(ctx, "launchctl", "print", s.target())
-	if res.Failed() {
-		return serviceState{}
-	}
-	st := serviceState{loaded: true}
-	if m := reServiceState.FindStringSubmatch(res.Combined); m != nil {
-		st.state = m[1]
-		st.running = m[1] == "running"
-	}
-	if m := reServicePID.FindStringSubmatch(res.Combined); m != nil {
-		st.pid, _ = strconv.Atoi(m[1])
-	}
-	return st
-}
-
-// ── the property list ───────────────────────────────────────────────────────
-
-// servicePlist renders the job description.
-//
-// Two omissions are deliberate. There is no PATH in EnvironmentVariables:
-// launchd's default is /usr/bin:/bin:/usr/sbin:/sbin (confirmed by reading
-// `launchctl print`'s "default environment" on this machine), which already
-// contains every tool netstate shells out to — networksetup and scutil in
-// /usr/sbin, route and ifconfig in /sbin, launchctl and ps in /bin. And there
-// is no UserName key for the daemon: `dpb run` needs root for nothing in proxy
-// mode, but the --system form exists precisely for the cases that do.
-func servicePlist(argv []string, s serviceScope) string {
-	var b strings.Builder
-	b.WriteString(xml.Header)
-	b.WriteString("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
-	b.WriteString("<plist version=\"1.0\">\n<dict>\n")
-
-	b.WriteString("\t<key>Label</key>\n\t<string>" + plistText(serviceLabel) + "</string>\n")
-
-	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n")
-	for _, a := range argv {
-		b.WriteString("\t\t<string>" + plistText(a) + "</string>\n")
-	}
-	b.WriteString("\t</array>\n")
-
-	b.WriteString("\t<key>RunAtLoad</key>\n\t<true/>\n")
-
-	// KeepAlive as a dictionary rather than <true/>: SuccessfulExit=false means
-	// "respawn only when it exited non-zero", so `dpb panic` and a deliberate
-	// `dpb service stop` do not fight launchd.
-	b.WriteString("\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n")
-	b.WriteString(fmt.Sprintf("\t<key>ThrottleInterval</key>\n\t<integer>%d</integer>\n", serviceThrottle))
-
-	// Interactive keeps launchd from applying background-task CPU and I/O
-	// throttling to a process every TCP connection on the machine waits behind.
-	b.WriteString("\t<key>ProcessType</key>\n\t<string>Interactive</string>\n")
-
-	b.WriteString("\t<key>StandardOutPath</key>\n\t<string>" + plistText(s.outLog) + "</string>\n")
-	b.WriteString("\t<key>StandardErrorPath</key>\n\t<string>" + plistText(s.errLog) + "</string>\n")
-
-	b.WriteString("</dict>\n</plist>\n")
-	return b.String()
-}
-
-// plistText escapes a string for an XML text node. A home directory can contain
-// an ampersand; without this the plist would be silently invalid and launchd
-// would report only "Input/output error".
-func plistText(s string) string {
-	var b bytes.Buffer
-	if err := xml.EscapeText(&b, []byte(s)); err != nil {
-		// EscapeText writes to a bytes.Buffer, which never fails.
-		return s
-	}
-	return b.String()
 }

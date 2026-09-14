@@ -31,6 +31,31 @@
 // it catches a write that landed differently from what was asked, but not a
 // write that landed correctly and is nonetheless not used.
 //
+// # Contract 2b: the proxy verifier is weaker for a hive that is not our own
+//
+// proxyCtl normally satisfies Contract 1 well: the setters write registry
+// values through advapi32 and Live reads the RESOLVED configuration back out
+// of winhttp.dll, a different DLL answering a different question. That split
+// survives for the ordinary case and is still the strongest one this package
+// has.
+//
+// It does NOT survive when dpb is elevated as a DIFFERENT account than the
+// logged-on user and therefore writes that user's hive by SID (see
+// userhive.go). WinHTTP has no by-SID form —
+// WinHttpGetIEProxyConfigForCurrentUser answers for the CALLING token, and
+// MSDN says so: "If the caller does not impersonate a logged on user, WinHTTP
+// attempts to retrieve the Internet Explorer settings for the current service
+// process" — so on that path Live reads the same hive the setters wrote and
+// the second observer is gone. Live says which observer answered rather than
+// letting the two cases look alike, and this is stated here for the same
+// reason Contract 2 above is: an exception that is written down can be argued
+// with, and one that is not is just a hole.
+//
+// A smaller version of the same admission applies on BOTH paths: Live reads
+// the ProxyEnable DWORD out of the hive even when WinHTTP supplies everything
+// else. See proxyCtl.Live for why the verifier needs it and why that read can
+// only ever turn a reported proxy OFF.
+//
 // Why not route.exe, which would restore the CLI/kernel split: it fails
 // Contract 1 twice over. It reports failure by printing a localized sentence
 // ("The route addition failed: The object already exists.") whose wording is
@@ -51,6 +76,7 @@ package scwindows
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/mumudevx/dpb/internal/sysport"
 )
@@ -59,6 +85,15 @@ type port struct {
 	run  sysport.Runner
 	rib  sysport.RIBReader
 	logf func(string, ...any)
+
+	// The per-user registry root proxy.go and env.go write, resolved on first
+	// use and then pinned. The mutex is what makes the pin safe to read from
+	// whichever goroutine an Op happens to run on; see (*port).userHive in
+	// userhive.go for why it is pinned rather than re-resolved, and why a
+	// FAILED resolution is deliberately not pinned.
+	hiveMu sync.Mutex
+	hive   userHive
+	hiveOK bool
 }
 
 // New returns the Windows Port reading and writing through e.

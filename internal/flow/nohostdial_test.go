@@ -72,6 +72,22 @@ var goStmtExemptFiles = map[string]string{
 		"immediate exit when teardown is wedged, and swallowing a panic in it would leave " +
 		"the user with a process that answers no signal at all.",
 
+	"cmd/dpb/svcentry_windows.go": "armServiceStop's goroutine only relays an " +
+		"already-recovered os.Signal value from serviceStop into the channel " +
+		"installSignals owns: `for s := range serviceStop { ch <- s }`. It parses nothing " +
+		"and touches no connection — the SCM's stop control was already turned into a " +
+		"plain Go value before this runs — which is the same top-level, no-datapath " +
+		"reasoning the cmd/dpb/main.go entry above gives for watchSignals.",
+
+	"internal/cliapp/svcrun_windows.go": "Body is run() itself, which already carries " +
+		"its own recover-teardown-repanic barrier in cmd/dpb/main.go's run(). Wrapping it " +
+		"again here in flow.Safe would swallow that re-panic instead of letting it reach " +
+		"the process, leave done never written, and wedge Execute reporting Running " +
+		"forever for a service that is actually dead. The crash escaping this goroutine is " +
+		"what lets the SCM see the process die WITHOUT reporting Stopped, which is exactly " +
+		"the signal serviceRecoveryActions restarts on; recovering it here would silently " +
+		"disable dpb's own crash recovery on Windows.",
+
 	"internal/janitor/spawn.go": "the one goroutine is the child reaper inside Stop: " +
 		"`defer close(done); c.cmd.Wait()`. It touches no network input and calls one " +
 		"os/exec method, and janitor is deliberately a leaf package below internal/flow so " +
