@@ -476,5 +476,6 @@ func newRoot(g *globals) *cobra.Command {
 	root.AddCommand(newReloadCmd(g))
 	root.AddCommand(newSelftestCmd(g))
 	root.AddCommand(newJanitorCmd(g))
+	root.AddCommand(newDevtoolCmd(g))
 	return root
 }

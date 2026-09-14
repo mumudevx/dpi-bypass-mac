@@ -54,6 +54,18 @@ COVER_GATED := \
 # while a SKIP line is an honest "not measured on this platform", printed on
 # every run where someone can see it.
 
+# internal/testwin is NOT listed above, and that is a decision rather than an
+# oversight. `dpb devtool capture-sysconf` (internal/cliapp/devtool_windows.go)
+# writes JSON fixtures into internal/testwin/fixtures/ at runtime, but nothing
+# under internal/testwin is a Go package: there is no .go file there, only a
+# directory MkdirAll creates on demand on a real Windows machine. `go list
+# ./internal/...` never names it, so there is no statement count for a floor
+# to describe and no function for the zero-function scan to find — not the
+# scwindows case (a real windows-tagged package this darwin run cannot
+# exercise), but the case one level further back: no code exists here for any
+# platform's coverage run to measure. Adding it to COVER_GATED would print a
+# floor for a package that is not a package.
+
 # A regex matching a file inside any gated package.
 COVER_GATED_RE := $(MODULE)/(internal/(cliapp|flow|strategy|ops|emit|janitor|tlsmsg|front/proxyfe|front/tunfe|netstate|netwatch|policy|resolve|probe|sysport|sysconf/scdarwin|sysconf/scwindows|paths))/
 
