@@ -615,33 +615,10 @@ func TestTunAppearsInTheBanner(t *testing.T) {
 
 // TestTunDryRunOpensNoDeviceAndStillPrintsThePlan.
 //
-// --dry-run is the one thing an unprivileged user can usefully do with --tun,
-// so it must produce the REAL Op sequence — the ordering is the part that is
-// hard to get right and the part worth reading — while opening no utun, which
-// would be a mutation and would need root.
-func TestTunDryRunOpensNoDeviceAndStillPrintsThePlan(t *testing.T) {
-	t.Parallel()
-	fx := newTunFixture(t, tunFixtureOptions{args: []string{"--dry-run"}, noDevice: true})
-	defer fx.stop()
-
-	if fx.opened {
-		t.Fatal("--dry-run opened a utun; that is a mutation and it needs root")
-	}
-	want := []netstate.OpKind{
-		netstate.OpIfconfig, netstate.OpRoute, netstate.OpRoute,
-		netstate.OpRoute, netstate.OpRoute, netstate.OpDNSServers,
-	}
-	got := fx.seq.kinds()
-	if len(got) != len(want) {
-		t.Fatalf("--dry-run planned %d Op(s), want %d:\n  %s",
-			len(got), len(want), strings.Join(fx.seq.describe(), "\n  "))
-	}
-	// With no device there is no kernel-assigned name, so the plan names the
-	// device that was ASKED for and says so by using it consistently.
-	if d := fx.seq.describe(); !strings.Contains(d[0], "utun ") {
-		t.Fatalf("--dry-run's plan does not name the requested device: %s", d[0])
-	}
-}
+// TestTunDryRunOpensNoDeviceAndStillPrintsThePlan moved to
+// tunrun_unix_test.go: its last assertion names the device --tun-name defaults
+// to, and there is no name both platforms accept. tunrun_windows_test.go
+// asserts the same plan against "dpb".
 
 // TestTunCapturesIPv6OnlyWithAPathToProtectItWith.
 //

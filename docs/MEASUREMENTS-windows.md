@@ -216,6 +216,91 @@ connected to dpb" does not work on Windows at all. Replacing it needs a Windows
 connection-table reader — `GetExtendedTcpTable`, which
 `internal/sysconf/scwindows/iphlp.go` already has the shape for.
 
+## What the harness was actually reading (2026-09-14, third Windows run)
+
+27 failures became 2. The number is not the finding; what the remaining
+Category 2 pass had to discover to get there is.
+
+### The command tests were reading the runner, not the fixture
+
+`internal/cliapp`'s harness injects a `netstate.Runner`. On darwin that IS the
+platform — `scdarwin` reaches the system by *running* `networksetup`, `scutil`
+and `launchctl`, so `fakeMac` substitutes for the whole OS. `scwindows` calls
+advapi32, winhttp.dll and iphlpapi directly and takes a Runner only for
+`netsh`, whose exit status alone it consults.
+
+So the Windows runs of those tests were never "passing against a fake macOS".
+They were reading — and on the write paths mutating — **the CI runner's own
+registry hive**, and reporting "no system proxy is set" whatever the test had
+just set up. `scwindows` has real tests; the command layer above it had none
+that ran here at all.
+
+`harnessPort` is a `sysport.Port` over the same `fakeMac` state, injected on
+Windows only. Fifteen test functions and two subtests went from testing nothing
+to testing the Windows build of `dpb doctor` and `dpb coverage`, platform leaves
+included.
+
+### The unresolved `internal/flow` failure was the clock
+
+`TestLadderObservesTheDialledAddress` — uncategorised in the first triage,
+reproducible 2 of 2 in the second, "somewhere the source does not say" — is Go's
+monotonic clock on windows/amd64. It reads the interrupt time out of
+`KUSER_SHARED_DATA`, whose granularity is the system timer tick: **15.6 ms by
+default**, 1 ms if something on the machine has raised it.
+
+A first response arriving inside one tick therefore measures as **exactly
+zero**, and `RTTTracker.Observe` discards non-positive samples — a guard written
+for a clock that went *backwards*. The destination is never learned, `Known()`
+stays false, and the adaptive response window never engages. §6 above puts a
+successful desynced handshake on the measured line at ~23 ms, the same order as
+the tick, so **a large share of real Windows responses would have read as zero
+and been thrown away.** That is a live product defect, not a test artefact, and
+it was invisible on darwin where the reading is nanosecond-grained.
+
+The direct measurement of the tick came from a different test in the same run:
+`TestTunTeardownRevertsBeforeTheDeviceCloses` printed two `time.Now()` values
+taken at different moments as byte-identical, monotonic reading included —
+`m=+11.619999501` on both sides of an `After()` comparison — and reported
+teardown in the wrong order.
+
+Both are fixed at the measurement site: a sample the clock was too coarse to
+time now says "faster than this clock can see" rather than "no sample".
+
+### `dpb doctor` on Windows answers about the machine it runs on
+
+Six of the eight doctor failures were one fact: a GitHub-hosted runner has no
+`wintun.dll`, `checkWintun()` calls `LoadLibraryEx` on the real machine, and
+there was no seam. A test that set up a clean machine and asked `dpb doctor`
+whether it was clean got an answer about the runner's driver inventory —
+`rep.Failed` 1 where it wanted 0, exit 3 where it wanted 0, and `--quiet`
+printing a remedy on a machine with nothing wrong with it.
+
+Worth keeping in mind beyond the test: on any Windows machine without the
+driver, `dpb doctor` exits 3. That is correct for a `--tun` user and arguably
+loud for a proxy-only one; the remedy line says "proxy mode does not need it",
+which is the mitigation actually shipped.
+
+### `paths.RestrictToOwner` had no test on either platform
+
+The two `Mode().Perm() == 0600` assertions the second run caught (the tuned
+profile and the control socket) were testing `RestrictToOwner` without being
+able to see it: Go derives `Mode().Perm()` from the file ATTRIBUTES, so it
+reports 0666 on Windows however tight the DACL is. Those two assertions are now
+`!windows`, and the function they were about has its first test — reading the
+security descriptor back and asserting the DACL is the file's own, holds exactly
+one entry, and is PROTECTED, which is the half that does the work.
+
+### The bare-proxy disagreement is settled, and still not fixed
+
+`TestSetManualExpandsABareProxy` is the only failure left, and the git history
+says which side is wrong. `23d165c` introduced the test; the later `e9ac983`
+introduced `proxyEntry.Bare` and a table case in the same file asserting the
+OPPOSITE shape for an input of the same form, because re-emitting an expanded
+bare token "silently narrow[s] 'same proxy for all protocols' down to three" —
+it was fixing a Critical. The code is right. The test asserts the narrowing the
+fix removed, and nobody noticed because the Windows suite had never run. It
+should be deleted; the property it names is already covered by that table case.
+
 ## What CI still cannot tell you
 
 Every result above came from a GitHub-hosted `windows-latest` runner. That

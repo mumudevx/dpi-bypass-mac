@@ -4,7 +4,10 @@ package cliapp
 
 import (
 	"bytes"
+	"strings"
 	"testing"
+
+	"github.com/mumudevx/dpb/internal/netstate"
 )
 
 // TestTunDefaultsToOffAndNamesTheAdapterOnWindows is
@@ -44,5 +47,47 @@ func TestTunDefaultsToOffAndNamesTheAdapterOnWindows(t *testing.T) {
 	// for everybody who did not pass the flag.
 	if err := validateTunName(v); err != nil {
 		t.Fatalf("the default --tun-name %q is refused by validateTunName: %v", v, err)
+	}
+}
+
+// TestTunDryRunOpensNoAdapterAndStillPrintsThePlan is
+// tunrun_unix_test.go's TestTunDryRunOpensNoDeviceAndStillPrintsThePlan with
+// this platform's adapter name.
+//
+// --dry-run is the one thing an unprivileged user can usefully do with --tun,
+// so it must produce the REAL Op sequence — the ordering is the part that is
+// hard to get right and the part worth reading — while opening no adapter,
+// which would be a mutation and would need elevation.
+//
+// The last assertion is the only line that differs, and it has to: with no
+// adapter there is no name to read back off a device, so the plan names the
+// one that was ASKED for, and --tun-name's default is "dpb" here and "utun"
+// there. validateTunName on each platform rejects the other's, so no shared
+// literal exists.
+func TestTunDryRunOpensNoAdapterAndStillPrintsThePlan(t *testing.T) {
+	t.Parallel()
+	fx := newTunFixture(t, tunFixtureOptions{args: []string{"--dry-run"}, noDevice: true})
+	defer fx.stop()
+
+	if fx.opened {
+		t.Fatal("--dry-run opened an adapter; that is a mutation and it needs elevation")
+	}
+	want := []netstate.OpKind{
+		netstate.OpIfconfig, netstate.OpRoute, netstate.OpRoute,
+		netstate.OpRoute, netstate.OpRoute, netstate.OpDNSServers,
+	}
+	got := fx.seq.kinds()
+	if len(got) != len(want) {
+		t.Fatalf("--dry-run planned %d Op(s), want %d:\n  %s",
+			len(got), len(want), strings.Join(fx.seq.describe(), "\n  "))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Op %d is %s, want %s\n  %s", i, got[i], want[i],
+				strings.Join(fx.seq.describe(), "\n  "))
+		}
+	}
+	if d := fx.seq.describe(); !strings.Contains(d[0], "dpb ") {
+		t.Fatalf("--dry-run's plan does not name the requested adapter: %s", d[0])
 	}
 }

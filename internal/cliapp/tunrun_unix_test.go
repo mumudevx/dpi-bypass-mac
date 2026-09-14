@@ -33,7 +33,18 @@
 // cannot cross the boundary is this test's route(8)-shaped fake, and rewriting
 // it to inject a Port would be editing an existing test body.
 //
-// Both function bodies are unchanged from tunrun_test.go, where they lived
+// TestTunDryRunOpensNoDeviceAndStillPrintsThePlan is here for the first
+// reason, one step further on. --dry-run opens no device, so there is no
+// kernel-assigned name and the plan must name the device that was ASKED for —
+// which is --tun-name's default, and there is NO name both platforms accept:
+// darwin's validateTunName requires "utun" or "utunN" and Windows' rejects
+// "utun" outright as meaningless in Network Connections. The fixture cannot
+// pass a name that satisfies both, so the assertion's literal is the
+// platform's. Everything before it — that no device was opened, and that the
+// full six-Op plan is still produced, which is the part worth reading — is
+// asserted again in tunrun_windows_test.go.
+//
+// All three function bodies are unchanged from tunrun_test.go, where they lived
 // until the Windows suite started running.
 
 package cliapp
@@ -41,6 +52,7 @@ package cliapp
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/mumudevx/dpb/internal/netstate"
@@ -126,5 +138,33 @@ func TestTunRouteOpsApplyAndRevertThroughNetstate(t *testing.T) {
 	routes, _ = rib.Routes()
 	if len(routes) != 0 {
 		t.Fatalf("teardown left %d route(s) behind: %v", len(routes), routes)
+	}
+}
+
+// --dry-run is the one thing an unprivileged user can usefully do with --tun,
+// so it must produce the REAL Op sequence — the ordering is the part that is
+// hard to get right and the part worth reading — while opening no utun, which
+// would be a mutation and would need root.
+func TestTunDryRunOpensNoDeviceAndStillPrintsThePlan(t *testing.T) {
+	t.Parallel()
+	fx := newTunFixture(t, tunFixtureOptions{args: []string{"--dry-run"}, noDevice: true})
+	defer fx.stop()
+
+	if fx.opened {
+		t.Fatal("--dry-run opened a utun; that is a mutation and it needs root")
+	}
+	want := []netstate.OpKind{
+		netstate.OpIfconfig, netstate.OpRoute, netstate.OpRoute,
+		netstate.OpRoute, netstate.OpRoute, netstate.OpDNSServers,
+	}
+	got := fx.seq.kinds()
+	if len(got) != len(want) {
+		t.Fatalf("--dry-run planned %d Op(s), want %d:\n  %s",
+			len(got), len(want), strings.Join(fx.seq.describe(), "\n  "))
+	}
+	// With no device there is no kernel-assigned name, so the plan names the
+	// device that was ASKED for and says so by using it consistently.
+	if d := fx.seq.describe(); !strings.Contains(d[0], "utun ") {
+		t.Fatalf("--dry-run's plan does not name the requested device: %s", d[0])
 	}
 }
