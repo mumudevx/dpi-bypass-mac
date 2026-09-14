@@ -55,9 +55,10 @@ Error: Refusing to load formula mumudevx/tap/dpb from untrusted tap mumudevx/tap
 > **Status.** Installed and run end to end on macOS 26.3.1 / Homebrew 6.0.18,
 > Apple Silicon, from the `v0.1.0` release: `dpb 0.1.0 (b3c9bcce65ed)`, and
 > `dpb probe --host discord.com --strategy tlsfrag:pos=snimid` passes on a live
-> Türk Telekom line while the same probe with no strategy is reset. Intel has
-> not been tried — the amd64 archive is built and published but nobody has run
-> it. Check `dpb version` against the tag you expected.
+> Türk Telekom line while the same probe with no strategy is reset. dpb ships
+> for Apple Silicon only — there is no darwin/amd64 archive, on purpose — so
+> `brew install dpb` on an Intel Mac reports that plainly rather than
+> installing anything. Check `dpb version` against the tag you expected.
 
 A brew-installed `dpb` is never evaluated by Gatekeeper, and this is not luck:
 Homebrew downloads formulae with `curl`, and `curl` sets no
@@ -145,6 +146,16 @@ Download it for your architecture from [wintun.net](https://www.wintun.net)
 and place `wintun.dll` next to `dpb.exe`. `dpb doctor` checks for it before
 you have to find out the hard way; without it, `--tun` fails with "the wintun
 driver is not installed".
+
+wintun.net's prebuilt-binaries licence (bundled in their ZIP as
+`LICENSE.txt`) does permit redistributing the signed DLL alongside software
+that calls it only through the documented `wintun.h` API, which is exactly
+what `golang.zx2c4.com/wintun` (an MIT-licensed Go wrapper, not the driver
+itself) does. dpb does not bundle the DLL anyway: doing so would mean
+fetching and pinning a third-party binary during release, per architecture,
+outside anything `go build` or `go mod` verifies, and wintun.net is already a
+single authoritative place to get driver updates. That is an engineering
+choice, not a licensing block.
 
 **Service.** Two commands, for two different things:
 
@@ -332,8 +343,10 @@ the numbers:
   works. The test suite proves the code matches the model. It cannot prove the
   model matches the middlebox.
 - The Homebrew install has been exercised on exactly one machine, the one this
-  was developed on. A clean machine, an Intel Mac, and an older Homebrew that
-  has no `brew trust` have all not been tried.
+  was developed on. A clean machine and an older Homebrew that has no
+  `brew trust` have not been tried. An Intel Mac has also not been tried, but
+  is not expected to install anything — dpb ships arm64-only and the formula
+  reports that rather than attempting a download.
 
 ## Development
 
@@ -373,8 +386,9 @@ git tag -a v0.1.0 -m 'v0.1.0' && git push origin v0.1.0
 ```
 
 `.github/workflows/release.yml` runs the race tests and the coverage gate, then
-GoReleaser builds `darwin/arm64` and `darwin/amd64`, publishes the archives and
-`checksums.txt`, and updates `Formula/dpb.rb` in `mumudevx/homebrew-tap`.
+GoReleaser builds `darwin/arm64` (Apple Silicon only) and `windows/{amd64,arm64}`,
+publishes the archives and `checksums.txt`, and updates `Formula/dpb.rb` in
+`mumudevx/homebrew-tap`.
 
 Two things have to exist once, before the first tag:
 

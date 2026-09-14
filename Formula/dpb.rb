@@ -3,26 +3,47 @@
 # The canonical copy lives in mumudevx/homebrew-tap and is written there by
 # GoReleaser (see .goreleaser.yaml) whenever a tag is pushed. This copy is the
 # manual fallback and the reviewable reference: if the tap push ever fails, or
-# a release is cut by hand, fill in the two checksums below and commit this file
+# a release is cut by hand, fill in the checksum below and commit this file
 # to the tap as Formula/dpb.rb.
 #
-# FILLING IN THE CHECKSUMS
+# FILLING IN THE CHECKSUM
 #
-#   Every release publishes a checksums.txt alongside the archives. The two
-#   values below are the sha256 lines for the darwin archives:
+#   Every release publishes a checksums.txt alongside the archives. The value
+#   below is the sha256 line for the one darwin archive dpb ships
+#   (darwin/arm64 — see the ARM64-ONLY note below):
 #
 #     curl -sL https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/checksums.txt
 #
-#   or compute them from the files themselves:
+#   or compute it from the file itself:
 #
-#     shasum -a 256 dpb_0.1.0_darwin_arm64.tar.gz dpb_0.1.0_darwin_amd64.tar.gz
+#     shasum -a 256 dpb_0.1.0_darwin_arm64.tar.gz
 #
-#   Both must be filled in before this formula is published. Homebrew refuses to
+#   It must be filled in before this formula is published. Homebrew refuses to
 #   install a formula whose sha256 does not match, so a placeholder left in
 #   place fails loudly at install time rather than silently installing
 #   something unverified — which is the right direction, but it is still a
 #   broken install command, and a broken install command is what this milestone
 #   exists to end.
+#
+# ARM64-ONLY, ON PURPOSE, AND THE on_intel BLOCK REFLECTS THAT
+#
+#   .goreleaser.yaml's builds.ignore excludes darwin/amd64: dpb ships for
+#   Apple Silicon only, and no darwin/amd64 archive has ever been published.
+#   An earlier version of this formula had an on_intel block whose url pointed
+#   at "dpb_<v>_darwin_amd64.tar.gz" — an archive `goreleaser release
+#   --snapshot` never produces, so `brew install dpb` on an Intel Mac 404'd.
+#   on_intel below calls `odie` instead: verified with a local tap and
+#   `brew fetch --arch=intel`, which prints the odie message and exits, no
+#   download attempted. That is Homebrew's own on_arm/on_intel DSL working as
+#   designed; it is not what GoReleaser's generated formula does for the same
+#   case. GoReleaser 2.18 has no macOS archive for amd64 to reason about, so it
+#   wraps the lone url in a bare `if Hardware::CPU.arm?` with no fallback —
+#   verified by running `goreleaser release --snapshot` and forcing that
+#   branch closed on an arm64 host: Homebrew fails with "formula requires at
+#   least a URL" and a full backtrace asking the user to file a bug. No field
+#   in `brews:` (url_template, custom_block, dependencies) changes that. This
+#   manual copy is the only place, today, that gives an Intel user a clean
+#   message instead of a crash or a 404.
 #
 # NO CODESIGN, NO NOTARIZATION, AND THAT IS CORRECT
 #
@@ -54,8 +75,12 @@ class Dpb < Formula
       sha256 "REPLACE_WITH_ARM64_SHA256" # from checksums.txt; see the header
     end
     on_intel do
-      url "https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/dpb_0.1.0_darwin_amd64.tar.gz"
-      sha256 "REPLACE_WITH_AMD64_SHA256" # from checksums.txt; see the header
+      # See "ARM64-ONLY, ON PURPOSE" above: there is no darwin/amd64 archive
+      # to point at, so this reports the platform as unsupported instead of
+      # attempting a download that would 404.
+      odie "dpb ships an Apple Silicon (arm64) build only; there is no " \
+           "darwin/amd64 archive to install. See " \
+           "https://github.com/mumudevx/dpi-bypass-mac for status."
     end
   end
 

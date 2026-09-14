@@ -22,9 +22,11 @@
 #      carries only com.apple.provenance, and `xattr -p com.apple.quarantine`
 #      answers "No such xattr".
 #
-#   3. No universal binary. Two per-architecture archives are what the formula's
-#      on_arm / on_intel blocks want, and lipo would only add a step whose one
-#      job — preserving the signature — is not needed given (1).
+#   3. No universal binary. There is only one darwin archive (arm64), so there
+#      is nothing for lipo to combine. Formula/dpb.rb's on_intel block does not
+#      want a second archive to glue in — it calls odie and refuses the
+#      install, because darwin/amd64 is excluded below on purpose, not because
+#      an archive is missing by accident.
 #
 # See docs/DOSSIER.md for the sources behind (1) and (2).
 
@@ -114,6 +116,18 @@ checksum:
 # quarantined, and the September 2026 cask delisting applies to homebrew-cask
 # only. So this stays a formula until `brews` is actually removed; pin
 # goreleaser to the v2 line (the release workflow does).
+#
+# Migrating was checked, not assumed: GoReleaser's own homebrew_casks docs
+# (goreleaser.com/customization/homebrew_casks) put the cask manifest in
+# Casks/, not Formula/ — a tap layout change — and their worked example
+# removes the quarantine bit with a post-install `xattr` hook, which that same
+# page calls out as bypassing macOS security. That hook is the quarantine
+# problem above, not a fix for it. There is also no documented automatic
+# upgrade from an existing formula install to a cask (Homebrew tracks the two
+# as unrelated install types); short of hand-writing a tap_migrations.json, a
+# user already on the formula would have to `brew uninstall dpb` and
+# `brew install --cask dpb` themselves. None of that is worth trading away for
+# silencing one deprecation warning on an unsigned, unnotarized binary.
 brews:
   - name: dpb
     ids:
