@@ -70,22 +70,10 @@ func TestRunOffersTheTunFlags(t *testing.T) {
 	}
 }
 
-// TestTunDefaultsToOffInTheParsedFlags pins the default itself rather than the
-// help text, so a change of wording cannot hide a change of behaviour.
-func TestTunDefaultsToOffInTheParsedFlags(t *testing.T) {
-	t.Parallel()
-	g := &globals{env: Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}}
-	cmd := newRunCmd(g)
-	if err := cmd.ParseFlags(nil); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if v, _ := cmd.Flags().GetBool("tun"); v {
-		t.Fatal("--tun defaults to on; proxy mode must stay the default")
-	}
-	if v, _ := cmd.Flags().GetString("tun-name"); v != "utun" {
-		t.Fatalf("--tun-name defaults to %q, want utun so the kernel picks the unit", v)
-	}
-}
+// TestTunDefaultsToOffInTheParsedFlags moved to tunrun_unix_test.go: it asserts
+// that --tun-name defaults to "utun", which is a BSD kernel convention and not
+// the default on Windows. tunrun_windows_test.go asserts the same two defaults
+// against "dpb".
 
 // ── exit code 4: needs root ─────────────────────────────────────────────────
 
@@ -462,70 +450,9 @@ func TestTunBringUpUnwindsAPartialFailure(t *testing.T) {
 
 // ── the Ops are real netstate Ops ───────────────────────────────────────────
 
-// TestTunRouteOpsApplyAndRevertThroughNetstate takes the Ops the command built
-// and runs them through a real netstate.Manager against internal/testnet's
-// fakes, so "journalled through netstate" is a property of the objects rather
-// than of a comment.
-func TestTunRouteOpsApplyAndRevertThroughNetstate(t *testing.T) {
-	t.Parallel()
-	fx := newTunFixture(t, tunFixtureOptions{})
-	built := fx.seq.applied()
-	fx.stop()
-
-	rib := testnet.NewRIB()
-	runner := testnet.NewScriptRunner()
-	runner.Fallback(func(argv []string) netstate.Result {
-		// route(8) on macOS prints "add net ...: gateway ... " and exits 0
-		// whether or not the route landed, which is the whole reason netstate
-		// verifies against the RIB instead of the exit status. This fake keeps
-		// that property and mirrors the effect into the RIB.
-		res := netstate.Result{Argv: argv}
-		if len(argv) < 4 || argv[0] != "route" {
-			return res
-		}
-		r, ok := parseRouteArgv(argv)
-		if !ok {
-			return res
-		}
-		switch r.verb {
-		case "add":
-			rib.Add(netstate.RouteEntry{Dst: r.dst, Gateway: r.gw, Iface: r.iface, Scoped: r.scoped})
-		case "delete":
-			rib.Remove(r.dst, "")
-		}
-		return res
-	})
-
-	journal := openTempJournal(t)
-	mgr := netstate.NewManager(journal, netstate.Env{Runner: runner, RIB: rib, Logf: t.Logf})
-
-	ctx := context.Background()
-	var applied int
-	for _, op := range built {
-		if op.Kind() != netstate.OpRoute {
-			continue
-		}
-		if err := mgr.Do(ctx, op); err != nil {
-			t.Fatalf("apply %s through netstate: %v", op.Describe(), err)
-		}
-		applied++
-	}
-	if applied < 4 {
-		t.Fatalf("only %d route Op(s) were built; want the scoped default, both halves and a nameserver", applied)
-	}
-	routes, _ := rib.Routes()
-	if len(routes) != applied {
-		t.Fatalf("the RIB holds %d route(s) after %d applies", len(routes), applied)
-	}
-
-	if errs := mgr.UndoAll(ctx); len(errs) > 0 {
-		t.Fatalf("UndoAll: %v", errs)
-	}
-	routes, _ = rib.Routes()
-	if len(routes) != 0 {
-		t.Fatalf("teardown left %d route(s) behind: %v", len(routes), routes)
-	}
-}
+// TestTunRouteOpsApplyAndRevertThroughNetstate moved to tunrun_unix_test.go:
+// its fake system is macOS route(8), which the Windows Port does not use at
+// all. See the build-tag comment there.
 
 // ── one decision path, one exclusion set ────────────────────────────────────
 
@@ -770,9 +697,12 @@ func TestTunCapturesIPv6OnlyWithAPathToProtectItWith(t *testing.T) {
 
 // ── the fixture ─────────────────────────────────────────────────────────────
 
-// tunFixtureUplink is the interface the fixture's machine escapes through. It
-// is a real one because IP_BOUND_IF is real.
-const tunFixtureUplink = "lo0"
+// tunFixtureUplink — the interface the fixture's machine escapes through — is
+// declared per platform in tunuplink_other_test.go and
+// tunuplink_windows_test.go. It has to be a REAL interface on the machine
+// running the test, and the loopback interface is the only one every machine
+// has; its NAME is `lo0` on BSD and a localized adapter FriendlyName on
+// Windows, which is why the declaration moved rather than staying a literal.
 
 type tunFixtureOptions struct {
 	args []string
@@ -834,11 +764,20 @@ func newTunFixture(t *testing.T, o tunFixtureOptions) *tunFixture {
 		facts.V6Global = []netip.Addr{netip.MustParseAddr("2001:db8::1234")}
 	}
 
+	// sys is nil on darwin — the injected Runner is what scdarwin reads, so the
+	// fake IS the platform there — and a Port over the same fake state on
+	// Windows, where scwindows reads no Runner at all. Without it the bring-up
+	// sequence read the CI runner's real resolvers instead of this machine's,
+	// and planned one Op fewer than it should: the /32 host route per system
+	// nameserver disappeared. See harnessport_windows_test.go.
+	sys := harnessPort(mac)
+
 	g := &globals{
 		env:    Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}},
 		layout: &layout,
 		runner: mac,
 		rib:    mac,
+		sys:    sys,
 		facts:  facts,
 		getenv: func(string) string { return "" },
 	}
@@ -877,7 +816,7 @@ func newTunFixture(t *testing.T, o tunFixtureOptions) *tunFixture {
 		t.Fatalf("ladder: %v", err)
 	}
 
-	env := netstate.Env{Runner: mac, RIB: mac, Facts: facts, Logf: t.Logf}
+	env := netstate.Env{Runner: mac, RIB: mac, Sys: sys, Facts: facts, Logf: t.Logf}
 	counters := observ.NewCounters(observ.CountersOptions{})
 	sub, err := buildSubsystems(g, layout, cfg, ladder, env, "", counters, &killSwitch{}, true)
 	if err != nil {
@@ -944,7 +883,7 @@ func (fx *tunFixture) proxySubsystems(t *testing.T) *subsystems {
 		t.Fatalf("state dirs: %v", err)
 	}
 	mac := newFakeMac()
-	env := netstate.Env{Runner: mac, RIB: mac, Facts: fx.g.facts, Logf: t.Logf}
+	env := netstate.Env{Runner: mac, RIB: mac, Sys: harnessPort(mac), Facts: fx.g.facts, Logf: t.Logf}
 	ladder, err := fx.cfg.LadderSpecs()
 	if err != nil {
 		t.Fatalf("ladder: %v", err)
@@ -977,6 +916,46 @@ func runFlagsOf(t *testing.T, cmd *cobra.Command) runFlags {
 	f.bypass, _ = fl.GetStringSlice("bypass")
 	f.dnsUDP, _ = fl.GetStringSlice("dns-udp")
 	return f
+}
+
+// ── the fixture's clock ─────────────────────────────────────────────────────
+
+// fixtureClock is the monotonic source the two ordering stamps below share.
+var fixtureClock struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+// fixtureNow stamps one event for the teardown-ordering assertions, and
+// guarantees that two events stamped in sequence come back STRICTLY increasing.
+//
+// time.Now() alone does not. Go's monotonic clock on windows/amd64 reads the
+// interrupt time out of KUSER_SHARED_DATA, whose granularity is the system
+// timer tick — 15.6 ms by default, 1 ms if something on the machine has raised
+// it — so two events microseconds apart come back with the SAME reading and
+// `a.After(b)` is false for an ordering that really happened.
+//
+// Measured, not inferred. On the 2026-09-14 windows-latest run
+// TestTunTeardownRevertsBeforeTheDeviceCloses printed both stamps as
+// "2026-09-14 16:48:53.8385325 +0000 UTC m=+11.619999501" — byte-identical,
+// monotonic reading included — and reported the device as having closed BEFORE
+// UndoAll. See docs/MEASUREMENTS-windows.md.
+//
+// This does not manufacture the ordering; startTun really does revert before
+// closing the device, because `route delete` naming a closed interface fails
+// and reports that failure with exit status 0. It makes the ordering
+// OBSERVABLE on a clock too coarse to resolve it. On darwin the raw reading
+// already advances between the two calls, so the adjustment never fires and
+// the stamps are exactly what they were.
+func fixtureNow() time.Time {
+	fixtureClock.mu.Lock()
+	defer fixtureClock.mu.Unlock()
+	now := time.Now()
+	if !now.After(fixtureClock.last) {
+		now = fixtureClock.last.Add(time.Nanosecond)
+	}
+	fixtureClock.last = now
+	return now
 }
 
 // ── the recording sequencer ─────────────────────────────────────────────────
@@ -1013,7 +992,7 @@ func (r *recordingSeq) UndoAll(context.Context) []error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.undone++
-	r.undoneAt = time.Now()
+	r.undoneAt = fixtureNow()
 	return nil
 }
 
@@ -1110,7 +1089,7 @@ func (s *spyLink) name() string {
 func (s *spyLink) Close() error {
 	s.mu.Lock()
 	if s.closedAt.IsZero() {
-		s.closedAt = time.Now()
+		s.closedAt = fixtureNow()
 	}
 	s.mu.Unlock()
 	return s.Link.Close()

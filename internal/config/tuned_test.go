@@ -68,35 +68,11 @@ func TestTunedRoundTrips(t *testing.T) {
 	}
 }
 
-func TestTunedWriteIsPrivateAndAtomic(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "tuned.toml")
-	if err := good().Save(path); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Errorf("mode = %o, want 600: the profile names the sites this user reaches for", perm)
-	}
-	// A second write must replace it and leave no temp file behind.
-	if err := good().Save(path); err != nil {
-		t.Fatalf("second Save: %v", err)
-	}
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
-	}
-	if len(ents) != 1 {
-		names := make([]string, 0, len(ents))
-		for _, e := range ents {
-			names = append(names, e.Name())
-		}
-		t.Errorf("directory holds %v, want only tuned.toml", names)
-	}
-}
+// TestTunedWriteIsPrivateAndAtomic moved to tuned_perm_unix_test.go; see the
+// build-tag comment there for why os.Stat().Mode().Perm() can never report
+// 0600 on Windows. The privacy half is asserted where the answer actually
+// lives by internal/paths' TestRestrictToOwnerReplacesTheDACLWithOneProtectedEntry,
+// and the atomic half by tuned_windows_test.go.
 
 // TestTunedRejectsAnUnknownKey is the sni_match trap made impossible: a user
 // who mistypes a key is told, rather than silently running the default and
