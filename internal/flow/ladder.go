@@ -561,7 +561,7 @@ func (l *LadderRunner) attempt(ctx context.Context, conn net.Conn, t Target, st 
 	}
 
 	pre, err := l.judge(ctx, conn, t, peer)
-	att.Latency = l.now().Sub(start)
+	att.Latency = measured(l.now().Sub(start))
 	if len(pre) > 0 {
 		// COMMIT. An upstream byte exists, so from here a retry would duplicate
 		// bytes the client is about to see. Any later failure is the relay's to
@@ -879,6 +879,58 @@ func (l *LadderRunner) now() time.Time {
 	}
 	return time.Now()
 }
+
+// Measured turns "the clock did not move" into the smallest positive duration,
+// because those are not the same statement and a consumer that discards
+// non-positive samples is entitled to reject only the second.
+//
+// Go's monotonic clock on windows/amd64 reads the interrupt time out of
+// KUSER_SHARED_DATA, whose granularity is the system timer tick — 15.6 ms by
+// default, 1 ms if something on the machine has raised it. A first response
+// that arrives inside one tick therefore measures as EXACTLY ZERO, and
+// Observe's "non-positive samples are ignored" guard — which exists for a
+// clock that went BACKWARDS — then throws the sample away. The destination is
+// never learned, Known() stays false, and every attempt against it uses the
+// flat MaxResponseWait window instead of the adaptive one. That is precisely
+// the defect TestLadderObservesTheDialledAddress was written to prevent, and
+// it was live on Windows: MEASUREMENTS.md §6 puts a successful handshake on
+// the measured line at ~23 ms, the same order as the tick, so a large share of
+// real responses would read as zero.
+//
+// Measured, not inferred. The 2026-09-14 windows-latest run recorded two
+// time.Now() values taken at different moments in
+// TestTunTeardownRevertsBeforeTheDeviceCloses as byte-identical, monotonic
+// reading included ("m=+11.619999501" on both sides of the comparison). See
+// docs/MEASUREMENTS-windows.md.
+//
+// One nanosecond is not a claim about the real latency, which is somewhere in
+// (0, one tick]. It is a claim that a response HAPPENED, which is what Known()
+// answers and the only part of the sample the window actually reads: Wait
+// clamps anything below MinResponseWait/RTTFactor up to MinResponseWait
+// anyway, so the magnitude only ever reaches the EWMA, where 1 ns and 0 are
+// indistinguishable. On darwin, where the monotonic clock is nanosecond-grained
+// and a real round trip is never zero, this is not reachable.
+//
+// Exported because the ladder is not the only place that times a round trip
+// against this clock and then discards non-positive samples: internal/probe
+// does the same thing to every trial latency, and MEASUREMENTS.md §6 puts an
+// injected RST at ~22 ms — 1.4 ticks — so a sub-tick reset would drop out of
+// the median and take the RST-latency line off the report with it.
+//
+// It belongs at the MEASUREMENT site and nowhere else. A later `> 0` guard
+// cannot use it, because by then a zero is ambiguous: probe deliberately
+// passes 0 for a trial that failed before anything was dialled, and turning
+// THAT into 1 ns would invent a measurement that never happened.
+func Measured(d time.Duration) time.Duration {
+	if d == 0 {
+		return time.Nanosecond
+	}
+	return d
+}
+
+// measured is the package-local spelling of Measured, which the ladder and its
+// tests were written against.
+func measured(d time.Duration) time.Duration { return Measured(d) }
 
 func (l *LadderRunner) logf(format string, a ...any) {
 	if l.Logf != nil {

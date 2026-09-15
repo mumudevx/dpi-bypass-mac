@@ -347,7 +347,7 @@ func (r Report) Text(w io.Writer) error {
 	}
 	fmt.Fprintf(bw, "inspection window  unmeasured (see warnings)\n")
 	if r.Class.RSTLatency > 0 {
-		fmt.Fprintf(bw, "RST latency        %s\n", r.Class.RSTLatency.Round(time.Millisecond))
+		fmt.Fprintf(bw, "RST latency        %s\n", rstLatencyText(r.Class.RSTLatency))
 	}
 	fmt.Fprintf(bw, "blocked            %s\n", orNone(r.Blocked))
 	fmt.Fprintf(bw, "not blocked        %s\n", orNone(r.NotBlocked))
@@ -567,6 +567,20 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// rstLatencyText renders the reset-latency median for a human.
+//
+// Rounding to the millisecond is right for §6's ~22 ms, but a median produced
+// entirely from sub-tick samples on the 15.6 ms windows/amd64 clock is a
+// positive duration that rounds to zero, and printing "0s" would read as "the
+// censor answered instantly" when what happened is "faster than this machine
+// can time". Below a millisecond, say that instead.
+func rstLatencyText(d time.Duration) string {
+	if d < time.Millisecond {
+		return "<1ms (below this clock's resolution)"
+	}
+	return d.Round(time.Millisecond).String()
 }
 
 func orNone(s []string) string {

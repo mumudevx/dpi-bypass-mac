@@ -184,6 +184,10 @@ func (a *accum) add(t Trial, blockedHosts map[string]bool) {
 		return
 	}
 	pass := t.Verdict == VerdictPass
+	// "> 0" means "a clock reading exists", not "the reading is big enough to
+	// bother with": on the 15.6 ms windows/amd64 clock a fast handshake reads
+	// as 0, and dropping those would rank a candidate on its slow trials only.
+	// RunTrial keeps such a sample positive via flow.Measured.
 	if pass && t.Latency > 0 {
 		a.latencies = append(a.latencies, t.Latency)
 	}

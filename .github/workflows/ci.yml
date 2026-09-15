@@ -87,6 +87,106 @@ jobs:
       - name: cover-gate
         run: make cover-gate
 
+  windows:
+    # The first time any of the Windows code from plans 1-5 actually runs is
+    # here. Everything before this job was "it compiles" or "it was read";
+    # this is "it ran". Expect red: some of it has never executed before.
+    #
+    # This job does not mirror the macOS job in full. Three things are
+    # decided below rather than silently matched or silently dropped:
+    #
+    #   internal/sysconf/scdarwin  every non-test file in this package is
+    #     `//go:build darwin`, but its *_test.go files carry no build tag at
+    #     all, so `go vet`/`go test` still see the package on any GOOS and one
+    #     of its test files imports golang.org/x/net/route, which has no
+    #     Windows files. `go build ./...` tolerates this (a package with zero
+    #     buildable non-test files is dropped from the `...` wildcard
+    #     silently), but vet and test do not — they fail on it with an error
+    #     that is about x/net, not about this project's Windows code. The
+    #     macOS job's own "cross-compile check/vet (windows)" steps already
+    #     exclude this package by name for the identical reason; the same
+    #     named exclusion is applied here, for build, vet, and test alike, so
+    #     all three are exercised against the same package list.
+    #
+    #   make cover-gate  is not run here. Its statement-coverage floors
+    #     (COVER_MIN=85, with the internal/front/tunfe=70 and
+    #     internal/cliapp=83 exceptions in the Makefile) were calibrated by
+    #     measuring coverage on darwin. Windows builds a different set of
+    #     files under the same package names (scwindows instead of scdarwin,
+    #     link_windows.go instead of link_darwin.go, and so on), so a
+    #     percentage measured here would describe different code, not the
+    #     same code measured twice. Comparing it against a darwin-calibrated
+    #     floor would be a false pass or a false fail either way, not a
+    #     measurement — gating Windows coverage needs floors measured on
+    #     Windows, which nothing has done yet.
+    #
+    #   root-gated integration tests  are not excluded here, matching the
+    #     macOS job, which excludes none either: there is no root-requiring
+    #     integration suite anywhere in this tree. The tests that do touch
+    #     privilege (e.g. TestLiveRIBReadableUnprivileged in internal/netstate,
+    #     TestLiveRoutingSocketOpensUnprivileged in internal/netwatch) assert
+    #     the *unprivileged* path and self-skip only if the runner happens to
+    #     already be root/admin — GitHub-hosted runners are not, on macOS or
+    #     Windows, so that self-skip is dormant in both places and needs no
+    #     job-level handling.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          bad=$(gofmt -l cmd internal tools)
+          if [ -n "$bad" ]; then
+            echo "these files are not gofmt'd:"; echo "$bad"; exit 1
+          fi
+
+      - name: build
+        run: |
+          pkgs=$(go list ./... | grep -v -E '/internal/sysconf/scdarwin$')
+          go build $pkgs
+
+      - name: vet
+        run: |
+          pkgs=$(go list ./... | grep -v -E '/internal/sysconf/scdarwin$')
+          go vet $pkgs
+
+      # -race, matching the macOS job's "test (race)" step.
+      #
+      # This one is NOT a divergence to be argued, it is a divergence being
+      # removed, and it was the wrong one to have: this branch's own headline
+      # Windows failure was a concurrency failure (internal/policy's
+      # TestStoreIsConcurrencySafe, 400 Flush() calls from 8 goroutines, 7 of
+      # them losing the write), and it was found by running the code rather
+      # than by reading it. Windows-only code has concurrency of its own —
+      # svcrun_windows.go hands the service handler's Body() across a channel
+      # from a goroutine — and shares the cross-platform locks around it, none
+      # of which any race detector had ever looked at on this GOOS.
+      #
+      # It earned itself on its first run, and not with a data race: -race also
+      # enables checkptr, which caught scwindows' rawAny test helper converting
+      # a 28-byte RawSockaddrInet pointer to a 112-byte *RawSockaddrAny and
+      # killed the package's test binary ("converted pointer straddles multiple
+      # allocations"). Nine call sites had been passing for as long as nothing
+      # instrumented the conversion.
+      #
+      # The runner supports it: -race needs cgo, and the windows-latest image
+      # ships mingw-w64 gcc on PATH, so CGO_ENABLED defaults to 1. If that ever
+      # stops being true the step fails loudly with "-race requires cgo", which
+      # is the correct outcome — a stated reason in this file, not a silent
+      # omission.
+      - name: test (race)
+        run: |
+          pkgs=$(go list ./... | grep -v -E '/internal/sysconf/scdarwin$')
+          go test $pkgs -race
+
   fuzz:
     runs-on: macos-15
     steps:

@@ -5,6 +5,7 @@ package testnet
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"syscall"
 )
 
@@ -23,4 +24,22 @@ func killProcess(p *os.Process) error {
 		return nil
 	}
 	return err
+}
+
+// wasKilled reports whether waitErr is the exit of a process THIS file's
+// killProcess ended.
+//
+// The wait status carries the signal, so the answer is exact: SIGKILL is the
+// only signal killProcess ever sends, so a status that was signalled with
+// SIGKILL is our kill and nothing else is. A child that exited on its own in
+// the window between the timer firing and the kill landing has an exit code
+// instead and is reported honestly as "exited" — overstating kills would
+// overstate how much of the crash window the suite has explored.
+func wasKilled(waitErr error) bool {
+	var exit *exec.ExitError
+	if !errors.As(waitErr, &exit) {
+		return false
+	}
+	st, ok := exit.Sys().(syscall.WaitStatus)
+	return ok && st.Signaled() && st.Signal() == syscall.SIGKILL
 }

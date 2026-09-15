@@ -55,9 +55,11 @@ Error: Refusing to load formula mumudevx/tap/dpb from untrusted tap mumudevx/tap
 > **Status.** Installed and run end to end on macOS 26.3.1 / Homebrew 6.0.18,
 > Apple Silicon, from the `v0.1.0` release: `dpb 0.1.0 (b3c9bcce65ed)`, and
 > `dpb probe --host discord.com --strategy tlsfrag:pos=snimid` passes on a live
-> Türk Telekom line while the same probe with no strategy is reset. Intel has
-> not been tried — the amd64 archive is built and published but nobody has run
-> it. Check `dpb version` against the tag you expected.
+> Türk Telekom line while the same probe with no strategy is reset. dpb builds
+> for both Apple Silicon and Intel (`darwin/arm64` and `darwin/amd64`), so
+> `brew install dpb` on an Intel Mac installs a real archive rather than
+> crashing on a formula with no URL for its architecture. Check `dpb version`
+> against the tag you expected.
 
 A brew-installed `dpb` is never evaluated by Gatekeeper, and this is not luck:
 Homebrew downloads formulae with `curl`, and `curl` sets no
@@ -108,6 +110,33 @@ Get-FileHash dpb_<version>_windows_amd64.zip -Algorithm SHA256
 The printed hash has to match the line for that file in `checksums.txt`. If it
 does not, do not run the binary — re-download it.
 
+**Scoop.**
+
+```powershell
+scoop bucket add dpb https://github.com/mumudevx/scoop-dpb
+scoop install dpb
+```
+
+`packaging/scoop/dpb.json` in this repository is the source manifest — kept
+version-controlled with the code that produces the archive it points at, the
+same reasoning `Formula/dpb.rb` gives for the macOS side. The
+`mumudevx/scoop-dpb` bucket it is meant to be published to does not exist yet,
+so the two commands above do not install anything today. Scoop does not
+suppress SmartScreen for an unsigned binary; see below.
+
+**Winget.**
+
+```powershell
+winget install mumudevx.dpb
+```
+
+The manifest set lives at `packaging/winget/`, written against the zip
+archive for both `x64` and `arm64`. It has not been submitted to
+`microsoft/winget-pkgs` — that is a pull request against someone else's
+repository, a deliberate step this project has not taken — so
+`winget install mumudevx.dpb` finds nothing until it does. Winget does not
+suppress SmartScreen for an unsigned binary either.
+
 **SmartScreen.** `dpb.exe` is not code-signed. There is no Apple-Developer
 equivalent in this project's release pipeline on macOS either — see
 `.goreleaser.yaml`'s header — and Windows has no back door around it: the
@@ -145,6 +174,16 @@ Download it for your architecture from [wintun.net](https://www.wintun.net)
 and place `wintun.dll` next to `dpb.exe`. `dpb doctor` checks for it before
 you have to find out the hard way; without it, `--tun` fails with "the wintun
 driver is not installed".
+
+wintun.net's prebuilt-binaries licence (bundled in their ZIP as
+`LICENSE.txt`) does permit redistributing the signed DLL alongside software
+that calls it only through the documented `wintun.h` API, which is exactly
+what `golang.zx2c4.com/wintun` (an MIT-licensed Go wrapper, not the driver
+itself) does. dpb does not bundle the DLL anyway: doing so would mean
+fetching and pinning a third-party binary during release, per architecture,
+outside anything `go build` or `go mod` verifies, and wintun.net is already a
+single authoritative place to get driver updates. That is an engineering
+choice, not a licensing block.
 
 **Service.** Two commands, for two different things:
 
@@ -332,8 +371,10 @@ the numbers:
   works. The test suite proves the code matches the model. It cannot prove the
   model matches the middlebox.
 - The Homebrew install has been exercised on exactly one machine, the one this
-  was developed on. A clean machine, an Intel Mac, and an older Homebrew that
-  has no `brew trust` have all not been tried.
+  was developed on. A clean machine, an older Homebrew that has no
+  `brew trust`, and an Intel Mac have not been tried — dpb now builds both
+  `darwin/arm64` and `darwin/amd64`, and the formula carries a URL and
+  checksum for each, but only the Apple Silicon path has actually been run.
 
 ## Development
 
@@ -373,8 +414,9 @@ git tag -a v0.1.0 -m 'v0.1.0' && git push origin v0.1.0
 ```
 
 `.github/workflows/release.yml` runs the race tests and the coverage gate, then
-GoReleaser builds `darwin/arm64` and `darwin/amd64`, publishes the archives and
-`checksums.txt`, and updates `Formula/dpb.rb` in `mumudevx/homebrew-tap`.
+GoReleaser builds `darwin/{arm64,amd64}` and `windows/{amd64,arm64}`,
+publishes the archives and `checksums.txt`, and updates `Formula/dpb.rb` in
+`mumudevx/homebrew-tap`.
 
 Two things have to exist once, before the first tag:
 

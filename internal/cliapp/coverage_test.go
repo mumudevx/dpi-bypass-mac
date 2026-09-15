@@ -33,48 +33,13 @@ func coverageJSON(t *testing.T, c *cli, args ...string) (coverageReport, result)
 	return rep, r
 }
 
-// The two mechanisms cover DIFFERENT classes of program, and the report has to
-// say which. "PAC is on" means nothing to a user trying to work out why
-// Discord's updater still cannot connect (GT24).
-func TestCoverageReportsBothMechanismsAndWhoTheyCover(t *testing.T) {
-	c := newCLI(t)
-	c.mac.Run(t.Context(), "networksetup", "-setautoproxyurl", "Wi-Fi", "http://127.0.0.1:8080/dpb.pac")
-	c.mac.Run(t.Context(), "launchctl", "setenv", "HTTPS_PROXY", "http://127.0.0.1:8080")
-
-	rep, r := coverageJSON(t, c)
-	if r.code != ExitOK {
-		t.Fatalf("exit code = %d\n%s", r.code, r.stderr)
-	}
-	pac := findMechanism(t, rep, "auto-proxy URL (PAC)")
-	if !pac.Set || pac.Value != "http://127.0.0.1:8080/dpb.pac" {
-		t.Fatalf("PAC mechanism = %+v", pac)
-	}
-	if !strings.Contains(pac.Covers, "CFNetwork") {
-		t.Errorf("the PAC mechanism does not say who it covers: %q", pac.Covers)
-	}
-	env := findMechanism(t, rep, "launchd HTTPS_PROXY")
-	if !env.Set {
-		t.Fatalf("the environment mechanism = %+v", env)
-	}
-	if !strings.Contains(env.Covers, "updater") {
-		t.Errorf("the environment mechanism does not name the program it exists for: %q", env.Covers)
-	}
-}
-
-// Setting one lever and not the other leaves a whole class of program
-// uncovered, and the report has to make that visible side by side.
-func TestCoverageShowsOneLeverSetAndTheOtherNot(t *testing.T) {
-	c := newCLI(t)
-	c.mac.Run(t.Context(), "networksetup", "-setautoproxyurl", "Wi-Fi", "http://127.0.0.1:8080/dpb.pac")
-
-	rep, _ := coverageJSON(t, c)
-	if !findMechanism(t, rep, "auto-proxy URL (PAC)").Set {
-		t.Error("the PAC was reported as unset")
-	}
-	if findMechanism(t, rep, "launchd HTTPS_PROXY").Set {
-		t.Error("an unset environment variable was reported as set")
-	}
-}
+// TestCoverageReportsBothMechanismsAndWhoTheyCover and
+// TestCoverageShowsOneLeverSetAndTheOtherNot moved to coverage_darwin_test.go:
+// both assert macOS's names for the two levers — "CFNetwork" and "launchd
+// HTTPS_PROXY" — and coverage_windows.go deliberately publishes different ones
+// because the Windows mechanisms ARE different (WinINET/WinHTTP and
+// HKCU\Environment). coverage_windows_test.go asserts the same two properties
+// against those names.
 
 // With no dpb, the ports are the CONFIGURED ones rather than bound ones, and
 // saying so is the difference between a report about the machine and a report

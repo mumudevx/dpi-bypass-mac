@@ -289,7 +289,10 @@ func collectChecks(ctx context.Context, g *globals, layout paths.Layout, full bo
 	// wintun driver is even present, and whether an elevated dpb is about to
 	// write an administrator's registry hive instead of the console user's
 	// (doctor_windows.go).
-	for _, c := range platformChecks(layout) {
+	// It is reached through g.machineChecksOf so a test can describe the
+	// machine it set up: both Windows checks probe the runner's own driver
+	// inventory and token, which no injected state reaches. See globals.
+	for _, c := range g.machineChecksOf(layout) {
 		add(c)
 	}
 	return out

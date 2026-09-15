@@ -135,7 +135,7 @@ func OpenJournal(path string) (Journal, error) {
 	// O_APPEND, so a fragment left by a SIGKILL mid-write would be concatenated
 	// with the next run's Begin and become an INTERIOR corrupt line — and an
 	// interior corrupt line used to hide every record after it.
-	if err := truncateToLastLine(f); err != nil {
+	if err := truncateToLastLine(f, path); err != nil {
 		f.Close()
 		return nil, err
 	}
@@ -267,7 +267,9 @@ func (j *fileJournal) compactLocked() error {
 	if len(recs) != 0 {
 		return nil
 	}
-	if err := j.f.Truncate(0); err != nil {
+	// truncateJournalFile, not j.f.Truncate: the journal is opened O_APPEND and
+	// on Windows that handle is not allowed to truncate. See journal_windows.go.
+	if err := truncateJournalFile(j.f, j.path, 0); err != nil {
 		return fmt.Errorf("netstate: truncate journal %s: %w", j.path, err)
 	}
 	if _, err := j.f.Seek(0, io.SeekStart); err != nil {
@@ -304,7 +306,10 @@ func (j *fileJournal) readAllLocked() ([]Record, error) {
 
 // truncateToLastLine drops a trailing partial line, so the file always ends on
 // a record boundary and O_APPEND can never weld a fragment to a real record.
-func truncateToLastLine(f *os.File) error {
+//
+// path is f's path, passed through to truncateJournalFile because the append
+// handle itself cannot truncate on Windows; see journal_windows.go.
+func truncateToLastLine(f *os.File, path string) error {
 	fi, err := f.Stat()
 	if err != nil {
 		return fmt.Errorf("netstate: stat journal: %w", err)
@@ -325,7 +330,7 @@ func truncateToLastLine(f *os.File) error {
 		return fmt.Errorf("netstate: read journal: %w", err)
 	}
 	keep := int64(bytes.LastIndexByte(b, '\n') + 1)
-	if err := f.Truncate(keep); err != nil {
+	if err := truncateJournalFile(f, path, keep); err != nil {
 		return fmt.Errorf("netstate: heal torn journal line: %w", err)
 	}
 	return f.Sync()

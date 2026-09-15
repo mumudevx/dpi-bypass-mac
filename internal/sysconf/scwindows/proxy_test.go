@@ -382,17 +382,47 @@ func TestSetManualRewritesOnlyItsOwnSchemes(t *testing.T) {
 	}
 }
 
-// TestSetManualExpandsABareProxy is the same defect one step subtler. A user
-// whose ProxyServer is a bare "p:8080" has ONE entry covering http, https and
-// ftp; writing "https=ours" over it would drop all three. Expanding the bare
-// form at parse time is what keeps the untouched schemes.
-func TestSetManualExpandsABareProxy(t *testing.T) {
+// TestSetManualPreservesUntouchedBareSchemes REPLACES the stale
+// TestSetManualExpandsABareProxy. That test pinned formatProxyServer to
+// EXPAND a surviving bare token into explicit "http=...;ftp=..." entries once
+// one scheme in the group was overwritten. Plan 5's fix wave, e9ac983,
+// deliberately made formatProxyServer stop doing that: expanding a bare token
+// silently turns a user's "same proxy for every protocol" into three separate
+// entries, and hasUndescribedProxy then read the synthesized ftp entry as a
+// second, untouched user proxy it must not disable — so a machine that had
+// its proxy OFF came back from dpb with it ON, routing every browser through
+// a proxy the user had turned off. e9ac983 added proxyEntry.Bare to track
+// this and a TestFormatProxyServer case pinning the new, non-expanding
+// behaviour, but never updated this test, leaving two assertions in this file
+// that disagree about what formatProxyServer emits. Reinstating the old
+// string would reintroduce the ProxyEnable defect; don't.
+//
+// The RISK the old test protected is still real and still worth pinning: a
+// user whose ProxyServer is a bare "user.example:3128" has ONE entry covering
+// http, https and ftp, and SetManual writing https=ours over it must not make
+// the user's proxy for the untouched schemes (http, ftp) disappear. What
+// changed is how that survival is expressed here — not the exact string
+// formatProxyServer produces (that belongs to TestFormatProxyServer, and
+// pinning it twice is what went stale last time), but the user-visible
+// outcome: parse the string SetManual would write back, exactly as a
+// subsequent readProxyServer call would, and check the untouched schemes
+// still resolve to the user's original proxy.
+func TestSetManualPreservesUntouchedBareSchemes(t *testing.T) {
 	list := parseProxyServer("user.example:3128")
 	list = setProxyEntry(list, proxyEntry{Scheme: schemeHTTPS, Host: "127.0.0.1", Port: 8080})
 
-	const want = "http=user.example:3128;https=127.0.0.1:8080;ftp=user.example:3128"
-	if got := formatProxyServer(list); got != want {
-		t.Errorf("ProxyServer = %q, want %q", got, want)
+	// Round-trip through the registry string exactly as SetManual writes it
+	// and a later read (readProxyServer) would parse it back.
+	after := parseProxyServer(formatProxyServer(list))
+
+	if e, ok := findProxyEntry(after, schemeHTTPS); !ok || e.Host != "127.0.0.1" || e.Port != 8080 {
+		t.Errorf("https = %+v, want 127.0.0.1:8080", e)
+	}
+	if e, ok := findProxyEntry(after, schemeHTTP); !ok || e.Host != "user.example" || e.Port != 3128 {
+		t.Errorf("http (untouched) = %+v, want the surviving bare proxy user.example:3128", e)
+	}
+	if e, ok := findProxyEntry(after, schemeFTP); !ok || e.Host != "user.example" || e.Port != 3128 {
+		t.Errorf("ftp (untouched) = %+v, want the surviving bare proxy user.example:3128", e)
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os/exec"
-	"syscall"
 	"time"
 )
 
@@ -129,20 +128,14 @@ func (k *KillFuzz) once(ctx context.Context, i int, delay time.Duration) (killed
 	}
 	waitErr := <-done
 
-	var exit *exec.ExitError
-	if errors.As(waitErr, &exit) {
-		// st.Signaled() is hard-coded false on Windows — syscall.WaitStatus
-		// there carries only an exit code, because TerminateProcess has no
-		// signal-shaped result to report (see $GOROOT/src/syscall/
-		// syscall_windows.go). So on Windows this branch never fires and
-		// every kill falls through to the "finished on its own" return below
-		// even when killProcess is what ended it. That is a real gap in what
-		// this classification can tell apart on Windows, not a bug in
-		// killProcess: fixing it needs a Windows-specific classification
-		// here, which is out of scope for the leaf split this file did.
-		if st, ok := exit.Sys().(syscall.WaitStatus); ok && st.Signaled() && st.Signal() == syscall.SIGKILL {
-			return true, nil
-		}
+	// How an exit is recognised as OUR kill is a platform leaf, because the two
+	// systems do not report it the same way at all: killfuzz_unix.go reads the
+	// signal out of the wait status, killfuzz_windows.go has no signal to read
+	// and reads TerminateProcess's exit code instead. Writing the Unix test
+	// portably here is what made this whole report read "Exited: 3" on Windows
+	// for a child that was killed three times.
+	if wasKilled(waitErr) {
+		return true, nil
 	}
 	// The process finished on its own between the timer firing and the kill.
 	return false, nil

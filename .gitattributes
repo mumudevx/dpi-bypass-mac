@@ -1,0 +1,16 @@
+# Why this file exists: gofmt -l is a CI gate on every platform (see
+# .github/workflows/ci.yml's `gofmt` step, now run on windows-latest too).
+# Without this file, actions/checkout on Windows applies Git for Windows'
+# default core.autocrlf=true and every text file — .go included — is
+# rewritten to CRLF on checkout. gofmt compares bytes against its own LF
+# output and flags every single file as "not gofmt'd", which fails the gate
+# before build/vet/test ever run. This is not a Windows code defect; it is a
+# repository hygiene gap that only became visible once Windows became a
+# supported, CI-checked platform. Forcing LF here keeps every checkout byte-
+# identical across macOS, Linux and Windows, so the gofmt step keeps doing
+# its job: a real canary for line-ending drift, not a permanent red light.
+* text=auto eol=lf
+
+# TLS ClientHello fixtures are captured wire bytes, not text; never let git
+# touch them.
+internal/tlsmsg/testdata/*.bin binary

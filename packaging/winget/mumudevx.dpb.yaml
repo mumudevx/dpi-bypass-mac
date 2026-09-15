@@ -1,0 +1,22 @@
+# Winget version manifest for dpb.
+#
+# This is the source copy: winget-pkgs is the only place these manifests take
+# effect, and getting them there is a pull request against
+# microsoft/winget-pkgs (manifests/m/mumudevx/dpb/<version>/), never pushed
+# from here. This file is kept in-repo, unsubmitted, so the manifest set is
+# version-controlled with the code that produces the archives it points at --
+# the same reasoning Formula/dpb.rb and packaging/scoop/dpb.json give.
+#
+# PackageIdentifier is `mumudevx.dpb` -- the tool name, matching the Homebrew
+# formula and the scoop bin -- not the GitHub repository slug. The installer
+# manifest's InstallerUrl values DO use the repository slug (dpi-bypass-mac),
+# because release download URLs are repo-scoped; see that file's header.
+#
+# PackageVersion here matches the v0.1.0 tag. Bumping it for a real submission
+# means updating all three files in this set together, and renaming this
+# directory if it were laid out winget-pkgs style (manifests/m/mumudevx/dpb/<version>/).
+PackageIdentifier: mumudevx.dpb
+PackageVersion: 0.1.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.28.0

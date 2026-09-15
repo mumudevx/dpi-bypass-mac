@@ -12,12 +12,14 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // The control socket is how a second `dpb` process asks the running one what it
 // is doing, and how the kill switch reaches it without a signal.
 //
-// It is a unix socket with 0600 permissions in the user's own state directory,
+// It is a unix socket narrowed to its owner in the user's own state directory,
 // never a TCP port: a bypass tool that exposes an unauthenticated "turn
 // yourself off" endpoint on loopback is a bypass tool any web page can turn off
 // with a fetch(). Filesystem permissions are the whole authentication story,
@@ -278,9 +280,19 @@ func NewControlServer(o ControlOptions) (*ControlServer, error) {
 		return nil, fmt.Errorf("observ: listen on control socket %s: %w", o.Path, err)
 	}
 	// Bind first, then narrow. A socket briefly created with the process umask
-	// is still only reachable through a directory the user owns, and chmod
-	// failing is worth reporting rather than ignoring.
-	if err := os.Chmod(o.Path, 0o600); err != nil {
+	// is still only reachable through a directory the user owns, and failing to
+	// narrow it is worth reporting rather than ignoring: filesystem permissions
+	// are the whole authentication story for this socket.
+	//
+	// paths.RestrictToOwner rather than os.Chmod(0o600), because os.Chmod
+	// narrows nothing on Windows — it writes no ACL and returns nil, which the
+	// 2026-09-14 windows-latest run caught leaving this socket at mode 0666.
+	// One caveat that DACL cannot settle from here: what the file's permissions
+	// gate on Windows is who may OPEN the socket file, and whether AFD also
+	// consults them on connect is not something a single-account CI runner can
+	// demonstrate. Setting them is strictly better than not; it is not yet a
+	// measured equivalence with the Unix side.
+	if err := paths.RestrictToOwner(o.Path); err != nil {
 		ln.Close()
 		return nil, fmt.Errorf("observ: restrict control socket %s: %w", o.Path, err)
 	}

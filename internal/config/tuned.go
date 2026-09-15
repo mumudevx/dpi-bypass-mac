@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/mumudevx/dpb/internal/paths"
 )
 
 // TunedVersion is the schema version written into every file. A reader that
@@ -247,9 +249,16 @@ func (t Tuned) Save(path string) error {
 	name := tmp.Name()
 	defer os.Remove(name)
 
-	if err := tmp.Chmod(0o600); err != nil {
+	// Narrowed while it is still the temp file, so the profile is never readable
+	// by another account even for the instant between the rename and a later
+	// chmod. paths.RestrictToOwner rather than os.Chmod because os.Chmod does
+	// not privatize anything on Windows — it writes no ACL and returns nil; see
+	// that function for the measurement. The rename carries the ACL with the
+	// file, and it is a protected DACL, so the target directory's inherited
+	// entries are not re-applied on the way.
+	if err := paths.RestrictToOwner(name); err != nil {
 		tmp.Close()
-		return fmt.Errorf("config: chmod temp profile: %w", err)
+		return err
 	}
 	if _, err := tmp.WriteString(sb.String()); err != nil {
 		tmp.Close()
@@ -262,7 +271,11 @@ func (t Tuned) Save(path string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("config: close temp profile: %w", err)
 	}
-	if err := os.Rename(name, path); err != nil {
+	// paths.ReplaceFile, not os.Rename: `dpb tune` writes this file and the
+	// next run reads it, so on Windows a sharing violation from the scanner
+	// that just looked at the temp file is a tuning result silently discarded.
+	// See internal/paths/replace_windows.go.
+	if err := paths.ReplaceFile(name, path); err != nil {
 		return fmt.Errorf("config: install tuned profile: %w", err)
 	}
 	return nil

@@ -140,6 +140,22 @@ type globals struct {
 	// from runner/rib below; a test sets it to inject a fake Port (see
 	// internal/testport) without also replacing runner and rib.
 	sys netstate.Port
+	// machineChecks replaces platformChecks, the per-platform half of
+	// `dpb doctor`'s audit.
+	//
+	// It is a seam for the same reason layout and facts are, and it is the
+	// same KIND of fact: platformChecks answers questions about the MACHINE
+	// rather than about dpb's own residue — on Windows, whether wintun.dll is
+	// installed and whose registry hive an elevated dpb would write — by
+	// probing the machine directly, with no injected state behind it. A test
+	// that set up a clean machine and then asked `dpb doctor` whether it was
+	// clean therefore got an answer about the runner's driver inventory: the
+	// 2026-09-14 windows-latest run failed six doctor tests that way, all on
+	// the same missing wintun.dll.
+	//
+	// Production leaves it nil and gets platformChecks. Darwin's is empty by
+	// design (doctor_darwin.go), so this changes nothing there either way.
+	machineChecks func(paths.Layout) []check
 	// facts replaces CollectFacts, which reads the machine's real interfaces.
 	facts *netstate.Facts
 	// factsFn replaces CollectFacts with a function, so a test can move the
@@ -224,6 +240,16 @@ func (g *globals) sysOf() netstate.Port {
 		return g.sys
 	}
 	return newSysPort(netstate.Env{Runner: g.runnerOf(), RIB: g.ribOf(), Logf: g.logf})
+}
+
+// machineChecksOf is sysOf's shape for the per-platform audit: the seam is
+// consulted here so collectChecks has one call site and production keeps
+// reaching platformChecks directly.
+func (g *globals) machineChecksOf(layout paths.Layout) []check {
+	if g.machineChecks != nil {
+		return g.machineChecks(layout)
+	}
+	return platformChecks(layout)
 }
 
 // factsOf collects the machine's network identity, best effort.
@@ -450,5 +476,6 @@ func newRoot(g *globals) *cobra.Command {
 	root.AddCommand(newReloadCmd(g))
 	root.AddCommand(newSelftestCmd(g))
 	root.AddCommand(newJanitorCmd(g))
+	root.AddCommand(newDevtoolCmd(g))
 	return root
 }

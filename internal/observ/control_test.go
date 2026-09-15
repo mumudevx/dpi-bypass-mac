@@ -322,17 +322,10 @@ func TestRefusesToDeleteANonSocket(t *testing.T) {
 	}
 }
 
-// Filesystem permissions are the whole authentication story for this socket.
-func TestSocketIsOwnerOnly(t *testing.T) {
-	s, _ := serve(t, Handler{})
-	fi, err := os.Stat(s.Path())
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("socket mode = %o, want 0600", perm)
-	}
-}
+// TestSocketIsOwnerOnly moved to control_perm_unix_test.go; see the build-tag
+// comment there for why os.Stat().Mode().Perm() can never report 0600 on
+// Windows, and control_windows_test.go for the same question asked of the
+// socket's security descriptor instead.
 
 // The client and the server must agree about the path, because a client that
 // computed it itself would look in the wrong place on a deep home directory.

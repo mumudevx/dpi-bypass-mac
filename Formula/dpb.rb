@@ -3,26 +3,50 @@
 # The canonical copy lives in mumudevx/homebrew-tap and is written there by
 # GoReleaser (see .goreleaser.yaml) whenever a tag is pushed. This copy is the
 # manual fallback and the reviewable reference: if the tap push ever fails, or
-# a release is cut by hand, fill in the two checksums below and commit this file
+# a release is cut by hand, fill in the checksum below and commit this file
 # to the tap as Formula/dpb.rb.
 #
 # FILLING IN THE CHECKSUMS
 #
-#   Every release publishes a checksums.txt alongside the archives. The two
-#   values below are the sha256 lines for the darwin archives:
+#   Every release publishes a checksums.txt alongside the archives. The values
+#   below are the sha256 lines for the two darwin archives dpb ships
+#   (darwin/arm64 and darwin/amd64 — see the TWO ARCHIVES note below):
 #
 #     curl -sL https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/checksums.txt
 #
 #   or compute them from the files themselves:
 #
-#     shasum -a 256 dpb_0.1.0_darwin_arm64.tar.gz dpb_0.1.0_darwin_amd64.tar.gz
+#     shasum -a 256 dpb_0.1.0_darwin_arm64.tar.gz
+#     shasum -a 256 dpb_0.1.0_darwin_amd64.tar.gz
 #
-#   Both must be filled in before this formula is published. Homebrew refuses to
-#   install a formula whose sha256 does not match, so a placeholder left in
+#   Both must be filled in before this formula is published. Homebrew refuses
+#   to install a formula whose sha256 does not match, so a placeholder left in
 #   place fails loudly at install time rather than silently installing
 #   something unverified — which is the right direction, but it is still a
 #   broken install command, and a broken install command is what this milestone
 #   exists to end.
+#
+# TWO ARCHIVES, BECAUSE A SINGLE-ARCH MACOS BUILD CRASHES HOMEBREW ON INTEL
+#
+#   .goreleaser.yaml used to exclude darwin/amd64 (an `ignore` rule in
+#   `builds`), on the theory that dpb ships for Apple Silicon only. That
+#   theory shipped a real bug on Intel. GoReleaser's tap-generated formula has
+#   no way to express "unsupported on this architecture" for a single-arch
+#   macOS build: it wraps the lone url in a bare `if Hardware::CPU.arm?` with
+#   no fallback. This copy's on_intel block briefly called `odie` to give an
+#   Intel user a clean refusal instead of GoReleaser's crash — verified with a
+#   local tap and `brew fetch --arch=intel`, which printed the odie message
+#   and exited, no download attempted — but that only fixed this manual
+#   fallback copy. The formula GoReleaser actually pushes to
+#   mumudevx/homebrew-tap has no `odie` equivalent: forcing the `arm?` branch
+#   closed on an arm64 host and running the generated formula through
+#   Homebrew produced "formula requires at least a URL" and a full backtrace
+#   asking the user to file a bug. No field in `brews:` (url_template,
+#   custom_block, dependencies) reaches into that template to add a fallback.
+#   Building darwin/amd64 fixes what an Intel user actually hits: the
+#   generated formula gets a real URL for both branches, so on_arm/on_intel
+#   below are now a real URL and sha256 stanza each, matching what GoReleaser
+#   itself produces.
 #
 # NO CODESIGN, NO NOTARIZATION, AND THAT IS CORRECT
 #

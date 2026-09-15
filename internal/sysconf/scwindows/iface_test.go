@@ -213,14 +213,42 @@ func TestFindAdapterMatchesFriendlyName(t *testing.T) {
 	}
 }
 
-// rawAny reinterprets sa as the *syscall.RawSockaddrAny type
-// windows.SocketAddress.Sockaddr is declared as, the same conversion
-// unicastAddrsOf performs in the opposite direction. sa must outlive the
-// returned pointer's use, which every caller below satisfies by keeping sa as
-// a local for the duration of the test.
+// rawAny presents sa as the *syscall.RawSockaddrAny type
+// windows.SocketAddress.Sockaddr is declared as, which is the conversion
+// unicastAddrsOf performs in the opposite direction.
+//
+// It COPIES sa into a full-size RawSockaddrAny rather than casting a pointer
+// to sa, and that is not a style preference. RawSockaddrInet is 28 bytes and
+// RawSockaddrAny is 112; taking the address of a 28-byte object and calling it
+// a pointer to a 112-byte type yields a pointer whose type claims 84 bytes
+// that were never allocated for it. `go test -race` enables checkptr, which
+// catches exactly that — "converted pointer straddles multiple allocations" —
+// and the old cast killed this package's entire test binary the first time the
+// Windows CI job ran with -race, in TestDNSServerAddrsOfFamiliesDropsADHCPFamily.
+// It was latent rather than harmless, and NONDETERMINISTICALLY latent: whether
+// the 112-byte window actually crosses into another object depends on where
+// the allocator happened to put the 28-byte one, which is why every rawAny
+// caller had been passing for as long as nothing instrumented the conversion.
+//
+// Production code goes the safe direction. GetAdaptersAddresses hands back a
+// Sockaddr that really is backed by a buffer of the full size, and
+// unicastAddrsOf narrows it. A hand-built fixture has no such buffer, so it
+// has to allocate the full size itself — which is all this does.
+//
+// Copying also removes the old caveat that sa had to outlive the returned
+// pointer: the returned pointer no longer aliases sa at all. No caller mutates
+// sa after the call, so no caller can tell the difference.
 func rawAny(sa *windows.RawSockaddrInet) *syscall.RawSockaddrAny {
-	return (*syscall.RawSockaddrAny)(unsafe.Pointer(sa))
+	var out syscall.RawSockaddrAny
+	*(*windows.RawSockaddrInet)(unsafe.Pointer(&out)) = *sa
+	return &out
 }
+
+// The premise of the copy above, checked by the compiler rather than trusted:
+// if RawSockaddrInet ever grew past RawSockaddrAny, the write in rawAny would
+// be the same out-of-bounds store the cast used to be, and this constant would
+// go negative and fail to convert to uint.
+const _ = uint(unsafe.Sizeof(syscall.RawSockaddrAny{}) - unsafe.Sizeof(windows.RawSockaddrInet{}))
 
 // TestUnicastAddrsOfDecodesTheList builds the same linked-list shape
 // GetAdaptersAddresses hands back — IpAdapterAddresses.FirstUnicastAddress, a

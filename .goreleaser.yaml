@@ -1,8 +1,8 @@
 # GoReleaser configuration for dpb.
 #
-# It builds darwin/arm64 (macOS only), and windows/arm64 + windows/amd64,
-# publishes a GitHub release with checksums, and updates the Homebrew formula
-# in mumudevx/homebrew-tap (darwin archives only).
+# It builds darwin/arm64 + darwin/amd64 (macOS only), and windows/arm64 +
+# windows/amd64, publishes a GitHub release with checksums, and updates the
+# Homebrew formula in mumudevx/homebrew-tap (darwin archives only).
 #
 # Three things are deliberately absent.
 #
@@ -22,9 +22,14 @@
 #      carries only com.apple.provenance, and `xattr -p com.apple.quarantine`
 #      answers "No such xattr".
 #
-#   3. No universal binary. Two per-architecture archives are what the formula's
-#      on_arm / on_intel blocks want, and lipo would only add a step whose one
-#      job — preserving the signature — is not needed given (1).
+#   3. No universal binary. darwin/arm64 and darwin/amd64 ship as two separate
+#      archives, not one lipo-combined fat binary — that would need
+#      goreleaser's `universal_binaries:` block, which this file does not
+#      declare. Two single-arch archives is exactly what Formula/dpb.rb's
+#      on_arm/on_intel split (and the tap-generated formula's
+#      Hardware::CPU.arm? branch) already expect: brew fetches only the
+#      archive matching the running machine, so nobody notices the binary
+#      isn't fat.
 #
 # See docs/DOSSIER.md for the sources behind (1) and (2).
 
@@ -51,11 +56,17 @@ builds:
     goarch:
       - arm64
       - amd64
-    # darwin builds are arm64-only on purpose: this project ships for Apple
-    # Silicon only. Windows gets both arm64 (preview) and amd64. The ignore rule
-    # below preserves the darwin/arm64-only policy and is not an oversight.
-    ignore:
-      - { goos: darwin, goarch: amd64 }
+    # darwin used to build arm64 only, with amd64 excluded by an `ignore` rule
+    # here. That policy shipped a real crash on Intel: goreleaser's generated
+    # tap formula has no way to say "unsupported on this architecture" for a
+    # single-arch macOS build. It wraps the lone url in a bare
+    # `if Hardware::CPU.arm?` with no else, so closing that branch on a
+    # genuine Intel host doesn't decline the install — it fails with "formula
+    # requires at least a URL" and a Ruby backtrace, verified with a local tap
+    # and `brew tap-new`. No field under `brews:` (url_template, custom_block,
+    # dependencies) reaches into that template to add a fallback. Building
+    # darwin/amd64 gives the generated formula a real URL for both branches,
+    # so an Intel Mac gets an install instead of a crash.
     flags:
       - -trimpath
     # These are the variables internal/buildinfo reads; `dpb version` falls
@@ -114,6 +125,18 @@ checksum:
 # quarantined, and the September 2026 cask delisting applies to homebrew-cask
 # only. So this stays a formula until `brews` is actually removed; pin
 # goreleaser to the v2 line (the release workflow does).
+#
+# Migrating was checked, not assumed: GoReleaser's own homebrew_casks docs
+# (goreleaser.com/customization/homebrew_casks) put the cask manifest in
+# Casks/, not Formula/ — a tap layout change — and their worked example
+# removes the quarantine bit with a post-install `xattr` hook, which that same
+# page calls out as bypassing macOS security. That hook is the quarantine
+# problem above, not a fix for it. There is also no documented automatic
+# upgrade from an existing formula install to a cask (Homebrew tracks the two
+# as unrelated install types); short of hand-writing a tap_migrations.json, a
+# user already on the formula would have to `brew uninstall dpb` and
+# `brew install --cask dpb` themselves. None of that is worth trading away for
+# silencing one deprecation warning on an unsigned, unnotarized binary.
 brews:
   - name: dpb
     ids:
@@ -140,8 +163,17 @@ brews:
     # release workflow sets this to false once it has seen the token.
     skip_upload: '{{ if index .Env "GORELEASER_SKIP_BREW" }}{{ .Env.GORELEASER_SKIP_BREW }}{{ else }}true{{ end }}'
     directory: Formula
-    homepage: "https://github.com/mumudevx/dpb"
-    description: "macOS DPI bypass: connects plain first, desyncs only on evidence"
+    # The GitHub REPOSITORY slug, dpi-bypass-mac, not the Go module path
+    # github.com/mumudevx/dpb — the module was never renamed to match the repo.
+    # This field is copied verbatim into the GENERATED tap formula, so the
+    # module path here meant `brew home dpb` opened a 404 and `brew audit`
+    # flagged the formula. Not hypothetical: the same confusion already shipped
+    # a `brew install` that 404'd. Formula/dpb.rb and everything under
+    # packaging/ already use the slug; this line was the last one that did not.
+    homepage: "https://github.com/mumudevx/dpi-bypass-mac"
+    # Windows and macOS, matching packaging/scoop/dpb.json and the winget
+    # locale manifest. It was macOS-only when this file was written.
+    description: "DPI bypass for Windows and macOS: connects plain first, desyncs only on evidence"
     license: "MIT"
     commit_author:
       name: goreleaser

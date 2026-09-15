@@ -18,12 +18,18 @@ const (
 
 // DepthReps is the rep count a depth implies when the caller did not set one.
 //
-// full is 3, the rep count MEASUREMENTS.md used throughout. quick is 2, which
-// is enough to eliminate but not to rank confidently — Confidence downgrades a
-// run below three reps for exactly that reason. paranoid is 5, and that is the
-// only thing paranoid changes: the sweep set is identical to full, because
-// §3.4 forbids inventing chunk sizes and there is no larger measured set to
-// reach for.
+// full is 3, the rep count of MEASUREMENTS.md's two largest sweeps (§3's 129
+// trials and §3.2's 66) — not of every sweep in it. §3.4's chunk curve ran at 5
+// and 3, and §5.1's two-axis matrix at 2, so a session that has to match one
+// section's sampling passes --reps explicitly instead of trusting a depth to
+// mean what that section did.
+//
+// quick is 2, which is enough to eliminate but not to rank confidently —
+// Confidence downgrades a run below three reps for exactly that reason. It is
+// also not a way to ask for §5.1's 2 reps, because it narrows the swept set as
+// well (sweepSpecs below). paranoid is 5, and that is the only thing paranoid
+// changes: the sweep set is identical to full, because §3.4 forbids inventing
+// chunk sizes and there is no larger measured set to reach for.
 func DepthReps(depth string) int {
 	switch normDepth(depth) {
 	case DepthQuick:

@@ -119,3 +119,68 @@ func isElevated() (bool, error) {
 	defer token.Close()
 	return token.IsElevated(), nil
 }
+
+// restrictToOwner replaces path's DACL with a single entry: this process's own
+// account, full control. It is the Windows answer to chmod(2) 0600, and it is a
+// different mechanism rather than a different spelling — see RestrictToOwner
+// for the measurement that forced it and for the two limits it cannot lift.
+//
+// Three choices are deliberate.
+//
+// The SID comes from this process's own token (GetTokenUser), not from
+// Layout.User or the environment. The account dpb is running as is the only one
+// that is certainly correct: an elevated dpb on the enterprise-default machine
+// is running as the ADMIN account rather than the signed-in user — the same
+// split userhive.go in internal/sysconf/scwindows is built around — and a file
+// granted to the wrong SID is one this process itself could not reopen.
+//
+// PROTECTED_DACL_SECURITY_INFORMATION is the half that does the work. Without
+// it the ACE below is MERGED with what the file inherits from its parent
+// directory, and %LOCALAPPDATA% inherits entries for SYSTEM and for the local
+// Administrators group. Setting a one-entry DACL unprotected would therefore
+// leave the file exactly as readable as before and still return nil, which is
+// the same failure shape as the os.Chmod it replaces.
+//
+// Only the DACL is set: not the owner, not the group, not the SACL. Taking
+// ownership needs a privilege an ordinary run does not hold, and the owner is
+// already this account for a file this process just created. Passing nil for
+// the rest is how SetNamedSecurityInfo is told to leave them alone.
+//
+// Administrators can still read the file by taking ownership, and that is not a
+// gap this or any DACL can close — it is the same on Unix for root. "Owner
+// only" here means what 0600 means: no OTHER user account.
+func restrictToOwner(path string) error {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return fmt.Errorf("paths: open this process's token: %w", err)
+	}
+	defer token.Close()
+	u, err := token.GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("paths: read this process's account: %w", err)
+	}
+
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.GRANT_ACCESS,
+		// A file inherits nothing to anybody; NO_INHERITANCE says so rather
+		// than leaving the flags at whatever zero happens to mean.
+		Inheritance: windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(u.User.Sid),
+		},
+	}}, nil)
+	if err != nil {
+		return fmt.Errorf("paths: build the owner-only ACL for %s: %w", path, err)
+	}
+
+	err = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil)
+	if err != nil {
+		return fmt.Errorf("paths: restrict %s to its owner: %w", path, err)
+	}
+	return nil
+}

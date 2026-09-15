@@ -77,8 +77,19 @@ func (c *cli) execCtx(t *testing.T, ctx context.Context, args ...string) result 
 		layout: &layout,
 		runner: c.mac,
 		rib:    c.mac,
+		// sys is nil on darwin, where the injected Runner IS the substitute
+		// for the whole platform, and a fake Port over the same state on
+		// Windows, where scwindows reads no Runner and would otherwise send
+		// every command to the real registry. See harnessport_windows_test.go.
+		sys:    harnessPort(c.mac),
 		facts:  &netstate.Facts{Uplink: "en0", Services: []string{"Wi-Fi"}},
 		getenv: func(string) string { return "" },
+		// machineChecks describes the machine THIS TEST set up rather than the
+		// one the suite happens to run on. Nil on darwin, where
+		// platformChecks() is empty by design; on Windows it stands in for the
+		// two probes that read the runner's own driver inventory and token.
+		// See harnessmachine_windows_test.go.
+		machineChecks: harnessMachineChecks(),
 	}
 	root := newRoot(g)
 	root.SetArgs(args)

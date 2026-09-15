@@ -1,0 +1,55 @@
+# Winget installer manifest for dpb.
+#
+# dpb ships no MSI/EXE installer, only a zip containing dpb.exe, README.md and
+# LICENSE (confirmed by unzipping goreleaser's own snapshot output -- see the
+# task report). Winget's InstallerType for that shape is `zip` with a
+# NestedInstallerType of `portable`: winget extracts the archive and symlinks
+# NestedInstallerFiles' RelativeFilePath into its own link directory under
+# PortableCommandAlias, which is how `dpb` ends up on PATH after
+# `winget install mumudevx.dpb` without dpb needing an installer of its own.
+#
+# InstallerUrl uses the GitHub REPOSITORY slug, dpi-bypass-mac, not the Go
+# module path github.com/mumudevx/dpb -- the module was never renamed to
+# match the repo. Confirmed against .goreleaser.yaml's release.github block
+# (owner: mumudevx, name: dpi-bypass-mac) rather than assumed; the same
+# distinction already caused one real `brew install` 404 in this project.
+# Filenames (dpb_<version>_windows_<arch>.zip) are exactly what
+# `goreleaser release --snapshot --clean` produced -- see the task report for
+# the run this was read from, not assumed.
+#
+# Both InstallerSha256 values below are 64-zero placeholders, not real
+# checksums: no windows_amd64.zip / windows_arm64.zip has actually been
+# published under the v0.1.0 tag yet (dpb.exe.zip's checksum belongs to
+# whatever build eventually ships as that tag's real release asset). Before
+# any of this is turned into a winget-pkgs PR, both must be replaced with the
+# sha256 lines from that release's checksums.txt, same source Formula/dpb.rb's
+# header points at for the macOS side.
+#
+# MinimumOSVersion 10.0.22000.0 is Windows 11's first build number. README.md
+# is explicit that Windows 10 "will probably work" but is untested and not
+# claimed -- this manifest does not advertise support the project does not
+# make.
+#
+# dpb.exe is unsigned. Winget does not suppress SmartScreen for an unsigned
+# binary any more than a direct download or scoop install does; see
+# README.md's Windows section for what the warning looks like and how to
+# proceed. Nothing in this file claims otherwise.
+PackageIdentifier: mumudevx.dpb
+PackageVersion: 0.1.0
+Platform:
+  - Windows.Desktop
+MinimumOSVersion: 10.0.22000.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: dpb.exe
+    PortableCommandAlias: dpb
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/dpb_0.1.0_windows_amd64.zip
+    InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  - Architecture: arm64
+    InstallerUrl: https://github.com/mumudevx/dpi-bypass-mac/releases/download/v0.1.0/dpb_0.1.0_windows_arm64.zip
+    InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
+ManifestType: installer
+ManifestVersion: 1.28.0

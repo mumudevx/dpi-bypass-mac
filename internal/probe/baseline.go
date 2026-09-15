@@ -177,6 +177,12 @@ func (r *Runner) benignFor(t Target) (Target, bool) {
 // resetLatencies is how long the censor took to answer, for the trials where it
 // answered with a reset. MEASUREMENTS.md §6 measures ~22 ms on this line, which
 // is what tells an injected RST from an origin that is simply down.
+//
+// The "> 0" is a test for "this trial was timed at all" — a reset that happened
+// before the dial carries no reading. It is NOT a test for "the duration is
+// interesting": 22 ms is 1.4 ticks of the 15.6 ms windows/amd64 clock, so a
+// sub-tick reset is exactly the sample this median must not lose. RunTrial puts
+// every clock reading through flow.Measured to keep such a sample positive.
 func resetLatencies(ts []Trial) []time.Duration {
 	var out []time.Duration
 	for _, t := range ts {
